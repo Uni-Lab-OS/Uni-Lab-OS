@@ -16,7 +16,8 @@ from unilabos.package_manager.workspace_runtime.activation import (
 from unilabos.workflow import composition
 from unilabos.workflow.composition import compose_local_workflow_template_runtime
 from unilabos.workflow.models import CandidateCompilation
-from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.service import WorkflowConflict, WorkflowError, WorkflowService
+from unilabos.workflow.source_coordinates import source_ranges_fit
 from unilabos.workflow.store import WorkflowStore
 
 from .test_c1_r2_static_expansion_contract import (
@@ -199,12 +200,12 @@ def test_catalog_generation_change_recompiles_unchanged_workspace_source(
 def test_workspace_activation_isolates_invalid_candidate_and_keeps_progressing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """单个候选应用失败必须成为该工作流诊断，不能阻断同包其他来源。
 
     参数：``tmp_path`` 隔离真实来源和 SQLite；``monkeypatch`` 只让父工作流应用
-    稳定失败；``caplog`` 验证启动日志携带可定位身份。返回：无；子工作流仍被
+    稳定失败；``capsys`` 验证启动日志携带可定位身份。返回：无；子工作流仍被
     应用，父候选被撤销并保存原错误码，日志包含父 UUID。异常：若固定点把单项
     业务错误传播到组合根，测试保持 RED。
     """
@@ -224,13 +225,17 @@ def test_workspace_activation_isolates_invalid_candidate_and_keeps_progressing(
         workflow_uuid: str,
         *,
         candidate_hash: str,
+        preserve_author_source: bool = False,
     ) -> dict[str, Any]:
         if workflow_uuid == PARENT_WORKFLOW_UUID:
             raise WorkflowError("candidate_invalid")
-        return original_apply(workflow_uuid, candidate_hash=candidate_hash)
+        return original_apply(
+            workflow_uuid,
+            candidate_hash=candidate_hash,
+            preserve_author_source=preserve_author_source,
+        )
 
     monkeypatch.setattr(service, "apply_authoring", fail_parent_candidate)
-    caplog.set_level("WARNING", logger="unilabos.workflow.service")
 
     service.activate_registered_sources_to_fixed_point()
 
@@ -241,24 +246,114 @@ def test_workspace_activation_isolates_invalid_candidate_and_keeps_progressing(
         "candidate_invalid"
     }
     assert child["state"] == "applied"
-    assert PARENT_WORKFLOW_UUID in caplog.text
+    assert PARENT_WORKFLOW_UUID in capsys.readouterr().err
+
+
+def test_workspace_recovery_propagates_catalog_infrastructure_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动恢复不得把目录基础设施失败吞成工作区 ready。
+
+    参数：``tmp_path`` 隔离来源与 SQLite；``monkeypatch`` 注入目录不可用错误。
+    返回：无；断言错误传播到组合根。异常：若恢复继续捕获 ``RuntimeError``，
+    本测试会因没有抛错而保持 RED。
+    """
+
+    package_root = tmp_path / "workspace"
+    _write_parent_before_child_package(package_root)
+    service = composition.compose_workflow_runtime(
+        tmp_path / "runtime",
+        compiler=MutableCatalogCompiler(),
+        editable_package_roots=(package_root,),
+        start_source_monitor=False,
+    )
+
+    def fail_reconcile(
+        workflow_uuid: str,
+        *,
+        force_compile: bool = False,
+        preserve_author_source: bool = False,
+    ) -> dict[str, Any]:
+        del workflow_uuid, force_compile, preserve_author_source
+        raise WorkflowError("template_catalog_unavailable")
+
+    monkeypatch.setattr(service, "reconcile_registered_source", fail_reconcile)
+
+    with pytest.raises(WorkflowError) as captured:
+        service.recover_registered_sources(preserve_author_source=True)
+    assert captured.value.code == "template_catalog_unavailable"
+
+
+def test_workspace_activation_propagates_authority_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """固定点自动应用不得把目录/CAS 权威冲突降级为普通草稿诊断。
+
+    参数：``tmp_path`` 隔离来源与 SQLite；``monkeypatch`` 在应用点注入目录代际
+    冲突。返回：无；断言冲突传播，阻止组合根发布 ready。异常：若自动激活仍
+    捕获全部 ``WorkflowError``，本测试保持 RED。
+    """
+
+    package_root = tmp_path / "workspace"
+    _write_parent_before_child_package(package_root)
+    service = composition.compose_workflow_runtime(
+        tmp_path / "runtime",
+        compiler=MutableCatalogCompiler(),
+        editable_package_roots=(package_root,),
+        start_source_monitor=False,
+    )
+
+    def fail_apply(
+        workflow_uuid: str,
+        *,
+        candidate_hash: str,
+        preserve_author_source: bool = False,
+    ) -> dict[str, Any]:
+        del workflow_uuid, candidate_hash, preserve_author_source
+        raise WorkflowConflict("template_catalog_conflict")
+
+    monkeypatch.setattr(service, "apply_authoring", fail_apply)
+
+    with pytest.raises(WorkflowConflict) as captured:
+        service.activate_registered_sources_to_fixed_point()
+    assert captured.value.code == "template_catalog_conflict"
 
 
 def test_workspace_activation_refreshes_parent_after_child_application(
     tmp_path: Path,
 ) -> None:
-    """工作区自动应用子工作流后必须重编译并应用父工作流。
+    """工作区自动应用子工作流后必须重编译并应用父工作流且保留源码。
 
     参数：``tmp_path`` 隔离全新工作流、库存 SQLite 与真实作者源码。
     返回：无；通过真实 ``apply_authoring``、编译器重建器和模板投影自动发布
-    子、父合同。异常：若固定点激活仍需手工 PUT 父源码，父创作投影不会到达
-    ``applied`` 并使测试失败。
+    子、父合同，并保持作者源码字节不变。异常：若固定点激活仍需手工 PUT
+    父源码，或把扫描误当成作者编辑而规范化源码，测试保持 RED。
     """
 
     # ``selected_root`` 是生产组合根明确授权的可编辑包（Editable Package）。
     selected_root = tmp_path / "editable"
     selected_root.mkdir()
     _write_published_package(selected_root)
+    child_source_path = (
+        selected_root / PUBLISHED_PACKAGE_ID / "workflows" / "child.py"
+    )
+    parent_source_path = (
+        selected_root / PUBLISHED_PACKAGE_ID / "workflows" / "parent.py"
+    )
+    parent_source_path.write_text(
+        parent_source_path.read_text(encoding="utf-8").replace(
+            "    # unilab:node_uuid=",
+            "    # [配样]: 保留作者的中文节点说明\n"
+            "    # unilab:node_uuid=",
+        ),
+        encoding="utf-8",
+    )
+    source_bytes_before_activation = {
+        child_source_path: child_source_path.read_bytes(),
+        parent_source_path: parent_source_path.read_bytes(),
+    }
     # ``pyproject.toml`` 与包初始化文件让测试走产品工作区统一包目录编译路径，
     # 避免遗留可编辑根缺少模块/符号目录身份而退化为未登记语义。
     selected_root.joinpath("pyproject.toml").write_text(
@@ -291,6 +386,19 @@ def test_workspace_activation_refreshes_parent_after_child_application(
         assert refreshed_parent["state"] == "applied"
         assert refreshed_parent["candidate"] is None
         assert refreshed_parent["draft"]["diagnostics"] == []
+        applied_source = refreshed_parent["applied_source"]
+        assert applied_source is not None
+        assert applied_source["python_source"] == parent_source_path.read_text(
+            encoding="utf-8"
+        )
+        assert applied_source["source_map"]
+        assert source_ranges_fit(
+            applied_source["python_source"],
+            applied_source["source_map"],
+        )
+        assert {
+            path: path.read_bytes() for path in source_bytes_before_activation
+        } == source_bytes_before_activation
     finally:
         composition.reset_workflow_service_for_test()
         inventory_store.close()
@@ -342,6 +450,14 @@ def test_workspace_activation_applies_composites_child_first_to_fixed_point(
         assert parent["state"] == "applied"
         assert parent["candidate"] is None
         assert parent["draft"]["diagnostics"] == []
+        applied_workflow_uuids = [
+            item["data"]["workflow_uuid"]
+            for item in service.list_events(after_sequence=0)["items"]
+            if item["data"].get("cause") == "applied"
+        ]
+        assert applied_workflow_uuids.index(PUBLISHED_CHILD_WORKFLOW_UUID) < (
+            applied_workflow_uuids.index(PUBLISHED_PARENT_WORKFLOW_UUID)
+        )
     finally:
         composition.reset_workflow_service_for_test()
         inventory_store.close()

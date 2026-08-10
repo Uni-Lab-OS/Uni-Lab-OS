@@ -20,10 +20,11 @@ from unilabos.workflow.authoring_material import (
     MaterialSourceDeclaration,
     parse_material_source_declaration,
 )
-from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.models import CandidateSourceMapEntry, validate_uuid
 from unilabos.workflow.source_coordinates import (
     codepoint_offset_to_utf16_column,
     source_lines,
+    utf16_length,
     utf8_offset_to_utf16_column,
 )
 
@@ -354,6 +355,65 @@ def diagnostic_source_range(
         }
     except (IndexError, ValueError):
         return None
+
+
+def author_source_map(
+    *,
+    program: WorkflowProgram,
+    python_source: str,
+) -> list[dict[str, Any]]:
+    """为原始作者源码建立节点到 UTF-16 范围的稳定映射。
+
+    参数说明：``program`` 必须由同一 ``python_source`` 静态解析产生；返回按
+    作者源码顺序排列的节点映射，范围包含可选 ``[title]: description`` 注释、
+    UUID 锚点与动作声明。分组只映射 ``with`` 头，避免范围覆盖其子节点。
+    异常：程序与源码不一致或 AST 坐标越界时抛出 ``ValueError``。
+    """
+
+    lines = source_lines(python_source)
+    declarations = {
+        declaration.node_uuid: declaration
+        for declaration in (*program.actions, *program.groups)
+    }
+    if set(program.source_order) != set(declarations):
+        raise ValueError("作者程序的节点顺序与声明不一致")
+    source_map: list[dict[str, Any]] = []
+    for node_uuid in program.source_order:
+        declaration = declarations[node_uuid]
+        source_node = declaration.source_node
+        start_line = source_node.lineno - (
+            2 if declaration.title is not None else 1
+        )
+        if start_line < 1:
+            raise ValueError("节点源码范围缺少 UUID 锚点")
+        start_column = utf8_offset_to_utf16_column(
+            lines[start_line - 1],
+            source_node.col_offset,
+        )
+        if isinstance(source_node, ast.With):
+            # ``ast.With.end_lineno`` 覆盖整个分组体；映射到头行即可避免与子节点
+            # 范围重叠，同时仍让画布点击稳定跳转到该分组声明。
+            end_line = source_node.lineno
+            end_column = utf16_length(lines[end_line - 1]) + 1
+        else:
+            end_line = source_node.end_lineno
+            end_column_offset = source_node.end_col_offset
+            if type(end_line) is not int or type(end_column_offset) is not int:
+                raise ValueError("节点源码范围缺少结束位置")
+            end_column = utf8_offset_to_utf16_column(
+                lines[end_line - 1],
+                end_column_offset,
+            )
+        source_map.append(
+            CandidateSourceMapEntry(
+                workflow_node_uuid=node_uuid,
+                start_line=start_line,
+                start_column=start_column,
+                end_line=end_line,
+                end_column=end_column,
+            ).model_dump()
+        )
+    return source_map
 
 
 def _module_imports(
@@ -1323,6 +1383,7 @@ __all__ = [
     "GroupDeclaration",
     "ValueBinding",
     "WorkflowProgram",
+    "author_source_map",
     "diagnostic_source_range",
     "parse_authoring_source",
 ]

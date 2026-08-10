@@ -125,6 +125,9 @@ _ERRORS = {
     "internal_error": (500, "本地工作流服务出现错误，请重试或查看日志"),
 }
 _HASH_TOKEN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_ISOLATED_WORKSPACE_ACTIVATION_ERRORS = frozenset(
+    {"candidate_invalid", "draft_invalid"}
+)
 _WORKFLOW_READ_FIELDS = {
     "uuid",
     "create_time",
@@ -1017,22 +1020,25 @@ class WorkflowService:
             if registration["workflow_uuid"] in active_workflow_uuids
         ]
 
-    def recover_registered_sources(self) -> None:
+    def recover_registered_sources(
+        self,
+        *,
+        preserve_author_source: bool = False,
+    ) -> None:
         """启动时按当前模板目录逐一恢复全部授权源码。
 
-        参数：无。返回：无；只读取本轮活动注册并强制替换旧进程目录产生的候选
-        或诊断，不把普通子源码编译误当成子合同发布。异常：单项文件或运行时
-        瞬态故障保持隔离；其他稳定工作流错误原样传播。
+        参数：``preserve_author_source`` 只供工作区自动激活使用，使成功候选绑定
+        原始作者源码和对应映射。返回：无；只读取本轮活动注册并强制替换旧进程
+        目录产生的候选或诊断，不把普通子源码编译误当成子合同发布。异常：文件、
+        目录或持久化失败全部传播到组合根，禁止启动在不完整恢复后误报 ready。
         """
 
         for registration in self.list_registered_sources():
-            try:
-                self.reconcile_registered_source(
-                    registration["workflow_uuid"],
-                    force_compile=True,
-                )
-            except (OSError, RuntimeError):
-                continue
+            self.reconcile_registered_source(
+                registration["workflow_uuid"],
+                force_compile=True,
+                preserve_author_source=preserve_author_source,
+            )
 
     def activate_registered_sources_to_fixed_point(self) -> None:
         """恢复并应用工作区源码，直到组合工作流依赖达到固定点。
@@ -1045,7 +1051,7 @@ class WorkflowService:
         仍继续推进；未知基础设施异常原样传播，禁止静默发布损坏的工作区。
         """
 
-        self.recover_registered_sources()
+        self.recover_registered_sources(preserve_author_source=True)
         registrations = self.list_registered_sources()
         while True:
             applied_in_pass = False
@@ -1062,8 +1068,11 @@ class WorkflowService:
                     self.apply_authoring(
                         workflow_uuid,
                         candidate_hash=candidate_hash,
+                        preserve_author_source=True,
                     )
                 except WorkflowError as error:
+                    if error.code not in _ISOLATED_WORKSPACE_ACTIVATION_ERRORS:
+                        raise
                     self._record_workspace_activation_failure(
                         workflow_uuid,
                         error=error,
@@ -1277,12 +1286,14 @@ class WorkflowService:
         workflow_uuid: str,
         *,
         force_compile: bool = False,
+        preserve_author_source: bool = False,
     ) -> Dict[str, Any]:
         """协调一个已注册工作流源码及其可重建创作派生状态。
 
         参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；
         ``force_compile`` 用于启动恢复或模板目录换代后强制重编译目录相关诊断和
-        候选版本（Candidate）。返回：最新创作聚合。异常：来源、编译或持久化
+        候选版本（Candidate）；``preserve_author_source`` 让自动激活候选保留
+        原始作者源码与相应映射。返回：最新创作聚合。异常：来源、编译或持久化
         失败时传播稳定工作流错误；本函数不发布模板目录。
         """
 
@@ -1399,6 +1410,13 @@ class WorkflowService:
                     registration=registration,
                     python_source=source["python_source"],
                 )
+                if preserve_author_source:
+                    compilation = self._preserve_author_source_compilation(
+                        compilation=compilation,
+                        workflow=workflow,
+                        graph=applied_graph,
+                        python_source=source["python_source"],
+                    )
                 diagnostics = compilation.diagnostics
                 candidate = self._issue_candidate(
                     workflow_revision=workflow["revision"],
@@ -1497,14 +1515,17 @@ class WorkflowService:
         workflow_uuid: str,
         *,
         candidate_hash: str,
+        preserve_author_source: bool = False,
     ) -> Dict[str, Any]:
         """按服务端候选哈希线性化应用可信工作流创作结果。
 
         参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；``candidate_hash``
         是服务端持久并签发的候选哈希（Candidate Hash），客户端不得重述草稿、
-        工作流修订或候选包。返回：应用结果与最新创作聚合。异常：候选、源码
-        权威（Source Authority）、工作流修订（Workflow Revision）或目录指纹已
-        变化时抛出稳定 ``WorkflowConflict``；候选无效时抛出 ``WorkflowError``。
+        工作流修订或候选包；``preserve_author_source`` 仅供启动固定点激活，
+        禁止把自动扫描变成未确认的规范化编辑。返回：应用结果与最新创作聚合。
+        异常：候选、源码权威（Source Authority）、工作流修订（Workflow
+        Revision）或目录指纹已变化时抛出稳定 ``WorkflowConflict``；候选无效时
+        抛出 ``WorkflowError``。
         """
 
         self._validate_hash(candidate_hash, nullable=False)
@@ -1557,6 +1578,13 @@ class WorkflowService:
                 registration=registration,
                 python_source=source["python_source"],
             )
+            if preserve_author_source:
+                compilation = self._preserve_author_source_compilation(
+                    compilation=compilation,
+                    workflow=workflow,
+                    graph=applied_graph,
+                    python_source=source["python_source"],
+                )
             if not self._normalize_candidate_diagnostics(
                 compilation,
                 python_source=source["python_source"],
@@ -1693,13 +1721,18 @@ class WorkflowService:
                 latest = self._read_source(registration)
                 if latest is None or latest["draft_hash"] != actual_hash:
                     raise WorkflowError("draft_hash_conflict")
-                self._atomic_write(
-                    registration,
-                    normalized_bytes,
-                    expected_hash=actual_hash,
-                )
-                written = self._read_source(registration)
-                assert written is not None
+                if normalized_hash == actual_hash:
+                    # 自动激活以及已经规范的交互 Apply 都不替换相同作者字节，
+                    # 避免制造虚假的 IDE 保存事件和文件世代。
+                    written = latest
+                else:
+                    self._atomic_write(
+                        registration,
+                        normalized_bytes,
+                        expected_hash=actual_hash,
+                    )
+                    written = self._read_source(registration)
+                    assert written is not None
                 response_source = written
                 if written["draft_hash"] != normalized_hash:
                     raise WorkflowConflict("draft_hash_conflict")
@@ -1802,6 +1835,7 @@ class WorkflowService:
             reconcile_source=partial(
                 self.reconcile_registered_source,
                 force_compile=True,
+                preserve_author_source=preserve_author_source,
             ),
             mutated_workflow_uuid=workflow_uuid,
             warnings=warnings,
@@ -1977,6 +2011,49 @@ class WorkflowService:
             raise
         except Exception:
             raise WorkflowError("internal_error") from None
+
+    def _preserve_author_source_compilation(
+        self,
+        *,
+        compilation: CandidateCompilation,
+        workflow: Dict[str, Any],
+        graph: Dict[str, Any],
+        python_source: str,
+    ) -> CandidateCompilation:
+        """让自动激活候选使用原始作者源码及其精确源码映射。
+
+        参数：``compilation`` 是当前目录刚生成的结果；``workflow``、``graph``
+        和 ``python_source`` 是同一编译事务的权威输入。返回可按普通候选合同
+        签发的源码保留结果。异常：编译器不支持可信源码保留或投影失败时抛
+        ``candidate_invalid``，固定点激活会隔离该来源且绝不回写规范化文本。
+        """
+
+        if (
+            not compilation.valid
+            or compilation.normalized_python_source == python_source
+        ):
+            return compilation
+        if self.compiler is None:
+            raise WorkflowError("template_catalog_unavailable")
+        preserve = getattr(self.compiler, "preserve_author_source", None)
+        if not callable(preserve):
+            raise WorkflowError("candidate_invalid")
+        try:
+            result = preserve(
+                compilation=compilation,
+                workflow_uuid=workflow["uuid"],
+                workflow_revision=workflow["revision"],
+                python_source=python_source,
+                applied_graph=graph,
+            )
+            preserved = CandidateCompilation.model_validate(result)
+        except WorkflowError:
+            raise
+        except Exception:
+            raise WorkflowError("candidate_invalid") from None
+        if preserved.normalized_python_source != python_source:
+            raise WorkflowError("candidate_invalid")
+        return preserved
 
     def _catalog_fingerprint(self) -> str:
         if self.compiler is None:
