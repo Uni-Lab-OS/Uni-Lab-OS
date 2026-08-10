@@ -50,10 +50,22 @@ def install_host_shutdown_handlers(
         except BaseException as error:  # noqa: BLE001 - 必须继续关闭设备与网络
             failures.append(error)
         try:
+            from unilabos.workflow.composition import shutdown_workflow_runtime
+
+            shutdown_workflow_runtime()
+        except BaseException as error:  # noqa: BLE001 - 必须继续关闭 Edge 存储
+            failures.append(error)
+        try:
             from unilabos.app.scheduler.integration import shutdown_edge_services
 
             shutdown_edge_services()
         except BaseException as error:  # noqa: BLE001 - 正常退出仍需完成其余报告
+            failures.append(error)
+        try:
+            from unilabos.app.runtime_storage import close_runtime_storage_session
+
+            close_runtime_storage_session()
+        except BaseException as error:  # noqa: BLE001 - 退出前仍需汇总全部错误
             failures.append(error)
         for error in failures:
             logger.error(

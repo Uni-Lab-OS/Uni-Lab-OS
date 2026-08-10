@@ -260,10 +260,12 @@ def parse_args():
         "--working_dir",
         type=str,
         default=None,
-        help=(
-            "可选的可写运行目录；提供 --workspace 时默认使用 "
-            "<workspace>/.unilabos。"
-        ),
+        help="可选的可写运行目录；提供 --workspace 时默认使用 <workspace>/.unilabos。",
+    )
+    parser.add_argument(
+        "--preserve_runtime_databases",
+        action="store_true",
+        help="不创建临时会话目录，沿用工作目录内的三类 SQLite 数据库。",
     )
     parser.add_argument(
         "--backend",
@@ -818,10 +820,7 @@ def main():
     # 新启动使用隐藏的 ``.unilabos``；已存在的 ``unilabos_data`` 只作为遗留兼容，
     # 显式参数或工作区（Workspace）派生路径始终精确优先。
     raw_working_dir = args_dict.get("working_dir")
-    from unilabos.app.runtime_storage import (
-        resolve_runtime_storage_paths,
-        resolve_working_directory,
-    )
+    from unilabos.app.runtime_storage import resolve_working_directory
 
     working_dir_resolution = resolve_working_directory(
         requested=raw_working_dir,
@@ -833,13 +832,6 @@ def main():
             f"检测到旧运行目录并继续兼容使用: {working_dir}；新默认目录为 .unilabos",
             "warning",
         )
-
-    # 唯一运行目录同时确定本地库存、设备状态和工作流历史存储，不再暴露三套
-    # 可互相分叉的数据库命令行参数。
-    resolve_runtime_storage_paths(
-        args_dict,
-        working_dir=working_dir,
-    )
 
     # === 解析 config_path ===
     if config_path and not os.path.exists(config_path):
@@ -1335,6 +1327,10 @@ def main():
     if should_attach_legacy_http_bridge(args_dict):
         args_dict["bridges"].append(http_client)
     if BasicConfig.is_host_mode:
+        # 所有输入与设备图均验证后、任何 Store 打开前，才创建本代私有数据库目录。
+        from unilabos.app.runtime_storage import prepare_runtime_storage_session
+
+        prepare_runtime_storage_session(args_dict, working_dir=working_dir)
         comm_client = None
         communication_clients = []
         if "websocket" in args_dict["app_bridges"]:

@@ -193,13 +193,15 @@ def cleanup_for_restart() -> bool:
     """按安全所有权顺序清理当前进程，为监督器重启做准备。
 
     参数：无。
-    返回：核心 ROS 清理完成时返回 ``True``；ROS 清理出现未恢复故障时返回
-    ``False``。工作区文件监视、通信客户端、ROS 节点、Edge 微后端、进程单例、
-    追踪导出器依次关闭，最后等待后台线程并执行垃圾回收。
+    返回：全部关键清理完成时返回 ``True``；ROS 或数据库所有者出现未恢复故障时
+    返回 ``False``。工作区文件监视、工作流（Workflow）、通信客户端、ROS 节点、
+    Edge 微后端、运行态数据库和进程单例依次关闭，最后执行垃圾回收。
     异常：各可选组件的普通清理异常转换为警告并继续后续步骤；导入或 ROS 清理
     故障按既有策略返回 ``False``。本函数不直接退出进程。
     """
     print_status("[重启] 开始执行重启前清理", "info")
+    cleanup_succeeded = True
+    storage_owners_closed = True
 
     # 先停止工作区文件世代监视，避免后续关闭数据库和设备时继续提交刷新。
     try:
@@ -212,6 +214,17 @@ def cleanup_for_restart() -> bool:
             f"[重启] 停止工作区产品生命周期时出错: {error}",
             "warning",
         )
+
+    # 工作流服务与模板投影各自持有 workflow_history.db 连接，必须早于文件重置关闭。
+    try:
+        from unilabos.workflow.composition import shutdown_workflow_runtime
+
+        shutdown_workflow_runtime()
+        print_status("[重启] 工作流运行态已停止", "info")
+    except Exception as error:
+        storage_owners_closed = False
+        cleanup_succeeded = False
+        print_status(f"[重启] 停止工作流运行态时出错: {error}", "warning")
 
     # 第一步：停止 WebSocket 通信客户端。
     print_status("[重启] 第一步：正在停止 WebSocket 客户端", "info")
@@ -297,8 +310,8 @@ def cleanup_for_restart() -> bool:
     except ImportError as error:
         print_status(f"[重启] ROS 模块不可用: {error}", "warning")
     except Exception as error:
+        cleanup_succeeded = False
         print_status(f"[重启] 清理 ROS 时出错: {error}", "warning")
-        return False
 
     # 第三步：先停止 Edge 微后端，再清理进程单例；这会关闭主机监听器、从机客户端和
     # 调度器（Scheduler）存储，使重启后的进程能重新绑定 HostLink 与 SQLite 资源。
@@ -309,7 +322,29 @@ def cleanup_for_restart() -> bool:
         shutdown_edge_services()
         print_status("[重启] Edge 微后端已停止", "info")
     except Exception as error:
+        storage_owners_closed = False
+        cleanup_succeeded = False
         print_status(f"[重启] 停止 Edge 微后端时出错: {error}", "warning")
+
+    # 只有所有 SQLite 所有者均成功关闭，才允许销毁私有临时目录并释放工作目录锁。
+    if storage_owners_closed:
+        try:
+            from unilabos.app.runtime_storage import (
+                close_runtime_storage_session,
+                discard_runtime_storage_session,
+            )
+
+            discard_runtime_storage_session()
+            close_runtime_storage_session()
+            print_status("[重启] 运行态数据库会话已释放", "info")
+        except Exception as error:
+            cleanup_succeeded = False
+            print_status(f"[重启] 重置运行态数据库时出错: {error}", "warning")
+    else:
+        print_status(
+            "[重启] 数据库所有者未全部关闭，已跳过文件重置并保留目录锁",
+            "warning",
+        )
 
     # 第四步：重置通信客户端进程单例。
     print_status("[重启] 第四步：正在重置进程单例", "info")
@@ -357,4 +392,4 @@ def cleanup_for_restart() -> bool:
     print_status("[重启] 垃圾回收已完成", "info")
 
     print_status("[重启] 清理完成，可以重新初始化", "info")
-    return True
+    return cleanup_succeeded

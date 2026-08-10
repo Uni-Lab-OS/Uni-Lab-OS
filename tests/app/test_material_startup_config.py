@@ -204,6 +204,22 @@ def test_action_mode_is_the_only_public_hardware_simulation_switch() -> None:
     assert simulated_args["action_mode"] == "simulate"
 
 
+def test_runtime_database_preservation_is_explicit_opt_in() -> None:
+    """证明运行态数据库默认切换临时目录，只有显式选项才沿用原库。
+
+    参数：无。返回：无；断言根启动参数 ``--preserve_runtime_databases`` 的默认值
+    为假且可显式开启。异常：公共命令行合同漂移时测试失败。
+    """
+
+    default_args = vars(parse_args().parse_args([]))
+    preserved_args = vars(
+        parse_args().parse_args(["--preserve_runtime_databases"])
+    )
+
+    assert default_args["preserve_runtime_databases"] is False
+    assert preserved_args["preserve_runtime_databases"] is True
+
+
 @pytest.mark.parametrize(
     "command",
     [

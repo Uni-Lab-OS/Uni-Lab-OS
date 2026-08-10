@@ -492,8 +492,8 @@ def get_registry_template_projection() -> Optional[RegistryTemplateProjection]:
     return _template_projection
 
 
-def reset_workflow_service_for_test() -> None:
-    """停止并清除测试使用的完整工作流运行时组合。
+def shutdown_workflow_runtime() -> None:
+    """停止并清除本进程拥有的完整工作流（Workflow）运行时组合。
 
     参数：无。
     返回：无；监视器、服务、模板投影和组合身份全部恢复为空。
@@ -526,6 +526,10 @@ def reset_workflow_service_for_test() -> None:
         _source_monitor_enabled = True
 
 
+# 保留既有测试接缝名称；生产重启与退出统一调用上面的生命周期入口。
+reset_workflow_service_for_test = shutdown_workflow_runtime
+
+
 __all__ = [
     "compose_local_workflow_template_runtime",
     "compose_workflow_runtime",
@@ -533,4 +537,5 @@ __all__ = [
     "get_workflow_service",
     "reset_workflow_service_for_test",
     "setup_workflow_service",
+    "shutdown_workflow_runtime",
 ]

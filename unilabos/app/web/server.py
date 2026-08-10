@@ -102,14 +102,19 @@ def setup_server() -> FastAPI:
     # /workflows 表示定义，/workflow-tasks 表示运行。
     if not workflow_routes_mounted and BasicConfig.working_dir:
         try:
-            from unilabos.app.workflow_api import install_workflow_api
+            from unilabos.app.runtime_storage import get_runtime_storage_directory
             from unilabos.app.scheduler.integration import (
                 get_edge_scheduler,
                 get_inventory_service,
             )
+            from unilabos.app.workflow_api import install_workflow_api
             from unilabos.workflow.composition import (
                 compose_local_workflow_template_runtime,
                 compose_workflow_runtime,
+            )
+
+            workflow_runtime_directory = (
+                get_runtime_storage_directory() or BasicConfig.working_dir
             )
 
             # ``template_projection`` 只在本地调度与库存权威同时存在时建立；
@@ -136,7 +141,7 @@ def setup_server() -> FastAPI:
 
                 workflow_service, template_projection = (
                     compose_local_workflow_template_runtime(
-                        BasicConfig.working_dir,
+                        workflow_runtime_directory,
                         inventory_store=inventory_service.store,
                         registry=lab_registry,
                         scheduler=edge_scheduler,
@@ -148,7 +153,7 @@ def setup_server() -> FastAPI:
                 )
             else:
                 workflow_service = compose_workflow_runtime(
-                    BasicConfig.working_dir,
+                    workflow_runtime_directory,
                     editable_package_roots=(
                         BasicConfig.workflow_editable_package_roots
                     ),

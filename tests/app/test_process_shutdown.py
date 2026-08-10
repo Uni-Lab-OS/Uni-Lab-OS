@@ -43,7 +43,8 @@ def test_sigterm_explicitly_shuts_down_edge_network_after_clients(
 
     参数说明：``monkeypatch`` 隔离进程信号表与实际服务单例；局部 ``handlers``
     记录信号注册，``events`` 记录清理顺序。返回：无；断言 SIGINT/SIGTERM 共用
-    同一处理器、通信失败后仍调用 ``shutdown_edge_services``，并以正常状态退出。
+    同一处理器、通信失败后仍关闭工作流（Workflow）、Edge 服务和运行态锁，并以
+    正常状态退出。
     异常：只捕获并验证处理器约定的 ``SystemExit(0)``。
     """
 
@@ -76,6 +77,22 @@ def test_sigterm_explicitly_shuts_down_edge_network_after_clients(
 
         events.append("workspace")
 
+    def shutdown_workflow_runtime() -> None:
+        """记录工作流运行态在数据库所有者关闭前停止。
+
+        参数：无。返回：无。异常：无。
+        """
+
+        events.append("workflow")
+
+    def close_runtime_storage_session() -> None:
+        """记录三类运行态数据库均关闭后释放目录锁。
+
+        参数：无。返回：无。异常：无。
+        """
+
+        events.append("storage")
+
     monkeypatch.setattr(process_shutdown.signal, "signal", record_signal)
     monkeypatch.setattr(integration, "shutdown_edge_services", shutdown_edge_services)
     package_manager = __import__(
@@ -86,6 +103,22 @@ def test_sigterm_explicitly_shuts_down_edge_network_after_clients(
         "close_workspace_product_lifecycle",
         close_workspace_product_lifecycle,
     )
+    workflow_composition = __import__(
+        "unilabos.workflow.composition", fromlist=["composition"]
+    )
+    monkeypatch.setattr(
+        workflow_composition,
+        "shutdown_workflow_runtime",
+        shutdown_workflow_runtime,
+    )
+    runtime_storage = __import__(
+        "unilabos.app.runtime_storage", fromlist=["runtime_storage"]
+    )
+    monkeypatch.setattr(
+        runtime_storage,
+        "close_runtime_storage_session",
+        close_runtime_storage_session,
+    )
     returned_handler = process_shutdown.install_host_shutdown_handlers(
         [_CommunicationClient(events, fail=True)]
     )
@@ -95,6 +128,6 @@ def test_sigterm_explicitly_shuts_down_edge_network_after_clients(
     with pytest.raises(SystemExit) as caught:
         returned_handler(signal.SIGTERM, None)
     assert caught.value.code == 0
-    assert events == ["communication", "workspace", "edge"]
+    assert events == ["communication", "workspace", "workflow", "edge", "storage"]
     assert handlers[signal.SIGINT] is signal.SIG_IGN
     assert handlers[signal.SIGTERM] is signal.SIG_IGN

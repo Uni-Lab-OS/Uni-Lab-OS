@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from unilabos.app import main as app_main
+from unilabos.app import runtime_storage
 from unilabos.config.config import BasicConfig
 from unilabos.workflow import composition
 from unilabos.workflow.service import WorkflowService
@@ -28,6 +29,7 @@ def clean_product_runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     """
 
     composition.reset_workflow_service_for_test()
+    runtime_storage.close_runtime_storage_session()
     monkeypatch.setattr(BasicConfig, "working_dir", "")
     if hasattr(BasicConfig, "workflow_editable_package_roots"):
         monkeypatch.setattr(BasicConfig, "workflow_editable_package_roots", ())
@@ -36,6 +38,7 @@ def clean_product_runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
         yield
     finally:
         composition.reset_workflow_service_for_test()
+        runtime_storage.close_runtime_storage_session()
 
 
 def _seed_workflow(working_dir: Path) -> None:
@@ -216,6 +219,10 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     working_dir = tmp_path / "runtime"
     selected_root = tmp_path / "editable"
     configured_roots = (str(selected_root),)
+    runtime_paths = runtime_storage.prepare_runtime_storage_session(
+        {}, working_dir=str(working_dir)
+    )
+    runtime_directory = str(Path(runtime_paths.workflow_history_db).parent)
     captured: dict[str, Any] = {}
     authoring_transform = object()
     workflow_service = SimpleNamespace(compiler=authoring_transform)
@@ -322,7 +329,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
 
     server.setup_server()
 
-    assert captured["working_dir"] == str(working_dir)
+    assert captured["working_dir"] == runtime_directory
     assert captured["inventory_store"] is inventory_service.store
     assert captured["scheduler"] is edge_scheduler
     assert captured["editable_package_roots"] == configured_roots
