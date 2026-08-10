@@ -192,6 +192,32 @@ def test_material_source_admission_projects_typed_result_atomically(
     assert jobs_by_uuid[action_job_uuid]["status"] == "pending"
 
 
+def test_paused_submission_accepts_succeeded_material_sources(
+    store: WorkflowStore,
+) -> None:
+    """暂停调试提交接受先完成来源、后派发普通动作的合法聚合。"""
+
+    _seed_material_source_task(store, with_action=True)
+    projection = _projection(store)
+    projection.project_material_source_admission(
+        TASK_UUID,
+        {
+            NODE_UUIDS[0]: {
+                "uuid": "50000000-0000-4000-8000-000000000001",
+                "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
+            }
+        },
+    )
+
+    aggregate = projection.project_submission(TASK_UUID, "paused")
+
+    assert aggregate["task"]["status"] == "pending"
+    assert {job["status"] for job in aggregate["jobs"]} == {
+        "pending",
+        "succeeded",
+    }
+
+
 def test_running_admission_replay_repairs_implicit_passthrough_binding(
     store: WorkflowStore,
 ) -> None:

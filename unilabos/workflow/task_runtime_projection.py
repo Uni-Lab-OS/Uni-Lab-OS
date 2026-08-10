@@ -189,11 +189,10 @@ class TaskRuntimeProjection:
             aggregate = self._aggregate(connection, task_uuid)
             task_status = aggregate["task"]["status"]
             job_statuses = {job["status"] for job in aggregate["jobs"]}
-            if task_status == "pending" and job_statuses == {"pending"}:
-                return aggregate
-            # 协调器所有的物料来源解析作业可能已经成功；它不属于设备在途状态，
-            # 但不应阻止普通动作提交后的任务聚合校验。
-            if task_status == "running" and job_statuses <= (
+            # 协调器会在普通动作提交前完成 MaterialSource 作业，因此暂停的调试
+            # 任务可以合法呈现 ``pending task + succeeded sources + pending actions``。
+            # 物料来源成功不是物理派发，也不应迫使父任务提前进入 running。
+            if task_status in {"pending", "running"} and job_statuses <= (
                 _ACTIVE_JOB_STATES | {"succeeded"}
             ):
                 return aggregate
