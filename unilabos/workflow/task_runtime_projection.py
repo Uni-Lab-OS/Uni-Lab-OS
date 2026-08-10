@@ -201,6 +201,59 @@ class TaskRuntimeProjection:
                 f"本地提交状态与任务聚合冲突：{task_uuid}/{scheduler_state}"
             )
 
+    def project_canceled(self, task_uuid: str) -> dict[str, Any]:
+        """把已由调度器接受的取消投影为标准 Task/Job 终态。"""
+
+        now = utc_now()
+        with self._store.transaction() as connection:
+            task_row = self._task_row(connection, task_uuid)
+            job_rows = self._job_rows(connection, task_uuid)
+            if task_row["status"] == "canceled":
+                return self._aggregate(connection, task_uuid)
+            if task_row["status"] in {"succeeded", "failed", "timeout"}:
+                raise StoreConflict(f"终态任务不能取消：{task_uuid}")
+            for row in job_rows:
+                if row["status"] in _TERMINAL_JOB_STATES:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE workflow_node_job
+                    SET status = 'canceled', finished_at = ?, update_time = ?
+                    WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (now, now, row["uuid"]),
+                )
+                WorkflowStore._append_runtime_event(
+                    connection,
+                    task_uuid=task_uuid,
+                    job_uuid=str(row["uuid"]),
+                    kind="job_transition",
+                    from_status=str(row["status"]),
+                    to_status="canceled",
+                    now=now,
+                )
+            connection.execute(
+                """
+                UPDATE workflow_task
+                SET status = 'canceled', control_status = 'active',
+                    finished_at = ?, update_time = ?
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (now, now, task_uuid),
+            )
+            WorkflowStore._append_runtime_event(
+                connection,
+                task_uuid=task_uuid,
+                kind="task_transition",
+                from_status=str(task_row["status"]),
+                to_status="canceled",
+                now=now,
+            )
+            self._append_invalidation(
+                connection, task_uuid=task_uuid, now=now
+            )
+            return self._aggregate(connection, task_uuid)
+
     def project_material_source_blocked(self, task_uuid: str) -> dict[str, Any]:
         """验证并返回一次受阻的任务物料准入投影。
 

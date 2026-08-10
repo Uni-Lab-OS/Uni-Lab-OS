@@ -188,6 +188,23 @@ class TaskSchedulerBridge:
         except ValueError as error:
             raise TaskSchedulerBridgeError(str(error)) from error
 
+    def cancel(self, task_uuid: str) -> dict[str, Any]:
+        """取消同一标准任务身份，并把调度器结果投影为 Task/Job 终态。"""
+
+        if self._closed:
+            raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
+        normalized_uuid = self._required_text(task_uuid, field="task_uuid")
+        if not self._scheduler.cancel_workflow(normalized_uuid):
+            raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
+        aggregate = self._projection.project_canceled(normalized_uuid)
+        self._store.stop_debug(normalized_uuid)
+        self._submitted_tasks.discard(normalized_uuid)
+        self._admission_pending_tasks.discard(normalized_uuid)
+        for job_uuid, routed_task_uuid in tuple(self._task_by_job.items()):
+            if routed_task_uuid == normalized_uuid:
+                self._task_by_job.pop(job_uuid, None)
+        return aggregate
+
     def recover_active_tasks(self) -> list[dict[str, Any]]:
         """恢复没有结果不明作业的活动工作流任务（WorkflowTask）。
 
@@ -469,6 +486,22 @@ class TaskSchedulerBridge:
             return_info=return_info,
             error_info=error_info,
         )
+        # 调试任务的下一步由持久 Debug Configuration/Admission Hold 决定。
+        # ``continue`` 只在下一个节点没有断点时复用既有单步派发原语；断点或
+        # 显式 ``step`` 会先创建新 Hold，绝不越过物理派发边界。
+        debug_action = self._store.advance_debug_after_job_finished(task_uuid)
+        if debug_action.get("type") == "step":
+            next_node_uuid = self._required_text(
+                debug_action.get("workflow_node_uuid"),
+                field="debug.workflow_node_uuid",
+            )
+            try:
+                self._scheduler.step_workflow(
+                    task_uuid,
+                    target_node_id=next_node_uuid,
+                )
+            except ValueError as error:
+                raise TaskSchedulerBridgeError(str(error)) from error
         terminal_status = aggregate["task"]["status"]
         if terminal_status in {"succeeded", "failed"} and any(
             job.get("executor_kind") == "material_source"

@@ -101,6 +101,7 @@ def build_candidate_graph(
         catalog=catalog,
     )
     compatible_catalog_replacements: set[str] = set()
+    disabled_node_uuids = set(program.disabled_node_uuids)
     for declaration in program.groups:
         try:
             group_catalog = catalog.require_action(
@@ -409,6 +410,14 @@ def build_candidate_graph(
         )
     except AppliedAuthoringProjectionError as error:
         raise AuthoringGraphError(error.code, error.message) from error
+
+    # ``reconcile_applied_authoring_projection`` 会保留已应用节点的运行属性；作者
+    # 源码中的显式禁用标记必须在该固定点之后覆盖旧值，否则从 enabled 改为
+    # disabled 的保存会被已应用图悄悄还原。
+    for projected_node in projection.nodes:
+        projected_uuid = str(projected_node.get("uuid"))
+        if projected_uuid in source_order:
+            projected_node["disabled"] = projected_uuid in disabled_node_uuids
 
     graph = {
         "workflow": workflow,
