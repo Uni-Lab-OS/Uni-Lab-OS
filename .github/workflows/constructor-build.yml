@@ -39,7 +39,7 @@ jobs:
       run:
         shell: bash -l {0}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
@@ -129,7 +129,7 @@ jobs:
           done
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.select.outputs.enabled == 'true'
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
