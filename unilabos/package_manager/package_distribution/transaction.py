@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 import tempfile
 from collections.abc import Callable, Mapping
 from functools import wraps
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, BinaryIO, TypeVar, cast
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from .lock_codec import declaration_bytes
 from .models import (
@@ -20,6 +24,30 @@ from .models import (
 )
 
 _Operation = TypeVar("_Operation", bound=Callable[..., Any])
+
+
+def _acquire_dependency_guard(guard_handle: BinaryIO) -> None:
+    """跨平台阻塞取得依赖变更锁。"""
+
+    if os.name == "nt":
+        guard_handle.seek(0, os.SEEK_END)
+        if guard_handle.tell() == 0:
+            guard_handle.write(b"\0")
+            guard_handle.flush()
+        guard_handle.seek(0)
+        msvcrt.locking(guard_handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    fcntl.flock(guard_handle.fileno(), fcntl.LOCK_EX)
+
+
+def _release_dependency_guard(guard_handle: BinaryIO) -> None:
+    """跨平台释放依赖变更锁。"""
+
+    if os.name == "nt":
+        guard_handle.seek(0)
+        msvcrt.locking(guard_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(guard_handle.fileno(), fcntl.LOCK_UN)
 
 
 def serialized_dependency_mutation(operation: _Operation) -> _Operation:
@@ -44,11 +72,11 @@ def serialized_dependency_mutation(operation: _Operation) -> _Operation:
         guard_path = manager._workspace.root / DEPENDENCY_MUTATION_GUARD
         try:
             with guard_path.open("a+b") as guard_handle:
-                fcntl.flock(guard_handle.fileno(), fcntl.LOCK_EX)
+                _acquire_dependency_guard(guard_handle)
                 try:
                     return operation(manager, *args, **kwargs)
                 finally:
-                    fcntl.flock(guard_handle.fileno(), fcntl.LOCK_UN)
+                    _release_dependency_guard(guard_handle)
         except OSError as error:
             raise PackageDependencyError("无法取得软件包依赖变更互斥锁") from error
 
