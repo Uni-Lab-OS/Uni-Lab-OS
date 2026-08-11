@@ -227,7 +227,7 @@ jobs:
 
       - name: Upload installer and manifests
         if: steps.select.outputs.enabled == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: Uni-Lab-OS-constructor-${{ matrix.platform }}
           path: dist/constructor/*
