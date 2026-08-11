@@ -373,6 +373,22 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     def get_workflow(workflow_uuid: str) -> JSONResponse:
         return _success(service.get_workflow(workflow_uuid))
 
+    @router.get("/workflows/{workflow_uuid}/change-log")
+    def list_workflow_change_log(
+        workflow_uuid: str,
+        page: int = Query(default=1),
+        page_size: int = Query(default=50),
+    ) -> JSONResponse:
+        """分页读取工作流（Workflow）定义修改日志。"""
+
+        return _success(
+            service.list_workflow_change_log(
+                workflow_uuid,
+                page=page,
+                page_size=page_size,
+            )
+        )
+
     @router.put("/workflows/{workflow_uuid}")
     def update_workflow(
         workflow_uuid: str,

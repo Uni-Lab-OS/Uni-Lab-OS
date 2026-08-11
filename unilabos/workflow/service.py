@@ -407,6 +407,34 @@ class WorkflowService:
         page, page_size = self._normalize_page(page, page_size)
         return self._store.list_workflows(page=page, page_size=page_size, name=name)
 
+    def list_workflow_change_log(
+        self,
+        workflow_uuid: str,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Dict[str, Any]:
+        """读取一个工作流的持久定义修改日志。
+
+        参数：``workflow_uuid`` 是工作流（Workflow）稳定身份，页码从一开始。
+        返回：按提交顺序倒排的日志页。异常：身份、分页参数非法时抛稳定业务
+        错误，工作流不存在时返回 ``not_found``；本方法不修改权威状态。
+        """
+
+        page, page_size = self._normalize_page(page, page_size)
+        try:
+            identity = validate_uuid(workflow_uuid)
+        except ValueError:
+            raise WorkflowError("invalid_input") from None
+        try:
+            return self._store.list_workflow_change_log(
+                identity,
+                page=page,
+                page_size=page_size,
+            )
+        except StoreNotFound:
+            raise WorkflowError("not_found") from None
+
     def update_workflow(
         self,
         workflow_uuid: str,
