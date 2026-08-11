@@ -49,6 +49,22 @@ _Avoid_: One execution, runtime snapshot, Run
 One execution created from a frozen Workflow graph.
 _Avoid_: Workflow definition, Run alias
 
+**Debug Launch Preflight**:
+The authoritative analysis of values and Materials that an active debug scope still needs after its start frontier and disabled nodes are applied.
+_Avoid_: Frontend DAG guess, best-effort launch
+
+**Debug Launch Requirement**:
+One unresolved ordinary value or Material binding that must be satisfied before a Debug Workflow Task can be created.
+_Avoid_: Runtime fallback, implicit historical value
+
+**Material State Suggestion**:
+An explainable expected Material identity, Site, or state derived from an explicitly declared skipped-node contract; it is never an Inventory Authority fact by itself.
+_Avoid_: Simulated inventory, inferred fact, silent material mutation
+
+**Debug Launch Override**:
+A user-confirmed value bound to one Debug Launch Requirement and frozen immutably with a single Workflow Task.
+_Avoid_: Workflow edit, inventory update, reusable hidden default
+
 **Edge-only Inventory Interface**:
 The operational lot, reservation, ledger, and diagnostic contract used inside
 Edge; it is not part of the Shared Interface.
