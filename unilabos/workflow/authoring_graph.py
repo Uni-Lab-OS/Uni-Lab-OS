@@ -352,6 +352,18 @@ def build_candidate_graph(
             "output_bindings": _output_bindings(program, result_nodes),
         }
     )
+    if program.suppressed_order_dependencies:
+        unilab_meta["order_dependency_suppressions"] = [
+            {
+                "source_node_uuid": source_node_uuid,
+                "target_node_uuid": target_node_uuid,
+            }
+            for source_node_uuid, target_node_uuid in sorted(
+                program.suppressed_order_dependencies
+            )
+        ]
+    else:
+        unilab_meta.pop("order_dependency_suppressions", None)
     workflow_meta["unilab"] = unilab_meta
     workflow["meta_data"] = workflow_meta
 

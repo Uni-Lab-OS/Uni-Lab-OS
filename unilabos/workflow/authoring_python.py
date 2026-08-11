@@ -86,6 +86,11 @@ def render_authoring_python(
         and edge.get("source_node_uuid") in node_by_uuid
         and edge.get("target_node_uuid") in node_by_uuid
     ]
+    suppressed_order_dependencies = _order_dependency_suppressions(
+        workflow,
+        edges=visible_edges,
+        catalog_by_node=catalog_by_node,
+    )
     ordered_nodes = _authoring_ordered_nodes(node_by_uuid, visible_edges)
     device_symbols, device_imports = _device_symbols(ordered_nodes, catalog_by_node)
     published_workflow_imports = {
@@ -187,8 +192,10 @@ def render_authoring_python(
     marker_imports = "device, workflow"
     if group_nodes:
         marker_imports += ", group"
-        if any(_parallel_scope(node) is not None for node in group_nodes):
-            marker_imports += ", parallel"
+    if suppressed_order_dependencies or any(
+        _parallel_scope(node) is not None for node in group_nodes
+    ):
+        marker_imports += ", parallel"
     if material_sources:
         marker_imports += ", MaterialFlowRole, material_source, resource_ref"
     elif any(
@@ -260,6 +267,16 @@ def render_authoring_python(
         lines.append(f"def {function_name}(){return_annotation}:")
     if function_docstring is not None:
         _append_function_docstring(lines=lines, docstring=function_docstring)
+    for source_node_uuid, target_node_uuid in suppressed_order_dependencies:
+        lines.extend(
+            [
+                "    # unilab:parallelize "
+                f"source_node_uuid={source_node_uuid} "
+                f"target_node_uuid={target_node_uuid}",
+                "    with parallel():",
+                "        pass",
+            ]
+        )
 
     incoming = _incoming_bindings(
         visible_edges,
@@ -702,6 +719,79 @@ def _parallel_scope(node: Mapping[str, Any]) -> str | None:
         return validate_uuid(value)
     except (TypeError, ValueError) as error:
         raise AuthoringGraphError("candidate_invalid", "并行结构作用域身份无效") from error
+
+
+def _order_dependency_suppressions(
+    workflow: Mapping[str, Any],
+    *,
+    edges: list[Any],
+    catalog_by_node: Mapping[str, AuthoringCatalogAction],
+) -> list[tuple[str, str]]:
+    """读取并验证画布显式并行化的先后关系。
+
+    参数说明：``workflow`` 提供作者级 Uni-Lab 元数据；``edges`` 是可见候选边；
+    ``catalog_by_node`` 证明源、目标节点及其 ready 连接点。返回按 UUID 排序的
+    源、目标节点对。关系格式非法、节点不存在或待抑制 ready 边仍存在时失败关闭。
+    """
+
+    unilab = (workflow.get("meta_data") or {}).get("unilab", {})
+    if not isinstance(unilab, Mapping):
+        raise AuthoringGraphError("candidate_invalid", "工作流创作元数据必须是对象")
+    raw = unilab.get("order_dependency_suppressions")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise AuthoringGraphError("candidate_invalid", "并行化先后关系必须是数组")
+    result: set[tuple[str, str]] = set()
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != {
+            "source_node_uuid",
+            "target_node_uuid",
+        }:
+            raise AuthoringGraphError("candidate_invalid", "并行化先后关系格式无效")
+        try:
+            source_uuid = validate_uuid(item.get("source_node_uuid"))
+            target_uuid = validate_uuid(item.get("target_node_uuid"))
+        except (TypeError, ValueError) as error:
+            raise AuthoringGraphError(
+                "candidate_invalid",
+                "并行化先后关系引用了无效 UUID",
+            ) from error
+        if source_uuid not in catalog_by_node or target_uuid not in catalog_by_node:
+            raise AuthoringGraphError("candidate_invalid", "并行化先后关系引用未知节点")
+        source_handles = [
+            handle
+            for handle in catalog_by_node[source_uuid].handles
+            if handle.get("handle_key") == "ready"
+            and handle.get("io_type") == "source"
+        ]
+        target_handles = [
+            handle
+            for handle in catalog_by_node[target_uuid].handles
+            if handle.get("handle_key") == "ready"
+            and handle.get("io_type") == "target"
+        ]
+        if len(source_handles) != 1 or len(target_handles) != 1:
+            raise AuthoringGraphError(
+                "template_catalog_mismatch",
+                "并行化先后关系缺少唯一 ready 连接点",
+            )
+        source_handle = source_handles[0]
+        target_handle = target_handles[0]
+        if any(
+            isinstance(edge, Mapping)
+            and edge.get("source_node_uuid") == source_uuid
+            and edge.get("target_node_uuid") == target_uuid
+            and edge.get("source_handle_uuid") == source_handle.get("uuid")
+            and edge.get("target_handle_uuid") == target_handle.get("uuid")
+            for edge in edges
+        ):
+            raise AuthoringGraphError(
+                "candidate_invalid",
+                "并行化先后关系对应的 ready 边仍然存在",
+            )
+        result.add((source_uuid, target_uuid))
+    return sorted(result)
 
 
 def _parallel_order(node: Mapping[str, Any]) -> int:

@@ -38,6 +38,11 @@ _NODE_METADATA = re.compile(
     r"(?:(?:[ \t]*:[ \t]*)|(?:[ \t]+))"
     r"(?P<description>\S(?:.*\S)?)[ \t]*$"
 )
+_PARALLELIZE_CONTROL = re.compile(
+    r"^(?P<indent>[ \t]*)#[ \t]*unilab:parallelize[ \t]+"
+    r"source_node_uuid=(?P<source>[0-9a-fA-F-]{36})[ \t]+"
+    r"target_node_uuid=(?P<target>[0-9a-fA-F-]{36})[ \t]*$"
+)
 _AUTHORING_MARKERS = {
     "device": "unilabos.workflow.authoring:device",
     "group": "unilabos.workflow.authoring:group",
@@ -147,6 +152,7 @@ class WorkflowProgram:
     groups: tuple[GroupDeclaration, ...]
     parent_by_node: tuple[tuple[str, str], ...]
     order_dependencies: tuple[tuple[str, str], ...]
+    suppressed_order_dependencies: tuple[tuple[str, str], ...]
     source_order: tuple[str, ...]
     disabled_node_uuids: tuple[str, ...]
     outputs: tuple[tuple[str, ValueBinding], ...]
@@ -176,6 +182,9 @@ class _BodyState:
     groups: list[GroupDeclaration]
     parent_by_node: dict[str, str]
     order_dependencies: list[tuple[str, str]]
+    parallelize_controls: dict[int, tuple[str, str]]
+    used_parallelize_controls: set[int]
+    suppressed_order_dependencies: list[tuple[str, str]]
     source_order: list[str]
     material_results: set[str]
 
@@ -253,11 +262,13 @@ def parse_authoring_source(
         function=function,
         anchors=anchors,
     )
+    parallelize_controls = _source_parallelize_controls(python_source)
     (
         actions,
         groups,
         parent_by_node,
         order_dependencies,
+        suppressed_order_dependencies,
         authoring_source_order,
         outputs,
     ) = _workflow_body(
@@ -267,6 +278,7 @@ def parse_authoring_source(
         input_names={item["name"] for item in input_contract["parameters"]},
         anchors=anchors,
         node_metadata=node_metadata,
+        parallelize_controls=parallelize_controls,
     )
     used_anchor_lines = {
         declaration.source_node.lineno - 1
@@ -291,6 +303,7 @@ def parse_authoring_source(
         groups=tuple(groups),
         parent_by_node=tuple(sorted(parent_by_node.items())),
         order_dependencies=tuple(order_dependencies),
+        suppressed_order_dependencies=tuple(suppressed_order_dependencies),
         source_order=tuple(authoring_source_order),
         disabled_node_uuids=tuple(sorted(disabled_node_uuids)),
         outputs=tuple(outputs),
@@ -705,6 +718,44 @@ def _source_disabled_nodes(python_source: str) -> set[str]:
     return disabled
 
 
+def _source_parallelize_controls(
+    python_source: str,
+) -> dict[int, tuple[str, str]]:
+    """读取画布显式移除的先后关系控制标记。
+
+    参数说明：``python_source`` 是不可信作者源码；返回以紧随其后的
+    ``with parallel():`` 零基行号为键的源、目标节点 UUID。标记格式、重复关系
+    或未紧邻标准并行上下文时失败关闭，避免注释被误解释成执行语义。
+    """
+
+    lines = source_lines(python_source)
+    controls: dict[int, tuple[str, str]] = {}
+    pairs: set[tuple[str, str]] = set()
+    for line_index, line in enumerate(lines):
+        if "unilab:parallelize" not in line:
+            continue
+        match = _PARALLELIZE_CONTROL.fullmatch(line)
+        if match is None:
+            _fail("invalid_parallel", "并行化先后关系标记格式无效")
+        if line_index + 1 >= len(lines):
+            _fail("invalid_parallel", "并行化先后关系标记必须紧邻 parallel")
+        indent = match.group("indent")
+        if lines[line_index + 1] != f"{indent}with parallel():":
+            _fail("invalid_parallel", "并行化先后关系标记必须紧邻 parallel")
+        try:
+            pair = (
+                validate_uuid(match.group("source")),
+                validate_uuid(match.group("target")),
+            )
+        except ValueError:
+            _fail("invalid_parallel", "并行化先后关系引用了无效 UUID")
+        if pair in pairs:
+            _fail("invalid_parallel", "并行化先后关系标记重复")
+        pairs.add(pair)
+        controls[line_index + 1] = pair
+    return controls
+
+
 def _source_node_metadata(
     python_source: str,
     *,
@@ -767,10 +818,12 @@ def _workflow_body(
     input_names: set[str],
     anchors: dict[int, str],
     node_metadata: dict[int, tuple[str, str]],
+    parallelize_controls: dict[int, tuple[str, str]],
 ) -> tuple[
     list[ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration],
     list[GroupDeclaration],
     dict[str, str],
+    list[tuple[str, str]],
     list[tuple[str, str]],
     list[str],
     list[tuple[str, ValueBinding]],
@@ -805,6 +858,9 @@ def _workflow_body(
         groups=[],
         parent_by_node={},
         order_dependencies=[],
+        parallelize_controls=parallelize_controls,
+        used_parallelize_controls=set(),
+        suppressed_order_dependencies=[],
         source_order=[],
         material_results=set(),
     )
@@ -816,6 +872,16 @@ def _workflow_body(
         available_results=known_results,
         parent_uuid=None,
     )
+    if state.used_parallelize_controls != set(state.parallelize_controls):
+        _fail("invalid_parallel", "并行化先后关系标记没有绑定到控制块")
+    derived_dependencies = set(state.order_dependencies)
+    for pair in state.suppressed_order_dependencies:
+        if pair not in derived_dependencies:
+            _fail("invalid_parallel", "并行化的先后关系不存在于作者执行顺序")
+    suppressed = set(state.suppressed_order_dependencies)
+    state.order_dependencies = [
+        pair for pair in state.order_dependencies if pair not in suppressed
+    ]
     outputs = _workflow_outputs(
         return_statement,
         imports=imports,
@@ -828,6 +894,7 @@ def _workflow_body(
         state.groups,
         state.parent_by_node,
         state.order_dependencies,
+        state.suppressed_order_dependencies,
         state.source_order,
         outputs,
     )
@@ -1039,6 +1106,17 @@ def _parse_parallel(
     assert isinstance(context, ast.Call)
     if context.args or context.keywords:
         _fail("invalid_parallel", "parallel 不接受参数", context)
+    control = state.parallelize_controls.get(statement.lineno - 1)
+    if control is not None:
+        if len(statement.body) != 1 or not isinstance(statement.body[0], ast.Pass):
+            _fail(
+                "invalid_parallel",
+                "并行化先后关系控制块必须且只能包含 pass",
+                statement,
+            )
+        state.used_parallelize_controls.add(statement.lineno - 1)
+        state.suppressed_order_dependencies.append(control)
+        return _Flow((), (), frozenset())
     if len(statement.body) < 2 or any(
         not isinstance(branch, ast.With)
         or _with_marker(branch, state.imports) != "group"

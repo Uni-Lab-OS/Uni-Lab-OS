@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
@@ -242,6 +243,55 @@ def test_parallel_groups_use_real_ready_order_without_fork_join_nodes() -> None:
     assert ready_edge["target_handle_uuid"] == ANALYZE_READY_TARGET
     assert result.normalized_python_source is not None
     assert "with parallel():" in result.normalized_python_source
+
+
+def test_deleted_ready_edge_round_trips_as_explicit_parallelization() -> None:
+    """画布删除隐式 ready 边后必须生成可回读的额外 parallel 控制块。"""
+
+    engine = _group_engine()
+    compiled = _compile(engine, _parallel_source())
+    assert compiled.valid and compiled.graph is not None
+    graph = deepcopy(compiled.graph)
+    ready_edge = next(
+        edge
+        for edge in graph["edges"]
+        if edge["source_node_uuid"] == BRANCH_B_NODE_UUID
+        and edge["target_node_uuid"] == ANALYZE_NODE_UUID
+    )
+    graph["edges"] = [
+        edge for edge in graph["edges"] if edge["uuid"] != ready_edge["uuid"]
+    ]
+    graph["workflow"]["meta_data"]["unilab"][
+        "order_dependency_suppressions"
+    ] = [
+        {
+            "source_node_uuid": BRANCH_B_NODE_UUID,
+            "target_node_uuid": ANALYZE_NODE_UUID,
+        }
+    ]
+
+    generated = engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=graph,
+        source_uri="package://lab/workflows/parallel-ready-deletion.py",
+    )
+    assert generated.valid and generated.normalized_python_source is not None
+    assert generated.normalized_python_source.count("with parallel():") == 2
+    assert (
+        f"# unilab:parallelize source_node_uuid={BRANCH_B_NODE_UUID} "
+        f"target_node_uuid={ANALYZE_NODE_UUID}"
+        in generated.normalized_python_source
+    )
+    validated = engine.validate(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=graph,
+        python_source=generated.normalized_python_source,
+        source_uri="package://lab/workflows/parallel-ready-deletion.py",
+    )
+    assert validated.valid, validated.diagnostics
+    assert validated.graph == graph
 
 
 def test_parallel_branch_cannot_read_a_sibling_result() -> None:
