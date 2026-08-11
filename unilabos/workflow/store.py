@@ -380,6 +380,29 @@ CREATE TABLE IF NOT EXISTS frontend_event (
     create_time TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workflow_definition_change (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_uuid TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (
+        action IN (
+            'created',
+            'current_snapshot',
+            'metadata_updated',
+            'graph_saved',
+            'authoring_applied',
+            'deleted'
+        )
+    ),
+    summary TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(details) AND json_type(details) = 'object'),
+    create_time TEXT NOT NULL,
+    FOREIGN KEY(workflow_uuid) REFERENCES workflow(uuid)
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_definition_change_workflow_sequence
+    ON workflow_definition_change(workflow_uuid, sequence DESC);
+
 CREATE TABLE IF NOT EXISTS workflow_runtime_journal (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     workflow_task_uuid TEXT NOT NULL,
@@ -592,6 +615,19 @@ class WorkflowStore:
                         _json(tags),
                     ),
                 )
+                self._append_workflow_change(
+                    conn,
+                    workflow_uuid=workflow_uuid,
+                    revision=1,
+                    action="created",
+                    summary="创建工作流",
+                    details={
+                        "name": name,
+                        "description": description,
+                        "tags": tags,
+                    },
+                    now=now,
+                )
         except sqlite3.IntegrityError as exc:
             raise StoreConflict(f"workflow {workflow_uuid} already exists") from exc
         return self.get_workflow(workflow_uuid)
@@ -632,14 +668,28 @@ class WorkflowStore:
             ).fetchone()[0]
             rows = self._conn.execute(
                 f"""
-                SELECT * FROM workflow WHERE {where}
+                SELECT workflow.*,
+                       EXISTS(
+                           SELECT 1 FROM workflow_node
+                           WHERE workflow_node.workflow_uuid = workflow.uuid
+                             AND workflow_node.deleted_at IS NULL
+                       ) AS has_active_nodes
+                FROM workflow WHERE {where}
                 ORDER BY create_time DESC, uuid
                 LIMIT ? OFFSET ?
                 """,
                 (*values, page_size, offset),
             ).fetchall()
         return {
-            "items": [self._workflow_row(row) for row in rows],
+            "items": [
+                {
+                    **self._workflow_row(row),
+                    "definition_status": (
+                        "configured" if row["has_active_nodes"] else "empty"
+                    ),
+                }
+                for row in rows
+            ],
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -655,7 +705,9 @@ class WorkflowStore:
         meta_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         with self.transaction() as conn:
-            self.get_workflow(workflow_uuid, conn=conn)
+            current = self.get_workflow(workflow_uuid, conn=conn)
+            now = utc_now()
+            self._ensure_workflow_change_baseline(conn, current, now=now)
             conn.execute(
                 """
                 UPDATE workflow
@@ -668,16 +720,26 @@ class WorkflowStore:
                     _json(tags),
                     description,
                     _json(meta_data),
-                    utc_now(),
+                    now,
                     workflow_uuid,
                 ),
+            )
+            self._append_workflow_change(
+                conn,
+                workflow_uuid=workflow_uuid,
+                revision=current["revision"],
+                action="metadata_updated",
+                summary="更新名称、描述或标签",
+                details={"name": name, "description": description, "tags": tags},
+                now=now,
             )
         return self.get_workflow(workflow_uuid)
 
     def delete_workflow(self, workflow_uuid: str) -> None:
         now = utc_now()
         with self.transaction() as conn:
-            self.get_workflow(workflow_uuid, conn=conn)
+            current = self.get_workflow(workflow_uuid, conn=conn)
+            self._ensure_workflow_change_baseline(conn, current, now=now)
             conn.execute(
                 "UPDATE workflow SET deleted_at = ?, update_time = ? WHERE uuid = ?",
                 (now, now, workflow_uuid),
@@ -692,6 +754,74 @@ class WorkflowStore:
                 "WHERE workflow_uuid = ? AND deleted_at IS NULL",
                 (now, now, workflow_uuid),
             )
+            self._append_workflow_change(
+                conn,
+                workflow_uuid=workflow_uuid,
+                revision=current["revision"],
+                action="deleted",
+                summary="删除工作流",
+                details={"name": current["name"]},
+                now=now,
+            )
+
+    def list_workflow_change_log(
+        self,
+        workflow_uuid: str,
+        *,
+        page: int,
+        page_size: int,
+    ) -> Dict[str, Any]:
+        """分页读取一个工作流的定义修改日志。
+
+        参数：``workflow_uuid`` 是活动工作流身份，页码从一开始。返回：按提交
+        序号倒序的权威日志页；历史工作流首次读取且尚无日志时返回明确标注的
+        当前快照，不伪造更早的逐次操作。异常：工作流不存在时抛
+        ``StoreNotFound``，数据库读取异常原样传播。本方法只读。
+        """
+
+        workflow = self.get_workflow(workflow_uuid)
+        offset = (page - 1) * page_size
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*) FROM workflow_definition_change "
+                "WHERE workflow_uuid = ?",
+                (workflow_uuid,),
+            ).fetchone()[0]
+            rows = self._conn.execute(
+                """
+                SELECT * FROM workflow_definition_change
+                WHERE workflow_uuid = ?
+                ORDER BY sequence DESC
+                LIMIT ? OFFSET ?
+                """,
+                (workflow_uuid, page_size, offset),
+            ).fetchall()
+        if total == 0:
+            snapshot = {
+                "sequence": 0,
+                "workflow_uuid": workflow_uuid,
+                "revision": workflow["revision"],
+                "action": "current_snapshot",
+                "summary": "历史记录启用前的当前权威快照",
+                "details": {
+                    "name": workflow["name"],
+                    "description": workflow.get("description"),
+                    "tags": workflow["tags"],
+                },
+                "create_time": workflow["update_time"],
+            }
+            return {
+                "items": [snapshot] if page == 1 else [],
+                "total": 1,
+                "page": page,
+                "page_size": page_size,
+            }
+        return {
+            "items": [self._workflow_change_row(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
 
     def get_graph(
         self,
@@ -798,7 +928,10 @@ class WorkflowStore:
         """
 
         with self.transaction() as conn:
-            self._reconcile_graph(
+            workflow = self.get_workflow(workflow_uuid, conn=conn)
+            now = utc_now()
+            self._ensure_workflow_change_baseline(conn, workflow, now=now)
+            resulting_revision = self._reconcile_graph(
                 conn,
                 workflow_uuid=workflow_uuid,
                 expected_revision=revision,
@@ -807,6 +940,15 @@ class WorkflowStore:
                 advance_revision=True,
                 protect_reserved_metadata=protect_reserved_metadata,
                 validate_workflow_io_contract=validate_workflow_io_contract,
+            )
+            self._append_workflow_change(
+                conn,
+                workflow_uuid=workflow_uuid,
+                revision=resulting_revision,
+                action="graph_saved",
+                summary="保存工作流图",
+                details={"node_count": len(nodes), "edge_count": len(edges)},
+                now=now,
             )
         return self.get_graph(workflow_uuid)
 
@@ -2254,6 +2396,7 @@ class WorkflowStore:
             workflow = self.get_workflow(workflow_uuid, conn=conn)
             if workflow["revision"] != expected_revision:
                 raise StoreRevisionConflict("workflow revision changed before apply")
+            self._ensure_workflow_change_baseline(conn, workflow, now=now)
 
             # 文件系统不能与 SQLite 共用锁；在首个领域写入前完成线性化复核。
             authoring_authority_validator(
@@ -2379,6 +2522,19 @@ class WorkflowStore:
                     "candidate_hash": None,
                     "workflow_revision": resulting_revision,
                 },
+                now=now,
+            )
+            self._append_workflow_change(
+                conn,
+                workflow_uuid=workflow_uuid,
+                revision=resulting_revision,
+                action="authoring_applied",
+                summary=(
+                    "应用图与源码候选版本"
+                    if kind == "graph"
+                    else "应用源码候选版本"
+                ),
+                details={"kind": kind, "candidate_hash": candidate_hash},
                 now=now,
             )
         return resulting_revision, writeback_generation
@@ -2672,6 +2828,73 @@ class WorkflowStore:
         )
         return int(cursor.lastrowid)
 
+    def _ensure_workflow_change_baseline(
+        self,
+        conn: sqlite3.Connection,
+        workflow: Dict[str, Any],
+        *,
+        now: str,
+    ) -> None:
+        """为日志功能启用前的工作流补一个诚实的当前快照。
+
+        参数：``conn`` 是调用方事务，``workflow`` 是变更前投影，``now`` 是本次
+        提交时间。返回：无；已有任意日志时不写入。异常：数据库错误原样传播。
+        """
+
+        exists = conn.execute(
+            "SELECT 1 FROM workflow_definition_change "
+            "WHERE workflow_uuid = ? LIMIT 1",
+            (workflow["uuid"],),
+        ).fetchone()
+        if exists is not None:
+            return
+        self._append_workflow_change(
+            conn,
+            workflow_uuid=workflow["uuid"],
+            revision=workflow["revision"],
+            action="current_snapshot",
+            summary="历史记录启用前的当前权威快照",
+            details={
+                "name": workflow["name"],
+                "description": workflow.get("description"),
+                "tags": workflow["tags"],
+            },
+            now=now,
+        )
+
+    def _append_workflow_change(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        workflow_uuid: str,
+        revision: int,
+        action: str,
+        summary: str,
+        details: Dict[str, Any],
+        now: str,
+    ) -> int:
+        """在调用方事务内追加定义日志并发布目录失效事件。"""
+
+        cursor = conn.execute(
+            """
+            INSERT INTO workflow_definition_change(
+                workflow_uuid, revision, action, summary, details, create_time
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (workflow_uuid, revision, action, summary, _json(details), now),
+        )
+        self._append_event(
+            conn,
+            event="workflow.definition.changed",
+            data={
+                "workflow_uuid": workflow_uuid,
+                "revision": revision,
+                "action": action,
+            },
+            now=now,
+        )
+        return int(cursor.lastrowid)
+
     @staticmethod
     def _append_runtime_event(
         conn: sqlite3.Connection,
@@ -2758,6 +2981,20 @@ class WorkflowStore:
             "name": row["name"],
             "tags": _load(row["tags"], []),
             "revision": row["revision"],
+        }
+
+    @staticmethod
+    def _workflow_change_row(row: sqlite3.Row) -> Dict[str, Any]:
+        """把定义日志行投影为前端稳定合同。"""
+
+        return {
+            "sequence": row["sequence"],
+            "workflow_uuid": row["workflow_uuid"],
+            "revision": row["revision"],
+            "action": row["action"],
+            "summary": row["summary"],
+            "details": _load(row["details"], {}),
+            "create_time": row["create_time"],
         }
 
     @classmethod

@@ -76,6 +76,34 @@ def test_workflow_definition_task_snapshot_and_soft_delete_match_backend(tmp_pat
     public_node = graph.json()["data"]["nodes"][0]
     assert "status" not in public_node
 
+    updated = client.put(
+        f"/api/v1/workflows/{workflow_uuid}",
+        json={
+            "name": "updated workflow",
+            "description": "验证修改日志",
+            "tags": ["demo"],
+            "meta_data": {},
+        },
+    )
+    assert updated.status_code == 200
+
+    change_log = client.get(
+        f"/api/v1/workflows/{workflow_uuid}/change-log?page=1&page_size=20"
+    )
+    assert change_log.status_code == 200
+    log_data = change_log.json()["data"]
+    assert log_data["total"] == 3
+    assert [item["action"] for item in log_data["items"]] == [
+        "metadata_updated",
+        "graph_saved",
+        "created",
+    ]
+    assert log_data["items"][0]["details"] == {
+        "description": "验证修改日志",
+        "name": "updated workflow",
+        "tags": ["demo"],
+    }
+
     task_response = client.post(
         "/api/v1/workflow-tasks",
         json={
@@ -98,6 +126,39 @@ def test_workflow_definition_task_snapshot_and_soft_delete_match_backend(tmp_pat
         "SELECT deleted_at FROM workflow WHERE uuid=?", (workflow_uuid,)
     ).fetchone()
     assert row["deleted_at"] is not None
+    deleted_log = store._conn.execute(
+        "SELECT action, summary FROM workflow_definition_change "
+        "WHERE workflow_uuid = ? ORDER BY sequence DESC LIMIT 1",
+        (workflow_uuid,),
+    ).fetchone()
+    assert dict(deleted_log) == {"action": "deleted", "summary": "删除工作流"}
+    store.close()
+
+
+def test_legacy_workflow_change_log_returns_explicit_current_snapshot(tmp_path):
+    """日志功能启用前的工作流只返回明确的当前快照，不伪造历史操作。"""
+
+    client, store = _client(tmp_path)
+    workflow_uuid = "11111111-1111-4111-8111-111111111111"
+    now = "2026-08-11T00:00:00Z"
+    store._conn.execute(
+        """
+        INSERT INTO workflow(
+            uuid, create_time, update_time, deleted_at, description,
+            meta_data, name, tags, revision
+        ) VALUES (?, ?, ?, NULL, ?, '{}', ?, '[]', 4)
+        """,
+        (workflow_uuid, now, now, "旧工作流", "legacy workflow"),
+    )
+    store._conn.commit()
+
+    response = client.get(f"/api/v1/workflows/{workflow_uuid}/change-log")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["action"] == "current_snapshot"
+    assert data["items"][0]["summary"] == "历史记录启用前的当前权威快照"
+    assert data["items"][0]["revision"] == 4
     store.close()
 
 
