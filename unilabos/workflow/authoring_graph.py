@@ -119,6 +119,7 @@ def build_candidate_graph(
                 declaration=declaration,
                 catalog_action=group_catalog,
                 source_order=source_order[declaration.node_uuid],
+                parent_uuid=parent_by_node.get(declaration.node_uuid),
             )
         )
     for declaration in program.actions:
@@ -352,18 +353,9 @@ def build_candidate_graph(
             "output_bindings": _output_bindings(program, result_nodes),
         }
     )
-    if program.suppressed_order_dependencies:
-        unilab_meta["order_dependency_suppressions"] = [
-            {
-                "source_node_uuid": source_node_uuid,
-                "target_node_uuid": target_node_uuid,
-            }
-            for source_node_uuid, target_node_uuid in sorted(
-                program.suppressed_order_dependencies
-            )
-        ]
-    else:
-        unilab_meta.pop("order_dependency_suppressions", None)
+    # ``order_dependency_suppressions`` 只允许作为画布删边到图生成转换之间的
+    # 瞬时意图；规范源码和候选图必须用真实递归 parallel/group 结构表达。
+    unilab_meta.pop("order_dependency_suppressions", None)
     workflow_meta["unilab"] = unilab_meta
     workflow["meta_data"] = workflow_meta
 
@@ -895,6 +887,7 @@ def _group_node(
     declaration: GroupDeclaration,
     catalog_action: AuthoringCatalogAction,
     source_order: int,
+    parent_uuid: str | None,
 ) -> dict[str, Any]:
     """构造一个不参与执行边的展示分组节点（Presentation Group Node）。
 
@@ -905,12 +898,10 @@ def _group_node(
     """
 
     template = catalog_action.template
-    # ``parallel_scope`` 只关联同一个并行结构内的同级展示分组，不成为执行身份。
-    parallel_scope = declaration.parallel_scope
     return {
         "uuid": declaration.node_uuid,
         "workflow_node_template_uuid": str(template["uuid"]),
-        "parent_uuid": None,
+        "parent_uuid": parent_uuid,
         "material_uuid": None,
         "name": declaration.title or declaration.name,
         "type": "group",
@@ -933,8 +924,6 @@ def _group_node(
             "unilab": {
                 "authoring_source_order": source_order,
                 "presentation_group": True,
-                "parallel_scope": parallel_scope,
-                "parallel_order": declaration.parallel_order,
             }
         },
     }

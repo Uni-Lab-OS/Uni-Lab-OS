@@ -38,11 +38,6 @@ _NODE_METADATA = re.compile(
     r"(?:(?:[ \t]*:[ \t]*)|(?:[ \t]+))"
     r"(?P<description>\S(?:.*\S)?)[ \t]*$"
 )
-_PARALLELIZE_CONTROL = re.compile(
-    r"^(?P<indent>[ \t]*)#[ \t]*unilab:parallelize[ \t]+"
-    r"source_node_uuid=(?P<source>[0-9a-fA-F-]{36})[ \t]+"
-    r"target_node_uuid=(?P<target>[0-9a-fA-F-]{36})[ \t]*$"
-)
 _AUTHORING_MARKERS = {
     "device": "unilabos.workflow.authoring:device",
     "group": "unilabos.workflow.authoring:group",
@@ -124,8 +119,6 @@ class GroupDeclaration:
     name: str
     title: str | None
     description: str | None
-    parallel_scope: str | None
-    parallel_order: int | None
     source_node: ast.With
 
 
@@ -152,7 +145,6 @@ class WorkflowProgram:
     groups: tuple[GroupDeclaration, ...]
     parent_by_node: tuple[tuple[str, str], ...]
     order_dependencies: tuple[tuple[str, str], ...]
-    suppressed_order_dependencies: tuple[tuple[str, str], ...]
     source_order: tuple[str, ...]
     disabled_node_uuids: tuple[str, ...]
     outputs: tuple[tuple[str, ValueBinding], ...]
@@ -182,9 +174,6 @@ class _BodyState:
     groups: list[GroupDeclaration]
     parent_by_node: dict[str, str]
     order_dependencies: list[tuple[str, str]]
-    parallelize_controls: dict[int, tuple[str, str]]
-    used_parallelize_controls: set[int]
-    suppressed_order_dependencies: list[tuple[str, str]]
     source_order: list[str]
     material_results: set[str]
 
@@ -262,13 +251,11 @@ def parse_authoring_source(
         function=function,
         anchors=anchors,
     )
-    parallelize_controls = _source_parallelize_controls(python_source)
     (
         actions,
         groups,
         parent_by_node,
         order_dependencies,
-        suppressed_order_dependencies,
         authoring_source_order,
         outputs,
     ) = _workflow_body(
@@ -278,7 +265,6 @@ def parse_authoring_source(
         input_names={item["name"] for item in input_contract["parameters"]},
         anchors=anchors,
         node_metadata=node_metadata,
-        parallelize_controls=parallelize_controls,
     )
     used_anchor_lines = {
         declaration.source_node.lineno - 1
@@ -303,7 +289,6 @@ def parse_authoring_source(
         groups=tuple(groups),
         parent_by_node=tuple(sorted(parent_by_node.items())),
         order_dependencies=tuple(order_dependencies),
-        suppressed_order_dependencies=tuple(suppressed_order_dependencies),
         source_order=tuple(authoring_source_order),
         disabled_node_uuids=tuple(sorted(disabled_node_uuids)),
         outputs=tuple(outputs),
@@ -718,44 +703,6 @@ def _source_disabled_nodes(python_source: str) -> set[str]:
     return disabled
 
 
-def _source_parallelize_controls(
-    python_source: str,
-) -> dict[int, tuple[str, str]]:
-    """读取画布显式移除的先后关系控制标记。
-
-    参数说明：``python_source`` 是不可信作者源码；返回以紧随其后的
-    ``with parallel():`` 零基行号为键的源、目标节点 UUID。标记格式、重复关系
-    或未紧邻标准并行上下文时失败关闭，避免注释被误解释成执行语义。
-    """
-
-    lines = source_lines(python_source)
-    controls: dict[int, tuple[str, str]] = {}
-    pairs: set[tuple[str, str]] = set()
-    for line_index, line in enumerate(lines):
-        if "unilab:parallelize" not in line:
-            continue
-        match = _PARALLELIZE_CONTROL.fullmatch(line)
-        if match is None:
-            _fail("invalid_parallel", "并行化先后关系标记格式无效")
-        if line_index + 1 >= len(lines):
-            _fail("invalid_parallel", "并行化先后关系标记必须紧邻 parallel")
-        indent = match.group("indent")
-        if lines[line_index + 1] != f"{indent}with parallel():":
-            _fail("invalid_parallel", "并行化先后关系标记必须紧邻 parallel")
-        try:
-            pair = (
-                validate_uuid(match.group("source")),
-                validate_uuid(match.group("target")),
-            )
-        except ValueError:
-            _fail("invalid_parallel", "并行化先后关系引用了无效 UUID")
-        if pair in pairs:
-            _fail("invalid_parallel", "并行化先后关系标记重复")
-        pairs.add(pair)
-        controls[line_index + 1] = pair
-    return controls
-
-
 def _source_node_metadata(
     python_source: str,
     *,
@@ -818,12 +765,10 @@ def _workflow_body(
     input_names: set[str],
     anchors: dict[int, str],
     node_metadata: dict[int, tuple[str, str]],
-    parallelize_controls: dict[int, tuple[str, str]],
 ) -> tuple[
     list[ActionDeclaration | CompositeDeclaration | MaterialSourceDeclaration],
     list[GroupDeclaration],
     dict[str, str],
-    list[tuple[str, str]],
     list[tuple[str, str]],
     list[str],
     list[tuple[str, ValueBinding]],
@@ -858,9 +803,6 @@ def _workflow_body(
         groups=[],
         parent_by_node={},
         order_dependencies=[],
-        parallelize_controls=parallelize_controls,
-        used_parallelize_controls=set(),
-        suppressed_order_dependencies=[],
         source_order=[],
         material_results=set(),
     )
@@ -872,16 +814,6 @@ def _workflow_body(
         available_results=known_results,
         parent_uuid=None,
     )
-    if state.used_parallelize_controls != set(state.parallelize_controls):
-        _fail("invalid_parallel", "并行化先后关系标记没有绑定到控制块")
-    derived_dependencies = set(state.order_dependencies)
-    for pair in state.suppressed_order_dependencies:
-        if pair not in derived_dependencies:
-            _fail("invalid_parallel", "并行化的先后关系不存在于作者执行顺序")
-    suppressed = set(state.suppressed_order_dependencies)
-    state.order_dependencies = [
-        pair for pair in state.order_dependencies if pair not in suppressed
-    ]
     outputs = _workflow_outputs(
         return_statement,
         imports=imports,
@@ -894,7 +826,6 @@ def _workflow_body(
         state.groups,
         state.parent_by_node,
         state.order_dependencies,
-        state.suppressed_order_dependencies,
         state.source_order,
         outputs,
     )
@@ -965,20 +896,14 @@ def _parse_statement(
                 state=state,
                 available_results=available_results,
                 parent_uuid=parent_uuid,
-                parallel_scope=None,
-                parallel_order=None,
+                structural_branch=False,
             )
         if marker == "parallel":
-            if parent_uuid is not None:
-                _fail(
-                    "unsupported_authoring_syntax",
-                    "并行结构不能嵌套在展示分组中",
-                    statement,
-                )
             return _parse_parallel(
                 statement,
                 state=state,
                 available_results=available_results,
+                parent_uuid=parent_uuid,
             )
         _fail("unsupported_authoring_syntax", "工作流不支持该 with 语句", statement)
 
@@ -1035,20 +960,17 @@ def _parse_group(
     state: _BodyState,
     available_results: set[str],
     parent_uuid: str | None,
-    parallel_scope: str | None,
-    parallel_order: int | None,
+    structural_branch: bool,
 ) -> _Flow:
-    """解析一个真实展示分组节点并递归解析其动作子节点。
+    """解析持久展示分组或 ``parallel`` 的源码级顺序支路。
 
     参数说明：``statement`` 是 ``with group``；``state`` 收集节点；
-    ``available_results`` 是进入分组前可见结果；``parent_uuid`` 用于拒绝当前未支持
-    的嵌套分组；``parallel_scope``/``parallel_order`` 标记可选并行同级关系。
-    返回：忽略分组节点本身后的真实动作入口/出口。异常：名称、锚点、空分组或
-    嵌套不合法时失败关闭。
+    ``available_results`` 是进入分组前可见结果；``parent_uuid`` 是可选展示父级；
+    ``structural_branch`` 仅在 ``parallel`` 的直接子级为真，此时允许没有 UUID
+    锚点的源码级顺序容器。返回真实动作入口/出口。带锚点的 group 始终是持久
+    展示节点；无锚点 group 绝不进入候选图。
     """
 
-    if parent_uuid is not None:
-        _fail("unsupported_authoring_syntax", "暂不支持嵌套展示分组", statement)
     context = statement.items[0].context_expr
     assert isinstance(context, ast.Call)
     if context.args or any(item.arg is None for item in context.keywords):
@@ -1062,29 +984,33 @@ def _parse_group(
     ) or not name_expression.value.strip():
         _fail("invalid_group", "group name 必须是非空字符串字面量", name_expression)
     node_uuid = state.anchors.get(statement.lineno - 1)
-    if node_uuid is None:
-        _fail("invalid_node_anchor", "每个展示分组前必须有相邻节点 UUID 锚点", statement)
-    metadata = state.node_metadata.get(statement.lineno - 1)
-    declaration = GroupDeclaration(
-        node_uuid=node_uuid,
-        name=name_expression.value.strip(),
-        title=metadata[0] if metadata is not None else None,
-        description=metadata[1] if metadata is not None else None,
-        parallel_scope=parallel_scope,
-        parallel_order=parallel_order,
-        source_node=statement,
-    )
-    state.groups.append(declaration)
-    state.source_order.append(node_uuid)
+    if node_uuid is None and not structural_branch:
+        _fail("invalid_node_anchor", "展示分组前必须有相邻节点 UUID 锚点", statement)
+    child_parent_uuid = parent_uuid
+    if node_uuid is not None:
+        metadata = state.node_metadata.get(statement.lineno - 1)
+        declaration = GroupDeclaration(
+            node_uuid=node_uuid,
+            name=name_expression.value.strip(),
+            title=metadata[0] if metadata is not None else None,
+            description=metadata[1] if metadata is not None else None,
+            source_node=statement,
+        )
+        state.groups.append(declaration)
+        state.source_order.append(node_uuid)
+        if parent_uuid is not None:
+            state.parent_by_node[node_uuid] = parent_uuid
+        child_parent_uuid = node_uuid
     child_results = set(available_results)
     flow = _parse_sequence(
         list(statement.body),
         state=state,
         available_results=child_results,
-        parent_uuid=node_uuid,
+        parent_uuid=child_parent_uuid,
     )
     if not flow.entries:
-        _fail("invalid_group", "展示分组必须至少包含一个可执行动作", statement)
+        label = "并行支路" if node_uuid is None else "展示分组"
+        _fail("invalid_group", f"{label}必须至少包含一个可执行动作", statement)
     return flow
 
 
@@ -1093,58 +1019,39 @@ def _parse_parallel(
     *,
     state: _BodyState,
     available_results: set[str],
+    parent_uuid: str | None,
 ) -> _Flow:
-    """解析由直接展示分组构成的并行结构且隔离同级结果作用域。
+    """递归解析由直接 group 顺序容器构成的并行结构。
 
     参数说明：``statement`` 是 ``with parallel``；``state`` 收集各分支事实；
     ``available_results`` 是并行开始前已完成且所有分支共享的结果。返回：所有分支
-    入口、出口与合并后结果。异常：参数、非分组分支、嵌套并行、同级跨分支引用
-    或重复结果失败关闭。
+    入口、出口与合并后结果。直接 group 可以是带 UUID 的展示节点，也可以是规范
+    生成器使用的不持久源码支路；同级跨分支引用或重复结果失败关闭。
     """
 
     context = statement.items[0].context_expr
     assert isinstance(context, ast.Call)
     if context.args or context.keywords:
         _fail("invalid_parallel", "parallel 不接受参数", context)
-    control = state.parallelize_controls.get(statement.lineno - 1)
-    if control is not None:
-        if len(statement.body) != 1 or not isinstance(statement.body[0], ast.Pass):
-            _fail(
-                "invalid_parallel",
-                "并行化先后关系控制块必须且只能包含 pass",
-                statement,
-            )
-        state.used_parallelize_controls.add(statement.lineno - 1)
-        state.suppressed_order_dependencies.append(control)
-        return _Flow((), (), frozenset())
     if len(statement.body) < 2 or any(
         not isinstance(branch, ast.With)
         or _with_marker(branch, state.imports) != "group"
         for branch in statement.body
     ):
-        _fail("invalid_parallel", "parallel 必须直接包含至少两个展示分组", statement)
-    group_uuids = [
-        state.anchors.get(branch.lineno - 1)
-        for branch in statement.body
-        if isinstance(branch, ast.With)
-    ]
-    if any(group_uuid is None for group_uuid in group_uuids):
-        _fail("invalid_node_anchor", "并行分组前必须有相邻节点 UUID 锚点", statement)
-    parallel_scope = str(group_uuids[0])
+        _fail("invalid_parallel", "parallel 必须直接包含至少两个 group 顺序支路", statement)
     entries: list[str] = []
     exits: list[str] = []
     merged_results: set[str] = set()
     base_results = set(available_results)
-    for branch_order, branch in enumerate(statement.body):
+    for branch in statement.body:
         assert isinstance(branch, ast.With)
         branch_results = set(base_results)
         branch_flow = _parse_group(
             branch,
             state=state,
             available_results=branch_results,
-            parent_uuid=None,
-            parallel_scope=parallel_scope,
-            parallel_order=branch_order,
+            parent_uuid=parent_uuid,
+            structural_branch=True,
         )
         duplicated = merged_results & set(branch_flow.result_names)
         if duplicated:
