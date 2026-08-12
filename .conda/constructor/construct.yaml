@@ -3,6 +3,7 @@
 
 {% set installer_version = environ.get("UNILABOS_INSTALLER_VERSION", "0.11.3") %}
 {% set package_name = environ.get("UNILABOS_INSTALLER_PACKAGE", "unilabos") %}
+{% set package_build = environ.get("UNILABOS_INSTALLER_BUILD", "") %}
 {% set source_channel = environ.get("UNILABOS_INSTALLER_CHANNEL", "") %}
 
 name: Uni-Lab-OS
@@ -22,12 +23,12 @@ channels:
 specs:
   - python 3.11.14
   - conda >=25.5
-  - {{ package_name }} =={{ installer_version }}
+  - {{ package_name }} =={{ installer_version }}{% if package_build %} {{ package_build }}{% endif %}
 
 user_requested_specs:
   - python 3.11.14
   - conda >=25.5
-  - {{ package_name }} =={{ installer_version }}
+  - {{ package_name }} =={{ installer_version }}{% if package_build %} {{ package_build }}{% endif %}
 
 # 与 Uni-Lab-OS Conda 包的最低运行平台保持一致。constructor 会在安装前校验。
 virtual_specs:          # [unix]
