@@ -1252,7 +1252,12 @@ def get_resources():
 
 @api.get("/devices", summary="Device list", response_model=Resp)
 def get_devices():
-    """获取设备列表"""
+    """获取带库存物料身份的设备目录。
+
+    参数：无。返回：设备实例、在线事实、动作合同及实际设备物料（Material）UUID
+    的统一目录；Host 或库存权威尚未装配时保留相应关闭式结果。异常：库存读取
+    故障或设备部署 ID 映射歧义由 FastAPI 统一转换为服务错误，不猜测执行身份。
+    """
     isok, data = devices()
     if not isok:
         return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
@@ -1263,11 +1268,25 @@ def get_devices():
         if online_ok and isinstance(online_data, dict)
         else {}
     )
+    from unilabos.app.scheduler.integration import get_inventory_service
+    from unilabos.app.scheduler.inventory.resource_reference import (
+        build_inventory_resource_reference_resolver,
+    )
+
+    # ``inventory_service`` 是本地库存权威（Inventory Authority）组合根；解析器
+    # 只按实际物料 UUID 或资源图部署 ID 返回唯一身份，不使用名称或设备别名回退。
+    inventory_service = get_inventory_service()
+    material_resolver = (
+        build_inventory_resource_reference_resolver(inventory_service.store)
+        if inventory_service is not None
+        else None
+    )
     return Resp(
         data=project_device_catalog(
             resources=data,
             registry_devices=lab_registry.obtain_registry_device_info(),
             online_devices=online_devices,
+            material_resolver=material_resolver,
         )
     )
 

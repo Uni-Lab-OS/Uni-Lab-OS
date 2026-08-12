@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -48,6 +49,43 @@ _compiler_rebuilder: Optional[Callable[[], AuthoringCompiler]] = None
 _editable_package_roots: tuple[Path, ...] = ()
 _editable_source_discovery_plan: Optional[EditableSourceDiscoveryPlan] = None
 _source_monitor_enabled = True
+
+
+def _workflow_material_identity(material_row: Mapping[str, Any]) -> dict[str, Any]:
+    """把库存行投影为工作流创建所需的稳定物料身份摘要。
+
+    参数：``material_row`` 是本地库存权威（Inventory Authority）按 UUID 读取的
+    活动物料行。返回：保留物料与资源模板 UUID；若来源明确为本地资源图启动投影，
+    则把其部署 ``source_node_id`` 规范化为显式 ``edge_local_id``。异常：元数据
+    不是 JSON 对象时不猜测身份，后续设备单动作创建按关闭式规则拒绝。
+    """
+
+    # ``identity`` 与 SQLite 行分离，避免为工作流读模型修改库存返回对象。
+    identity = dict(material_row)
+    raw_meta_data = identity.get("meta_data")
+    if isinstance(raw_meta_data, str):
+        try:
+            decoded_meta_data = json.loads(raw_meta_data)
+        except (TypeError, ValueError):
+            return identity
+    else:
+        decoded_meta_data = raw_meta_data
+    if not isinstance(decoded_meta_data, Mapping):
+        return identity
+    meta_data = dict(decoded_meta_data)
+    if str(meta_data.get("edge_local_id") or "").strip():
+        identity["meta_data"] = meta_data
+        return identity
+    if meta_data.get("source") != "resource-tree-set":
+        identity["meta_data"] = meta_data
+        return identity
+    # ``edge_local_id`` 只来自本地资源图持久化的部署节点身份；名称、条码、
+    # 物料 UUID 与单次运行时 UUID 均不参与执行器解析。
+    edge_local_id = str(meta_data.get("source_node_id") or "").strip()
+    if edge_local_id:
+        meta_data["edge_local_id"] = edge_local_id
+    identity["meta_data"] = meta_data
+    return identity
 
 
 @dataclass
@@ -372,7 +410,11 @@ def compose_local_workflow_template_runtime(
                 """,
                 (material_uuid,),
             )
-            return dict(material_row) if material_row is not None else None
+            return (
+                _workflow_material_identity(material_row)
+                if material_row is not None
+                else None
+            )
 
         configured_roots = _configured_package_roots(editable_package_roots)
         if configured_roots and editable_source_discovery_plan is not None:
