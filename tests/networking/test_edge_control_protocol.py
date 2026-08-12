@@ -6,7 +6,7 @@ import asyncio
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 from unilabos.app.edge_control.client import (
     EdgeControlClient,
@@ -81,6 +81,39 @@ class FakeHostNode:
         )
 
 
+class FakeRegistrationResources:
+    def dump(self) -> List[List[Dict[str, Any]]]:
+        return [
+            [
+                {
+                    "id": "robot-01",
+                    "name": "Robot 01",
+                    "barcode": "ROBOT-01",
+                }
+            ]
+        ]
+
+
+class FakeRegistrationHostNode:
+    def __init__(self) -> None:
+        self.resources_config = FakeRegistrationResources()
+        self.devices_names = {"robot-01": "/devices/robot-01"}
+        self._action_value_mappings = {
+            "robot-01": {
+                "_execute_driver_command": {"type": "StrSingleInput"},
+                "pick": {"type": "UniLabJsonCommand"},
+                "place": {"type": "UniLabJsonCommand"},
+            }
+        }
+
+
+class FakeRegistrationDataPlane:
+    def material_uuids_by_barcode(
+        self, barcodes: Iterable[str]
+    ) -> Dict[str, str]:
+        return {barcode: str(uuid.uuid4()) for barcode in barcodes}
+
+
 class FakeResponse:
     status_code = 200
 
@@ -135,6 +168,26 @@ def _settings(path: Path) -> EdgeControlSettings:
         request_timeout=1,
         event_retry_interval=1,
     )
+
+
+def test_registration_reports_logical_actions_instead_of_transport_endpoint(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.db"
+    host_node = FakeRegistrationHostNode()
+    client = EdgeControlClient(
+        _settings(path),
+        data_plane=FakeRegistrationDataPlane(),  # type: ignore[arg-type]
+        host_node_provider=lambda: host_node,
+    )
+
+    devices = client._registration_devices()
+
+    assert devices[0]["actions"] == [
+        {"name": "pick", "type": "UniLabJsonCommand"},
+        {"name": "place", "type": "UniLabJsonCommand"},
+    ]
+    client.store.close()
 
 
 def test_store_persists_command_job_and_event_ack(tmp_path: Path) -> None:

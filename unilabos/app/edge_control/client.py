@@ -18,6 +18,9 @@ from urllib.parse import urlparse, urlunparse
 import websockets
 
 from unilabos.app.communication import BaseCommunicationClient
+from unilabos.app.device_action_capabilities import (
+    project_device_action_capabilities,
+)
 from unilabos.app.edge_control.http import EdgeDataPlane, websocket_url
 from unilabos.app.edge_control.store import EdgeControlStore, StoredEvent, StoredJob
 from unilabos.config.config import BasicConfig, EdgeControlConfig, HTTPConfig
@@ -327,18 +330,14 @@ class EdgeControlClient(BaseCommunicationClient):
                 + ", ".join(missing)
             )
 
-        from unilabos.ros.nodes.base_device_node import registered_devices
-
         devices: List[Dict[str, Any]] = []
+        action_mappings_by_device = getattr(
+            host_node, "_action_value_mappings", {}
+        )
         for candidate in candidates:
-            device_info = registered_devices.get(candidate["local_id"], {})
-            action_servers = device_info.get("actions", {})
-            actions = []
-            for action_name, action_server in sorted(action_servers.items()):
-                action_type = getattr(action_server, "_action_type", None)
-                action_type_name = str(getattr(action_type, "__name__", "")).strip()
-                if action_type_name:
-                    actions.append({"name": str(action_name), "type": action_type_name})
+            actions = project_device_action_capabilities(
+                action_mappings_by_device.get(candidate["local_id"], {})
+            )
             devices.append(
                 {
                     **candidate,

@@ -6,10 +6,10 @@ import time
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-_INTERNAL_ACTIONS = {
-    "_execute_driver_command",
-    "_execute_driver_command_async",
-}
+from unilabos.app.device_action_capabilities import (
+    project_device_action_capabilities,
+)
+
 _JSON_TYPES = {
     "bool": "boolean",
     "boolean": "boolean",
@@ -127,12 +127,15 @@ def _actions(
     mappings = _device_class(definition).get("action_value_mappings")
     if not isinstance(mappings, Mapping):
         return []
+    normalized_mappings = {
+        str(name).strip(): raw if isinstance(raw, Mapping) else {}
+        for name, raw in mappings.items()
+        if str(name).strip()
+    }
     result = []
-    for name, raw in mappings.items():
-        action_name = str(name).strip()
-        if not action_name or action_name in _INTERNAL_ACTIONS:
-            continue
-        action = raw if isinstance(raw, Mapping) else {}
+    for capability in project_device_action_capabilities(mappings):
+        action_name = capability["name"]
+        action = normalized_mappings[action_name]
         schema = action.get("schema")
         schema_value = schema if isinstance(schema, Mapping) else {}
         properties = schema_value.get("properties")
@@ -146,10 +149,7 @@ def _actions(
                     or action.get("displayname")
                     or action_name
                 ),
-                "typeName": str(
-                    getattr(action.get("type"), "__name__", action.get("type"))
-                    or f"{device_id}.{action_name}"
-                ),
+                "typeName": capability["type"],
                 "riskLevel": str(action.get("risk_level") or "normal"),
                 "inputSchema": _contract(contracts.get("goal")),
                 "outputSchema": _contract(contracts.get("result")),

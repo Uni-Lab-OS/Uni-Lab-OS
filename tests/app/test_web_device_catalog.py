@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from unilabos.app.web.device_catalog import project_device_catalog
+from unilabos.app.device_action_capabilities import (
+    project_device_action_capabilities,
+)
+from unilabos.app.web.device_catalog import (
+    project_device_catalog,
+)
 
 
 class _Content:
@@ -16,6 +21,25 @@ class _Content:
     def model_dump(self, *, by_alias: bool) -> dict[str, object]:
         assert by_alias is True
         return dict(self._values)
+
+
+class _AsyncCommand:
+    """验证运行时 ROS 类型对象按类名投影。"""
+
+
+def test_project_device_action_capabilities_filters_transport_endpoints() -> None:
+    assert project_device_action_capabilities(
+        {
+            "_execute_driver_command": {"type": "StrSingleInput"},
+            "_execute_driver_command_async": {"type": "StrSingleInput"},
+            "pick": {"type": "UniLabJsonCommand"},
+            "transfer": {"type": _AsyncCommand},
+            "missing-type": {},
+        }
+    ) == [
+        {"name": "pick", "type": "UniLabJsonCommand"},
+        {"name": "transfer", "type": "_AsyncCommand"},
+    ]
 
 
 def test_project_device_catalog_joins_resource_online_and_registry_facts() -> None:
