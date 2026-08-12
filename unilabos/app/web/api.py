@@ -28,6 +28,7 @@ from unilabos.app.model import (
 )
 from unilabos.app.web.utils.host_utils import get_host_node_info
 from unilabos.app.web.device_catalog import project_device_catalog
+from unilabos.config.config import BasicConfig
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
 
@@ -1248,6 +1249,18 @@ def get_resources():
         return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
 
     return Resp(data=dict(data))
+
+
+@api.get("/health", summary="Process health")
+def api_health() -> dict[str, str]:
+    """返回进程健康状态；生产模式不触碰本地 Scheduler 模块。"""
+
+    scheduler_status = "disabled"
+    if BasicConfig.control_plane == "local":
+        from unilabos.app.scheduler.integration import get_edge_scheduler
+
+        scheduler_status = "ready" if get_edge_scheduler() is not None else "disabled"
+    return {"status": "ok", "scheduler": scheduler_status}
 
 
 @api.get("/devices", summary="Device list", response_model=Resp)

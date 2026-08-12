@@ -14,6 +14,8 @@ ShutdownHandler = Callable[[int, FrameType | None], None]
 
 def install_host_shutdown_handlers(
     communication_clients: Iterable[Any],
+    *,
+    runtime_shutdown: Callable[[], None] | None = None,
 ) -> ShutdownHandler:
     """为 Host 进程安装会显式关闭网络所有权的正常退出处理器。
 
@@ -56,9 +58,12 @@ def install_host_shutdown_handlers(
         except BaseException as error:  # noqa: BLE001 - 必须继续关闭 Edge 存储
             failures.append(error)
         try:
-            from unilabos.app.scheduler.integration import shutdown_edge_services
+            if runtime_shutdown is None:
+                from unilabos.app.scheduler.integration import shutdown_edge_services
 
-            shutdown_edge_services()
+                shutdown_edge_services()
+            else:
+                runtime_shutdown()
         except BaseException as error:  # noqa: BLE001 - 正常退出仍需完成其余报告
             failures.append(error)
         try:

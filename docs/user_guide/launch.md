@@ -96,9 +96,12 @@ Uni-Lab 的启动过程分为以下几个阶段：
 - 命令行参数优先于配置文件中的设置
 - 普通本地 OS 启动不需要认证信息，也不会因此连接远端
 
-### 5.1 OS 本地后端权威
+### 5.1 控制面模式
 
-Host 固定启用 `app/scheduler` 和本地库存权威（Inventory Authority），无需额外参数：
+`--control_plane` 明确选择工作流和物料权威，默认值是用于临时调试的
+`local`。两个模式互斥，不能同时运行本地与正式 Backend 调度权威。
+
+本地调试模式启动独立的 `app/scheduler` 模块和本地库存权威：
 
 - Edge Scheduler：DAG 拆解、锁和重排；
 - `inventory.db`：物料、关系、预留和账本；
@@ -112,7 +115,7 @@ Host 固定启用 `app/scheduler` 和本地库存权威（Inventory Authority）
 工作流历史接口：
 
 ```bash
-unilab -g graph.json
+unilab --control_plane local -g graph.json
 ```
 
 三个数据库路径由同一个运行目录自动确定：
@@ -122,10 +125,19 @@ unilab -g graph.json --working_dir /data/unilabos-runtime
 # /data/unilabos-runtime/{inventory,device_state,workflow_history}.db
 ```
 
-后端权威只在前端连接配置中选择一次：选择 OS 时，全部服务读取 OS 的
-后端形态契约（Backend-shaped Contract）；选择正式后端（Backend）时，前端直接
-请求正式后端。OS 不接受正式后端作为物料（Material）查询上游，也不存在本地未
-命中后自动回源。
+正式 Backend 模式不导入 `app/scheduler`，也不创建 `inventory.db`、
+`device_state.db` 或 `workflow_history.db`。Edge 只保留生产协议断线恢复所需的
+`edge_control.db`，通过 HTTP 读取 Job/提交事实，并通过 WebSocket 收发短通知：
+
+```bash
+unilab --control_plane backend \
+  --app_bridges edge_control fastapi \
+  -g graph.json
+```
+
+该模式要求 API key、Edge key、Backend 数据面地址和 Scheduler 控制面地址已经通过
+配置或环境变量提供。FastAPI 只挂载基础设备与诊断路由，不挂载本地 Workflow、
+Scheduler 或 Inventory 路由。
 
 Slave 不启动物料服务，也不会打开运行目录中的 SQLite；它只能经 HostLink 请求
 Host 微后端持有的物料服务：

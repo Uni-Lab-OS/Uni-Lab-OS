@@ -268,6 +268,15 @@ def parse_args():
         help="不创建临时会话目录，沿用工作目录内的三类 SQLite 数据库。",
     )
     parser.add_argument(
+        "--control_plane",
+        choices=["local", "backend"],
+        default="local",
+        help=(
+            "控制面权威：local 启动调试用嵌入式 Scheduler；backend 仅连接正式 "
+            "Backend/Scheduler，不创建本地调度数据库。"
+        ),
+    )
+    parser.add_argument(
         "--backend",
         choices=["ros", "simple", "automancer"],
         default="ros",
@@ -652,6 +661,13 @@ def main():
     args = parser.parse_args()
     args_dict = vars(args)
 
+    from unilabos.app.control_plane import validate_control_plane_arguments
+
+    try:
+        control_plane_mode = validate_control_plane_arguments(args_dict)
+    except ValueError as error:
+        parser.error(str(error))
+
     # doctor 子命令：组网诊断，不加载完整环境（net 甚至不 import rclpy），提前处理并退出
     if args_dict.get("command") == "doctor":
         from unilabos.hostlink.doctor import run_doctor
@@ -1006,15 +1022,20 @@ def main():
         )
         return 0
 
-    # OS 主机固定承担本地后端权威；前端在 OS 与正式后端（Backend）之间选择
-    # 数据源，OS 自身不代理正式后端的物料（Material）查询。
     BasicConfig.port = args_dict["port"] if args_dict["port"] else BasicConfig.port
+    BasicConfig.control_plane = control_plane_mode.value
     BasicConfig.is_host_mode = not args_dict.get("is_slave", False)
     if BasicConfig.is_host_mode:
-        print_status(
-            "OS 主机使用 app/scheduler 与嵌入式库存作为本地后端权威",
-            "info",
-        )
+        if control_plane_mode.value == "local":
+            print_status(
+                "OS 主机使用调试用 app/scheduler 与嵌入式库存",
+                "info",
+            )
+        else:
+            print_status(
+                "生产 Edge 使用 Backend/Scheduler 远端控制面",
+                "info",
+            )
     else:
         print_status(
             "Slave 不启动物料数据库，物料查询仅通过 HostLink 访问 Host", "info"
@@ -1204,10 +1225,6 @@ def main():
         dict_from_graph,
         modify_to_backend_format,
     )
-    from unilabos.app.communication import (
-        CommunicationClientFactory,
-        get_communication_client,
-    )
     from unilabos.app.backend import start_backend
     from unilabos.app.web import http_client
     from unilabos.app.web import start_server
@@ -1353,102 +1370,27 @@ def main():
     if should_attach_legacy_http_bridge(args_dict):
         args_dict["bridges"].append(http_client)
     if BasicConfig.is_host_mode:
-        # 所有输入与设备图均验证后、任何 Store 打开前，才创建本代私有数据库目录。
-        from unilabos.app.runtime_storage import prepare_runtime_storage_session
-
-        prepare_runtime_storage_session(args_dict, working_dir=working_dir)
-        comm_client = None
-        communication_clients = []
-        communication_bridge_enabled = any(
-            bridge in args_dict["app_bridges"]
-            for bridge in ("websocket", "edge_control")
-        )
-        if communication_bridge_enabled:
-            selected_protocol = (
-                "edge_control"
-                if "edge_control" in args_dict["app_bridges"]
-                else "websocket"
-            )
-            # 工作区加载与 Web 模块导入不得把生产 Edge 锁进旧云端客户端缓存。
-            CommunicationClientFactory.reset_client()
-            comm_client = get_communication_client(selected_protocol)
-            args_dict["bridges"].append(comm_client)
-            communication_clients.append(comm_client)
-            comm_client.start()
-
-        # Host 即使没有远端通信客户端也拥有 HostLink 和 ROS2 定向发现服务；正常
-        # TERM 必须显式关闭这些独立进程资源，不能只依赖不会由默认 TERM 运行的
-        # ``atexit``。
-        install_host_shutdown_handlers(communication_clients)
-
-        # 主机固定拥有同一运行目录中的库存权威（Inventory Authority）。从节点
-        # 不进入此分支，只通过 HostLink 查询主机。
-        from unilabos.app.scheduler.integration import setup_edge_inventory
-        from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
-
-        inventory_db = str(args_dict.get("edge_inventory_db") or "").strip()
-        if not inventory_db:
-            raise ValueError("嵌入式物料服务缺少自动派生的 inventory.db")
-        inventory_db = os.path.abspath(os.path.expanduser(inventory_db))
-        bootstrap_resource_graph = should_bootstrap_local_resource_graph(
-            is_host_mode=BasicConfig.is_host_mode,
-        )
-        setup_edge_inventory(
-            inventory_db,
-            ws_client=(
-                comm_client if communication_bridge_enabled else None
-            ),
-            resource_tree_set=resource_tree_set if bootstrap_resource_graph else None,
-            registry_snapshot=(
-                RegistryTemplateSnapshot.from_registry(lab_registry)
-                if bootstrap_resource_graph
-                else None
-            ),
-            resource_graph_source_id=(
-                str(file_path or "remote-startup.json")
-                if bootstrap_resource_graph
-                else ""
-            ),
-            material_shapes=workspace_material_shapes,
-            material_model_catalog=workspace_material_models,
-        )
-        print_status(
-            f"Host Edge 物料服务已启用 (SQLite WAL: {inventory_db})",
-            "info",
+        from unilabos.app.control_plane import (
+            ControlPlaneRuntimeContext,
+            start_control_plane_runtime,
         )
 
-        # OS 作为本地后端权威时固定装配 app/scheduler，并使用本地稳定排序。
-        from unilabos.app.scheduler.integration import setup_edge_scheduler
-
-        _edge_sched, edge_exec_backend = setup_edge_scheduler(
-            ws_client=(
-                comm_client if communication_bridge_enabled else None
-            ),
-            inventory_db_path=inventory_db,
-            device_state_db_path=str(args_dict.get("edge_device_state_db") or ""),
-            workflow_history_db_path=str(
-                args_dict.get("edge_workflow_history_db") or ""
+        control_plane_runtime = start_control_plane_runtime(
+            ControlPlaneRuntimeContext(
+                arguments=args_dict,
+                working_dir=working_dir,
+                resource_tree_set=resource_tree_set,
+                registry=lab_registry,
+                graph_source_id=str(file_path or "remote-startup.json"),
+                material_shapes=workspace_material_shapes,
+                material_model_catalog=workspace_material_models,
             ),
         )
-        # backend 是 bridge 形状(publish_job_status)，注册进 HostNode.bridges 收执行回报
-        args_dict["bridges"].append(edge_exec_backend)
-        print_status(
-            "Edge 调度微后端已启用 (DAG 调度 + 设备状态 + 工作流历史)",
-            "info",
+        args_dict["bridges"].extend(control_plane_runtime.bridges)
+        install_host_shutdown_handlers(
+            control_plane_runtime.communication_clients,
+            runtime_shutdown=control_plane_runtime.shutdown_services,
         )
-
-        # Host/Slave 连接、心跳和 ROS 组网配置由 Edge 微后端拥有。
-        # HostNode 稍后创建时只向已启动的服务挂接运行时资源树。
-        from unilabos.app.scheduler.host_network import setup_host_network_service
-        from unilabos.config.config import HostLinkConfig
-
-        host_network = setup_host_network_service()
-        if host_network is not None:
-            print_status(
-                f"Edge 微后端已监听 Slave 连接: "
-                f"{HostLinkConfig.bind}:{host_network.server.port}",
-                "info",
-            )
     else:
         print_status("SlaveMode跳过Websocket连接")
         from unilabos.app.scheduler.host_network import setup_slave_network_client

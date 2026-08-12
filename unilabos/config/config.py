@@ -11,6 +11,8 @@ class BasicConfig:
     ak = ""
     sk = ""
     working_dir = ""
+    # local：启动调试用嵌入式 Scheduler；backend：仅运行生产 Edge 协议。
+    control_plane: Literal["local", "backend"] = "local"
     # 当前进程唯一允许发现/读取/写入的工作流源码（Workflow Source）选择目录。
     # 使用不可变 tuple，空值表示没有本地源码授权，禁止隐式扫描工作区。
     workflow_editable_package_roots: tuple[str, ...] = ()
@@ -60,8 +62,7 @@ class WSConfig:
     ws_ping_timeout = 8  # pong等待超时（秒），对齐服务端 PongWait
 
 
-# 历史实验配置，仅为旧模块导入兼容保留。主启动不会读取或启动该链路；
-# OS 运行时禁止把正式后端（Backend）作为控制面或数据源。
+# 正式 Backend 控制面的 Edge 协议配置；仅 ``control_plane=backend`` 使用。
 class EdgeControlConfig:
     api_key = ""
     edge_key = ""

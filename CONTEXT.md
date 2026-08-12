@@ -51,5 +51,12 @@ _Avoid_: Workflow definition, Run alias
 
 **Edge-only Inventory Interface**:
 The operational lot, reservation, ledger, and diagnostic contract used inside
-Edge; it is not part of the Shared Interface.
+the local debug control plane; it is not started by the production Backend
+control plane and is not part of the Shared Interface.
 _Avoid_: Frontend fallback, Backend-compatible route
+
+**Control Plane**:
+The single selected owner of workflow scheduling and material facts. `local`
+starts the embedded debug Scheduler and Inventory modules; `backend` uses the
+production HTTP/WebSocket Edge protocol and does not start those modules.
+_Avoid_: Environment name, deployment label, simultaneous local and remote authority

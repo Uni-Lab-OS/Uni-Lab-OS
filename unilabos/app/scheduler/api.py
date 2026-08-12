@@ -149,13 +149,6 @@ def create_scheduler_router(
             raise HTTPException(status_code=503, detail="edge scheduler not enabled")
         return scheduler
 
-    @router.get("/health")
-    def health() -> Dict[str, str]:
-        return {
-            "status": "ok",
-            "scheduler": "ready" if get_scheduler() is not None else "disabled",
-        }
-
     @router.get("/hostlink/peers")
     def hostlink_peers() -> Dict[str, Any]:
         """微后端组网状态：Host 列 Slave，Slave 报连接及已接收 ROS 配置。"""
@@ -497,6 +490,13 @@ def create_app(
     app.state.scheduler = scheduler or EdgeScheduler(monitor=monitor_bus)
     app.state.device_state = device_state
     app.state.history = history
+
+    @app.get("/api/v1/health")
+    def standalone_health() -> Dict[str, str]:
+        """独立调试服务的进程健康检查；不属于 Scheduler 业务路由。"""
+
+        return {"status": "ok", "scheduler": "ready"}
+
     app.include_router(
         create_scheduler_router(
             lambda: app.state.scheduler,

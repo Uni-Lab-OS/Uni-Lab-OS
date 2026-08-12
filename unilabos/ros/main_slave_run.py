@@ -64,11 +64,7 @@ def main(
 ) -> None:
     """主函数"""
 
-    # HostLink must publish/start the directed DDS endpoint before rclpy.init;
-    # direct embedders do not pass through app.main's earlier composition root.
-    from unilabos.app.scheduler.host_network import setup_host_network_service
-
-    setup_host_network_service()
+    _setup_host_network_before_ros()
 
     # Support restart - check if rclpy is already initialized
     if not rclpy.ok():
@@ -135,9 +131,23 @@ def main(
 def _attach_hostlink_runtime(host_node) -> None:
     """Attach HostNode's live resource tree to the microbackend-owned service."""
 
+    if BasicConfig.control_plane != "local":
+        return
     from unilabos.app.scheduler.host_network import setup_host_network_service
 
     setup_host_network_service(lambda: host_node.resources_config)
+
+
+def _setup_host_network_before_ros() -> None:
+    """仅本地调试模式在 ROS 初始化前启动 HostLink 微后端。"""
+
+    if BasicConfig.control_plane != "local":
+        return
+    # HostLink 必须在 rclpy.init 前启动定向 DDS 端点；直接嵌入本地 ROS
+    # 运行时的调用方不会经过 app.main 的组合根，因此在这里兜底装配。
+    from unilabos.app.scheduler.host_network import setup_host_network_service
+
+    setup_host_network_service()
 
 
 def _start_hostlink_server(host_node) -> None:

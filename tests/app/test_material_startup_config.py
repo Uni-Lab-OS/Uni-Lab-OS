@@ -199,9 +199,18 @@ def test_instance_sync_can_select_production_devices_only() -> None:
 
 def test_production_edge_control_bridge_is_supported() -> None:
     args = vars(
-        parse_args().parse_args(["--app_bridges", "edge_control", "fastapi"])
+        parse_args().parse_args(
+            [
+                "--control_plane",
+                "backend",
+                "--app_bridges",
+                "edge_control",
+                "fastapi",
+            ]
+        )
     )
 
+    assert args["control_plane"] == "backend"
     assert args["app_bridges"] == ["edge_control", "fastapi"]
 
 
