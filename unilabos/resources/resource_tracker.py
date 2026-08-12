@@ -230,6 +230,31 @@ def assemble_tracker_state(res: "ResourceDict") -> Dict[str, Any]:
     return data
 
 
+def normalize_plr_tracker_states(
+    default_states: Dict[str, Dict[str, Any]],
+    persisted_states: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """将持久化资源状态投影到当前 PLR 状态契约。
+
+    Backend 库存数据可能包含 ``status`` 等业务字段，而 PLR tracker
+    需要与当前版本匹配的完整状态字典。以新建资源的默认状态为基线，
+    仅覆盖当前 PLR 版本能识别的持久化字段。
+    """
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for name, default_state in default_states.items():
+        stored_state = persisted_states.get(name)
+        if not isinstance(default_state, dict):
+            continue
+        if not isinstance(stored_state, dict):
+            normalized[name] = dict(default_state)
+            continue
+        normalized[name] = {
+            key: stored_state.get(key, default_value)
+            for key, default_value in default_state.items()
+        }
+    return normalized
+
+
 class GraphData(BaseModel):
     """图数据结构，包含节点和边"""
 
@@ -778,7 +803,11 @@ class ResourceTreeSet(object):
 
                 location = cast(Coordinate, deserialize(plr_dict["location"]))
                 plr_resource.location = location
-                plr_resource.load_all_state(all_states)
+                plr_resource.load_all_state(
+                    normalize_plr_tracker_states(
+                        plr_resource.serialize_all_state(), all_states
+                    )
+                )
                 # 使用 DeviceNodeResourceTracker 设置 UUID 和 Extra
                 tracker.loop_set_uuid(plr_resource, name_to_uuid)
                 tracker.loop_set_extra(plr_resource, name_to_extra)

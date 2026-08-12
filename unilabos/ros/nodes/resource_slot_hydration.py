@@ -3,14 +3,118 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
+
+from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 
 
 class ResourceSlotHydrationError(ValueError):
     """物料占位符（ResourceSlot）无法安全水合为完整父资源上下文。"""
+
+
+_production_resource_lock = threading.RLock()
+_production_resource_nodes: tuple[dict[str, Any], ...] = ()
+
+
+def install_production_resource_nodes(
+    resource_trees: Sequence[Mapping[str, Any]]
+    | Sequence[Sequence[Mapping[str, Any]]],
+    material_uuids_by_barcode: Mapping[str, str],
+) -> None:
+    """安装生产 Edge 的 Backend 身份资源投影。
+
+    参数说明：``resource_trees`` 是工作区设备图提供的物理资源形状；
+    ``material_uuids_by_barcode`` 是 Backend 返回的稳定物料身份。返回：无。
+
+    所有运行资源必须能映射到 Backend；本投影只驻留内存，不创建本地 Scheduler
+    或库存数据库。缺失身份、重复身份或父关系无法重写时失败关闭。
+    """
+
+    source_nodes = [deepcopy(dict(node)) for node in _flatten_resource_nodes(resource_trees)]
+    backend_uuid_by_local_uuid: dict[str, str] = {}
+    backend_uuid_by_local_id: dict[str, str] = {}
+    projected_uuid_by_index: list[str] = []
+    missing_barcodes: list[str] = []
+    for node in source_nodes:
+        local_id = str(node.get("id") or node.get("name") or "").strip()
+        if not local_id:
+            raise ResourceSlotHydrationError("生产资源投影行缺少本地 ID")
+        barcode = normalize_resource_instance_barcode(node.get("barcode"), local_id)
+        backend_uuid = str(material_uuids_by_barcode.get(barcode) or "").strip()
+        if not backend_uuid:
+            missing_barcodes.append(barcode)
+            projected_uuid_by_index.append("")
+            continue
+        if backend_uuid in projected_uuid_by_index:
+            raise ResourceSlotHydrationError("生产资源投影包含重复 Backend UUID")
+        projected_uuid_by_index.append(backend_uuid)
+        backend_uuid_by_local_id[local_id] = backend_uuid
+        local_uuid = str(node.get("uuid") or node.get("unilabos_uuid") or "").strip()
+        if local_uuid:
+            backend_uuid_by_local_uuid[local_uuid] = backend_uuid
+    if missing_barcodes:
+        raise ResourceSlotHydrationError(
+            "生产资源尚未在 Backend 初始化: " + ", ".join(sorted(missing_barcodes))
+        )
+
+    projected_nodes: list[dict[str, Any]] = []
+    for index, node in enumerate(source_nodes):
+        projected = deepcopy(node)
+        projected["uuid"] = projected_uuid_by_index[index]
+        projected.pop("unilabos_uuid", None)
+        parent_uuid = str(node.get("parent_uuid") or "").strip()
+        parent_id = str(node.get("parent") or "").strip()
+        projected["parent_uuid"] = (
+            backend_uuid_by_local_uuid.get(parent_uuid)
+            or backend_uuid_by_local_id.get(parent_id)
+            or None
+        )
+        projected_nodes.append(projected)
+
+    with _production_resource_lock:
+        global _production_resource_nodes
+        _production_resource_nodes = tuple(projected_nodes)
+
+
+def query_production_resource_nodes_sync(
+    query_uuids: Sequence[str],
+) -> list[dict[str, Any]]:
+    """从生产内存投影按 Backend UUID 查询完整资源子树。
+
+    参数说明：``query_uuids`` 是 Backend 调度参数中的稳定物料身份。返回：按安装
+    顺序展开的目标及其全部后代。投影未安装或目标不存在时抛出异常，不回退本地
+    Scheduler。
+    """
+
+    normalized_uuids = [str(resource_uuid).strip() for resource_uuid in query_uuids]
+    if not normalized_uuids or any(not resource_uuid for resource_uuid in normalized_uuids):
+        raise ResourceSlotHydrationError("生产资源查询必须提供稳定 UUID")
+    with _production_resource_lock:
+        nodes = [deepcopy(node) for node in _production_resource_nodes]
+    if not nodes:
+        raise ResourceSlotHydrationError("生产资源投影尚未安装")
+    nodes_by_uuid = {_resource_uuid(node): node for node in nodes}
+    missing = [resource_uuid for resource_uuid in normalized_uuids if resource_uuid not in nodes_by_uuid]
+    if missing:
+        raise ResourceSlotHydrationError(
+            "Backend 物料不属于当前 Edge 设备图: " + ", ".join(missing)
+        )
+    selected: set[str] = set(normalized_uuids)
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            resource_uuid = _resource_uuid(node)
+            parent_uuid = _optional_uuid(node.get("parent_uuid"))
+            if parent_uuid in selected and resource_uuid not in selected:
+                selected.add(resource_uuid)
+                changed = True
+    return [node for node in nodes if _resource_uuid(node) in selected]
 
 
 @dataclass(frozen=True, slots=True)

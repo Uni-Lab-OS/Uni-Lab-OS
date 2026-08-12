@@ -244,9 +244,16 @@ class TestPlrRoundTrip:
         from unilabos.resources.container import RegularContainer
 
         c = RegularContainer(name="rt_beaker", size_x=10, size_y=10, size_z=20, max_volume=100.0)
-        c.tracker.add_liquid("water", 50.0)
-        c.tracker.add_liquid(None, 10.0)  # 产生 Unknown 名，unknown_counter+1
+        if "liquids" in c.serialize_state():
+            c.tracker.add_liquid("water", 50.0)
+            c.tracker.add_liquid(None, 10.0)  # 产生 Unknown 名，unknown_counter+1
+        else:
+            # 新版 PLR VolumeTracker 只跟踪总体积，不接受物质参数。
+            c.tracker.add_liquid(60.0)
+            c.tracker.commit()
         c.tracker.remove_liquid(20.0)  # (None, -20) 按比例移除
+        if "liquids" not in c.serialize_state():
+            c.tracker.commit()
         return c
 
     def test_from_plr_promotes_and_to_plr_restores(self, container):
@@ -254,11 +261,16 @@ class TestPlrRoundTrip:
         root = tree_set.trees[0].root_node.res_content
         original_state = container.serialize_state()
 
-        # 提升：物质面三键在根字段且与 PLR serialize_state 等值，data 只剩规格面/冗余
-        assert json.loads(json.dumps(root.liquids)) == json.loads(json.dumps(original_state["liquids"]))
-        assert json.loads(json.dumps(root.liquid_history)) == json.loads(json.dumps(original_state["liquid_history"]))
-        assert root.unknown_counter == original_state["unknown_counter"]
-        assert "liquids" not in root.data and "liquid_history" not in root.data
+        # 旧版 PLR 的物质面三键会提升到根字段；新版仅提供体积状态。
+        if "liquids" in original_state:
+            assert json.loads(json.dumps(root.liquids)) == json.loads(json.dumps(original_state["liquids"]))
+            assert json.loads(json.dumps(root.liquid_history)) == json.loads(json.dumps(original_state["liquid_history"]))
+            assert root.unknown_counter == original_state["unknown_counter"]
+            assert "liquids" not in root.data and "liquid_history" not in root.data
+        else:
+            assert root.liquids is None
+            assert root.liquid_history is None
+            assert root.unknown_counter is None
 
         # 模拟 HostLink/HTTP 传输：dump → JSON → from_raw_dict_list → to_plr
         wire = json.loads(json.dumps([n.res_content.model_dump(by_alias=True) for n in tree_set.all_nodes]))
@@ -268,4 +280,18 @@ class TestPlrRoundTrip:
 
         assert json.loads(json.dumps(restored_state)) == json.loads(json.dumps(original_state))
         assert restored.tracker.volume == container.tracker.volume
-        assert restored.tracker.current_liquids == container.tracker.current_liquids
+        if hasattr(container.tracker, "current_liquids"):
+            assert restored.tracker.current_liquids == container.tracker.current_liquids
+
+    def test_business_data_does_not_replace_plr_tracker_state(self) -> None:
+        """库存业务字段不是 PLR tracker 快照，不能直接传给 load_state。"""
+        pytest.importorskip("pylabrobot")
+
+        tree_set = ResourceTreeSet.from_raw_dict_list(
+            [make_content(data={"status": "warehouse"})]
+        )
+
+        restored = tree_set.to_plr_resources(skip_devices=False)[0]
+
+        assert restored.tracker.volume == 0
+        assert restored.tracker.pending_volume == 0

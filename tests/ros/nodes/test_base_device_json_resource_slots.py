@@ -334,6 +334,63 @@ def test_json_command_hydrates_each_resource_slot_in_mixed_device_batch(
     assert converted == [target_resource, raw_device]
 
 
+def test_backend_control_plane_resource_conversion_does_not_query_local_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """生产模式 ResourceSlot 水合不得访问本地 Scheduler 的 ROS 资源服务。
+
+    参数说明：``monkeypatch`` 替换生产资源投影和资源树装配。返回：无；断言仅查询
+    Backend 身份投影，并保持父树水合的两次查询语义。
+    """
+
+    target_uuid = "50000000-0000-4000-8000-000000000121"
+    parent_uuid = "50000000-0000-4000-8000-000000000122"
+    raw_target = {"uuid": target_uuid, "parent_uuid": parent_uuid}
+    raw_parent = {"uuid": parent_uuid, "parent_uuid": None}
+    parent_resource = SimpleNamespace(unilabos_uuid=parent_uuid, children=[])
+    target_resource = SimpleNamespace(
+        unilabos_uuid=target_uuid,
+        parent=parent_resource,
+        children=[],
+    )
+    parent_resource.children.append(target_resource)
+    parent_tree = SimpleNamespace(
+        trees=[SimpleNamespace(root_node=SimpleNamespace(res_content=parent_resource))],
+        to_plr_resources=lambda: [parent_resource],
+    )
+    observed_queries: list[list[str]] = []
+
+    def query_production(query_uuids: list[str]) -> list[dict[str, object]]:
+        observed_queries.append(query_uuids)
+        return [raw_target] if query_uuids == [target_uuid] else [raw_parent, raw_target]
+
+    monkeypatch.setattr(base_device_node.BasicConfig, "control_plane", "backend")
+    monkeypatch.setattr(
+        base_device_node,
+        "query_production_resource_nodes_sync",
+        query_production,
+    )
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        lambda _rows: parent_tree,
+    )
+    node = object.__new__(BaseROS2DeviceNode)
+    node._resource_clients = {}
+    node.resource_tracker = SimpleNamespace(
+        loop_find_with_uuid=lambda root, wanted: (
+            target_resource if root is parent_resource and wanted == target_uuid else None
+        ),
+        figure_resource=lambda resource, try_mode: [resource],
+    )
+    node.lab_logger = lambda: _Logger()
+
+    converted = node._convert_resources_sync(target_uuid)
+
+    assert converted == [target_resource]
+    assert observed_queries == [[target_uuid], [parent_uuid]]
+
+
 def test_async_resource_conversion_preserves_device_root_skipped_by_plr_projection() -> None:
     """异步 Host 动作也必须保留设备型库位父资源的原始映射。
 

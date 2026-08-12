@@ -54,7 +54,11 @@ class EdgeDataPlane:
                 f"{self.backend_api}/materials",
                 span_name="edge.http.material.list",
                 http_route="/api/v1/materials",
-                params={"page": page, "page_size": 100},
+                params={
+                    "page": page,
+                    "page_size": 100,
+                    "with_children": "true",
+                },
             )
             items = result.get("items")
             if not isinstance(items, list):

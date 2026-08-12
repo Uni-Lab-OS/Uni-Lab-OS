@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 from unilabos.utils.tracing import inject_trace_context, span
 
 
@@ -313,12 +314,10 @@ def _graph_node(raw_node: Any) -> Dict[str, Any]:
         raise InstanceSyncError("device graph node must be an object")
     local_id = str(raw_node.get("id") or "").strip()
     template_name = str(raw_node.get("class") or "").strip()
-    barcode = str(raw_node.get("barcode") or "").strip()
     raw_resource_type = str(raw_node.get("type") or "").strip()
     if not local_id or not template_name:
         raise InstanceSyncError("every graph node requires id and class")
-    if not barcode:
-        barcode = f"UNILAB-GRAPH-{local_id}"
+    barcode = normalize_resource_instance_barcode(raw_node.get("barcode"), local_id)
     resource_type = "device" if raw_resource_type == "device" else "resource"
     parent = raw_node.get("parent")
     return {

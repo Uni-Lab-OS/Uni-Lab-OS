@@ -49,6 +49,7 @@ from unilabos.registry.placeholder_type import ResourceSlotRawInput
 from unilabos.ros.nodes.resource_slot_hydration import (
     hydrate_resource_slot_nodes_sync,
     hydrate_resource_slot_tree_async,
+    query_production_resource_nodes_sync,
     query_resource_nodes_sync,
     resolve_resource_slot_target,
 )
@@ -3140,20 +3141,25 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 for resource_uuid in uuids_list
             ]
 
-        resource_client = self._resource_clients["c2s_update_resource_tree"]
-        raw_data = query_resource_nodes_sync(
-            resource_client,
-            uuids_list,
-            request_factory=SerialCommand.Request,
-        )
-        raw_data = hydrate_resource_slot_nodes_sync(
-            uuids_list[0],
-            raw_data,
-            query_nodes=lambda query_uuids: query_resource_nodes_sync(
+        if BasicConfig.control_plane == "backend":
+            raw_data = query_production_resource_nodes_sync(uuids_list)
+            query_nodes = query_production_resource_nodes_sync
+        else:
+            resource_client = self._resource_clients["c2s_update_resource_tree"]
+            raw_data = query_resource_nodes_sync(
+                resource_client,
+                uuids_list,
+                request_factory=SerialCommand.Request,
+            )
+            query_nodes = lambda query_uuids: query_resource_nodes_sync(
                 resource_client,
                 query_uuids,
                 request_factory=SerialCommand.Request,
-            ),
+            )
+        raw_data = hydrate_resource_slot_nodes_sync(
+            uuids_list[0],
+            raw_data,
+            query_nodes=query_nodes,
         )
 
         # 转换为 PLR 资源

@@ -24,6 +24,7 @@ from unilabos.app.device_action_capabilities import (
 from unilabos.app.edge_control.http import EdgeDataPlane, websocket_url
 from unilabos.app.edge_control.store import EdgeControlStore, StoredEvent, StoredJob
 from unilabos.config.config import BasicConfig, EdgeControlConfig, HTTPConfig
+from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 from unilabos.utils.log import get_comm_logger
 from unilabos.utils.tracing import (
     extract_trace_context,
@@ -294,8 +295,9 @@ class EdgeControlClient(BaseCommunicationClient):
         host_node = self._host_node_provider()
         if host_node is None:
             raise RuntimeError("HostNode is not ready")
+        resource_trees = host_node.resources_config.dump()
         nodes: Dict[str, Dict[str, Any]] = {}
-        for tree in host_node.resources_config.dump():
+        for tree in resource_trees:
             for resource in tree:
                 resource_id = str(resource.get("id") or "").strip()
                 if resource_id:
@@ -316,19 +318,28 @@ class EdgeControlClient(BaseCommunicationClient):
         if not candidates:
             raise RuntimeError("Edge production registration requires a device barcode")
 
+        all_barcodes = {
+            normalize_resource_instance_barcode(
+                resource.get("barcode"), str(resource.get("id") or "").strip()
+            )
+            for resource in nodes.values()
+        }
         material_uuids = self.data_plane.material_uuids_by_barcode(
-            candidate["barcode"] for candidate in candidates
+            all_barcodes
         )
         missing = sorted(
-            candidate["barcode"]
-            for candidate in candidates
-            if candidate["barcode"] not in material_uuids
+            barcode for barcode in all_barcodes if barcode not in material_uuids
         )
         if missing:
             raise RuntimeError(
-                "Edge production devices have not been initialized in Backend: "
+                "Edge production resources have not been initialized in Backend: "
                 + ", ".join(missing)
             )
+        from unilabos.ros.nodes.resource_slot_hydration import (
+            install_production_resource_nodes,
+        )
+
+        install_production_resource_nodes(resource_trees, material_uuids)
 
         devices: List[Dict[str, Any]] = []
         action_mappings_by_device = getattr(

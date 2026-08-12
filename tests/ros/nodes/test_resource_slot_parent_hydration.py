@@ -13,7 +13,9 @@ from unilabos.ros.nodes import base_device_node
 from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode
 from unilabos.ros.nodes.resource_slot_hydration import (
     ResourceSlotHydrationError,
+    install_production_resource_nodes,
     plan_resource_slot_parent_context,
+    query_production_resource_nodes_sync,
     validate_resource_slot_parent_context,
 )
 
@@ -279,6 +281,58 @@ def test_sync_conversion_hydrates_target_inside_parent_resource_tree(
         [parent_uuid],
     ]
     assert all(request["data"]["with_children"] is True for request in requests)
+
+
+def test_production_resource_projection_uses_backend_identity_and_parent_tree() -> None:
+    """生产资源投影必须以 Backend UUID 改写本地图的完整父子关系。
+
+    参数：无。返回：无；断言直接物料查询和父树补查均不依赖本地 Scheduler。
+    """
+
+    local_parent_uuid = "50000000-0000-4000-8000-000000000111"
+    local_target_uuid = "50000000-0000-4000-8000-000000000112"
+    backend_parent_uuid = "50000000-0000-4000-8000-000000000113"
+    backend_target_uuid = "50000000-0000-4000-8000-000000000114"
+    install_production_resource_nodes(
+        [[
+            {
+                **_raw_resource(local_parent_uuid),
+                "id": "warehouse",
+                "name": "Warehouse",
+                "type": "warehouse",
+                "class": "warehouse",
+                "barcode": "UNILAB-GRAPH-warehouse",
+                "config": {"sites": [{"name": "A1"}]},
+                "data": {},
+                "extra": {},
+            },
+            {
+                **_raw_resource(local_target_uuid, parent_uuid=local_parent_uuid),
+                "id": "sample",
+                "name": "Sample",
+                "type": "container",
+                "class": "sample",
+                "barcode": "UNILAB-GRAPH-sample",
+                "config": {},
+                "data": {},
+                "extra": {},
+            },
+        ]],
+        {
+            "UNILAB-GRAPH-warehouse": backend_parent_uuid,
+            "UNILAB-GRAPH-sample": backend_target_uuid,
+        },
+    )
+
+    direct_rows = query_production_resource_nodes_sync([backend_target_uuid])
+    parent_rows = query_production_resource_nodes_sync([backend_parent_uuid])
+
+    assert [row["uuid"] for row in direct_rows] == [backend_target_uuid]
+    assert direct_rows[0]["parent_uuid"] == backend_parent_uuid
+    assert [row["uuid"] for row in parent_rows] == [
+        backend_parent_uuid,
+        backend_target_uuid,
+    ]
 
 
 def test_sync_conversion_without_parent_keeps_single_query(

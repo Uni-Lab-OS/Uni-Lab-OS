@@ -10,6 +10,13 @@ from unilabos.app.instance_sync import (
     run_instance_sync_command,
 )
 from unilabos.app.main import parse_args
+from unilabos.resources.instance_identity import normalize_resource_instance_barcode
+
+
+def test_resource_instance_barcode_normalizes_plr_and_fallback_shapes() -> None:
+    assert normalize_resource_instance_barcode({"data": " PLR-01 "}, "sample") == "PLR-01"
+    assert normalize_resource_instance_barcode(" EXPLICIT-01 ", "sample") == "EXPLICIT-01"
+    assert normalize_resource_instance_barcode(None, "sample") == "UNILAB-GRAPH-sample"
 
 
 class FakeResponse:

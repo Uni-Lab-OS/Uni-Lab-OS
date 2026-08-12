@@ -438,6 +438,43 @@ def test_http_data_plane_uses_three_uuid_identity() -> None:
     assert outcome["headers"]["Idempotency-Key"] == f"{job.job_uuid}:outcome:v1"
 
 
+def test_material_identity_lookup_includes_child_resources() -> None:
+    """生产资源身份解析必须显式包含有父级的物料。
+
+    参数：无。返回：无；断言 Edge 查询 Backend 时携带 ``with_children=true``。
+    """
+
+    class MaterialSession:
+        def __init__(self) -> None:
+            self.headers: Dict[str, str] = {}
+            self.params: Dict[str, Any] = {}
+
+        def request(self, _method: str, _url: str, **kwargs: Any) -> FakeResponse:
+            self.params = kwargs["params"]
+            return FakeResponse(
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [{"barcode": "CHILD-01", "uuid": "material-01"}],
+                        "total": 1,
+                    },
+                }
+            )
+
+    plane = EdgeDataPlane(
+        "http://backend:8080",
+        "http://scheduler:8081",
+        "edge-secret",
+    )
+    session = MaterialSession()
+    plane._session = session  # type: ignore[assignment]
+
+    resolved = plane.material_uuids_by_barcode(["CHILD-01"])
+
+    assert resolved == {"CHILD-01": "material-01"}
+    assert session.params["with_children"] == "true"
+
+
 def test_http_data_plane_injects_w3c_trace_headers(monkeypatch) -> None:
     traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
