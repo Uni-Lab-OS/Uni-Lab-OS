@@ -51,6 +51,36 @@ class _MissingEdgeLocalIdInventoryStore(FakeInventoryStore):
         }
 
 
+class _LocalResourceGraphInventoryStore(FakeInventoryStore):
+    """提供由本地资源图启动投影生成的设备物料摘要。"""
+
+    def query_one(
+        self,
+        sql: str,
+        params: tuple[Any, ...],
+    ) -> dict[str, Any] | None:
+        """把设备物料元数据替换为本地资源图的权威来源事实。
+
+        参数：``sql`` 是组合根发出的规范查询，``params`` 是查询参数。返回：
+        资源模板查询沿用父实现；设备物料查询只携带资源图来源与部署节点身份，
+        复现真实 Workbench 库存形状。异常：父存储异常原样传播。
+        """
+
+        # ``resolved_row`` 是真实库存查询形状；测试只替换设备物料的来源元数据，
+        # 避免手写模板身份并偏离生产组合根。
+        resolved_row = super().query_one(sql, params)
+        if resolved_row is None or "FROM material" not in sql:
+            return resolved_row
+        return {
+            "uuid": resolved_row["uuid"],
+            "resource_template_uuid": resolved_row["resource_template_uuid"],
+            "meta_data": (
+                '{"source":"resource-tree-set",'
+                '"source_node_id":"pump-01"}'
+            ),
+        }
+
+
 def _thaw_json(value: Any) -> Any:
     """把只读目录 JSON 容器恢复为持久化可比较形状。
 
@@ -174,6 +204,53 @@ def test_device_action_run_requires_edge_executor_before_persistence(
         # ``task_page`` 是创建失败后的公开任务读模型，证明失败发生在持久化之前。
         task_page = workflow_service.list_workflow_tasks(page=1, page_size=20)
         assert task_page["total"] == 0
+    finally:
+        reset_workflow_service_for_test()
+
+
+def test_local_resource_graph_material_freezes_deployment_executor_identity(
+    tmp_path: Path,
+) -> None:
+    """本地资源图设备物料必须冻结其部署节点身份为具体执行器。
+
+    参数：``tmp_path`` 隔离工作流数据库。返回：无。断言：资源图启动投影保存的
+    ``source_node_id`` 经本地组合根验证来源后成为显式 ``edge_local_id``，设备
+    单动作运行（DeviceActionRun）可创建且执行计划（ExecutionPlan）冻结同一
+    设备身份；不存在名称、物料 UUID 或运行时 UUID 回退。
+    """
+
+    reset_workflow_service_for_test()
+    try:
+        # ``workflow_service`` 是本地工作流任务（WorkflowTask）写权威；目录模板
+        # 与设备物料来自同一真实组合根路径。
+        workflow_service, projection = compose_local_workflow_template_runtime(
+            tmp_path,
+            inventory_store=_LocalResourceGraphInventoryStore(),
+            registry=FakeRegistry(),
+        )
+        action_template = (
+            projection.snapshot()
+            .require_action(
+                "lab.devices:Pump",
+                "transfer",
+            )
+            .template
+        )
+
+        # ``created`` 是标准任务/作业聚合；设备身份必须在持久化前已经冻结。
+        created = workflow_service.create_device_action_run(
+            material_uuid=DEVICE_MATERIAL_UUID,
+            workflow_node_template_uuid=action_template["uuid"],
+            param={"volume": 2.0},
+            execution_policy={},
+            idempotency_key="d1a-local-resource-graph-executor",
+            description=None,
+            meta_data={},
+        )
+
+        assert created["task"]["execution_plan"]["nodes"][0]["device_id"] == (
+            "pump-01"
+        )
     finally:
         reset_workflow_service_for_test()
 

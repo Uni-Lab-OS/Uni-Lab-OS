@@ -1270,8 +1270,13 @@ def api_health() -> dict[str, str]:
 
 @api.get("/authoring/device-catalog", summary="Authoring device catalog", response_model=Resp)
 def get_authoring_device_catalog():
-    """返回 OS 创作工具使用的富设备目录，而不占用共享 Backend 路由。"""
+    """返回 OS 创作工具使用的富设备目录。
 
+    参数：无。返回：设备实例、在线事实、动作合同及库存权威解析的
+    实际设备 Material UUID，不占用共享 Backend ``/devices`` 路由。
+    异常：库存读取故障或设备部署 ID 映射歧义由 FastAPI 统一转换为服务
+    错误，不猜测执行身份。
+    """
     isok, data = devices()
     if not isok:
         return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
@@ -1282,11 +1287,25 @@ def get_authoring_device_catalog():
         if online_ok and isinstance(online_data, dict)
         else {}
     )
+    from unilabos.app.scheduler.integration import get_inventory_service
+    from unilabos.app.scheduler.inventory.resource_reference import (
+        build_inventory_resource_reference_resolver,
+    )
+
+    # ``inventory_service`` 是本地库存权威（Inventory Authority）组合根；解析器
+    # 只按实际物料 UUID 或资源图部署 ID 返回唯一身份，不使用名称或设备别名回退。
+    inventory_service = get_inventory_service()
+    material_resolver = (
+        build_inventory_resource_reference_resolver(inventory_service.store)
+        if inventory_service is not None
+        else None
+    )
     return Resp(
         data=project_device_catalog(
             resources=data,
             registry_devices=lab_registry.obtain_registry_device_info(),
             online_devices=online_devices,
+            material_resolver=material_resolver,
         )
     )
 
