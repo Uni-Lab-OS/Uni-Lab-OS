@@ -144,6 +144,7 @@ jobs:
         if: steps.should_build.outputs.should_build == 'true'
         run: |
           conda run -n build-env rattler-build build -r .conda/vendor/rfc8785/recipe.yaml --target-platform ${{ matrix.platform }} -c conda-forge --output-dir ./output
+          conda run -n build-env rattler-build build -r .conda/vendor/opcua/recipe.yaml --target-platform ${{ matrix.platform }} -c conda-forge --output-dir ./output
           conda run -n build-env rattler-build build -r .conda/vendor/msgcenterpy/recipe.yaml --target-platform ${{ matrix.platform }} -c conda-forge --channel ./output --output-dir ./output
           conda run -n build-env rattler-build build -r .conda/vendor/pylabrobot/recipe.yaml --target-platform ${{ matrix.platform }} -c conda-forge --channel ./output --output-dir ./output
 
@@ -160,6 +161,9 @@ jobs:
             conda run -n build-env anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --user uni-lab --force "$package"
           done
           for package in $(find ./output -name "rfc8785*.conda"); do
+            conda run -n build-env anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --user uni-lab --force "$package"
+          done
+          for package in $(find ./output -name "opcua*.conda"); do
             conda run -n build-env anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --user uni-lab --force "$package"
           done
           for package in $(find ./output -name "msgcenterpy*.conda"); do

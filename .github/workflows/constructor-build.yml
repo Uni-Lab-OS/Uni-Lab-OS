@@ -195,6 +195,7 @@ jobs:
           conda activate "$prefix"
           python -c "import unilabos; print(unilabos.__version__)"
           python -c "import rclpy; print('rclpy: OK')"
+          python -c "from opcua import Client, ua; print('opcua: OK')"
           unilab --help
           unilab-supervisor --help
 
@@ -220,6 +221,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "unilabos import failed" }
           & "$prefix\python.exe" -c "import rclpy; print('rclpy: OK')"
           if ($LASTEXITCODE -ne 0) { throw "rclpy import failed" }
+          & "$prefix\python.exe" -c "from opcua import Client, ua; print('opcua: OK')"
+          if ($LASTEXITCODE -ne 0) { throw "opcua import failed" }
           & "$prefix\Scripts\unilab.exe" --help
           if ($LASTEXITCODE -ne 0) { throw "unilab --help failed" }
           & "$prefix\Scripts\unilab-supervisor.exe" --help
