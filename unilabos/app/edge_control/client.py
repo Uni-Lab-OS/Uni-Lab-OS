@@ -530,7 +530,7 @@ class EdgeControlClient(BaseCommunicationClient):
         payload: Dict[str, Any],
         command_trace: Dict[str, str],
     ) -> None:
-        """Acknowledge the Backend's cache-invalidation-only material notice."""
+        """确认 Backend 仅用于缓存失效提示的物料短通知。"""
 
         expected_keys = {"device_material_uuid", "material_uuid", "action"}
         if set(payload) != expected_keys:
