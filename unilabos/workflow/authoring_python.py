@@ -37,6 +37,39 @@ class RenderedAuthoringSource:
     source_map: list[dict[str, Any]]
 
 
+@dataclass(frozen=True, slots=True)
+class _ExecutionAtom:
+    """一个可执行动作或持久展示分组。"""
+
+    node_uuid: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionSeries:
+    """按词法顺序执行的结构化子块。"""
+
+    children: tuple["_ExecutionBlock", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionParallel:
+    """彼此隔离、结束后合并结果作用域的结构化支路。"""
+
+    children: tuple["_ExecutionBlock", ...]
+
+
+_ExecutionBlock = _ExecutionAtom | _ExecutionSeries | _ExecutionParallel
+
+
+@dataclass(frozen=True, slots=True)
+class _StructuredExecutionPlan:
+    """候选依赖图的递归 series/parallel 分解及展示容器投影。"""
+
+    root: _ExecutionBlock | None
+    group_blocks: dict[str, _ExecutionBlock]
+    material_sources_by_parent: dict[str | None, tuple[str, ...]]
+
+
 def render_authoring_python(
     *,
     graph: Mapping[str, Any],
@@ -86,7 +119,18 @@ def render_authoring_python(
         and edge.get("source_node_uuid") in node_by_uuid
         and edge.get("target_node_uuid") in node_by_uuid
     ]
+    _order_dependency_suppressions(
+        workflow,
+        edges=visible_edges,
+        catalog_by_node=catalog_by_node,
+    )
     ordered_nodes = _authoring_ordered_nodes(node_by_uuid, visible_edges)
+    execution_plan = _structured_execution_plan(
+        ordered_nodes=ordered_nodes,
+        node_by_uuid=node_by_uuid,
+        edges=visible_edges,
+        catalog_by_node=catalog_by_node,
+    )
     device_symbols, device_imports = _device_symbols(ordered_nodes, catalog_by_node)
     published_workflow_imports = {
         tuple(str(action.template["class"]).rsplit(":", 1))
@@ -185,10 +229,13 @@ def render_authoring_python(
         if _is_group(catalog_by_node[str(node["uuid"])])
     ]
     marker_imports = "device, workflow"
-    if group_nodes:
+    if group_nodes or _execution_has_parallel(execution_plan.root):
         marker_imports += ", group"
-        if any(_parallel_scope(node) is not None for node in group_nodes):
-            marker_imports += ", parallel"
+    if _execution_has_parallel(execution_plan.root) or any(
+        _execution_has_parallel(block)
+        for block in execution_plan.group_blocks.values()
+    ):
+        marker_imports += ", parallel"
     if material_sources:
         marker_imports += ", MaterialFlowRole, material_source, resource_ref"
     elif any(
@@ -260,7 +307,6 @@ def render_authoring_python(
         lines.append(f"def {function_name}(){return_annotation}:")
     if function_docstring is not None:
         _append_function_docstring(lines=lines, docstring=function_docstring)
-
     incoming = _incoming_bindings(
         visible_edges,
         catalog_by_node=catalog_by_node,
@@ -274,93 +320,41 @@ def render_authoring_python(
         and function_docstring is None
     ):
         lines.append('    """空工作流。"""')
-    children_by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for node in ordered_nodes:
-        parent_uuid = node.get("parent_uuid")
-        if isinstance(parent_uuid, str):
-            children_by_parent[parent_uuid].append(node)
     rendered_node_uuids: set[str] = set()
-    rendered_parallel_scopes: set[str] = set()
-    for node in ordered_nodes:
-        node_uuid = str(node["uuid"])
-        if node_uuid in rendered_node_uuids or isinstance(node.get("parent_uuid"), str):
-            continue
-        action = catalog_by_node[node_uuid]
-        if not _is_group(action):
-            _append_action_source(
-                node=node,
-                indent_level=1,
-                lines=lines,
-                source_map=source_map,
-                result_names=result_names,
-                material_sources=material_sources,
-                incoming=incoming,
-                node_by_uuid=node_by_uuid,
-                catalog_by_node=catalog_by_node,
-                device_symbols=device_symbols,
-            )
-            rendered_node_uuids.add(node_uuid)
-            continue
-        scope = _parallel_scope(node)
-        if scope is not None:
-            if scope in rendered_parallel_scopes:
-                continue
-            rendered_parallel_scopes.add(scope)
-            lines.append("    with parallel():")
-            scope_groups = sorted(
-                (
-                    candidate
-                    for candidate in group_nodes
-                    if _parallel_scope(candidate) == scope
-                ),
-                key=_parallel_order,
-            )
-            for group_node in scope_groups:
-                _append_group_source(
-                    node=group_node,
-                    indent_level=2,
-                    lines=lines,
-                    source_map=source_map,
-                    action=catalog_by_node[str(group_node["uuid"])],
-                )
-                rendered_node_uuids.add(str(group_node["uuid"]))
-                for child in children_by_parent[str(group_node["uuid"])]:
-                    _append_action_source(
-                        node=child,
-                        indent_level=3,
-                        lines=lines,
-                        source_map=source_map,
-                        result_names=result_names,
-                        material_sources=material_sources,
-                        incoming=incoming,
-                        node_by_uuid=node_by_uuid,
-                        catalog_by_node=catalog_by_node,
-                        device_symbols=device_symbols,
-                    )
-                    rendered_node_uuids.add(str(child["uuid"]))
-            continue
-        _append_group_source(
-            node=node,
+    _append_material_sources_for_parent(
+        parent_uuid=None,
+        execution_plan=execution_plan,
+        indent_level=1,
+        lines=lines,
+        source_map=source_map,
+        result_names=result_names,
+        rendered_node_uuids=rendered_node_uuids,
+        material_sources=material_sources,
+        incoming=incoming,
+        node_by_uuid=node_by_uuid,
+        catalog_by_node=catalog_by_node,
+        device_symbols=device_symbols,
+    )
+    if execution_plan.root is not None:
+        _append_execution_block(
+            block=execution_plan.root,
             indent_level=1,
+            execution_plan=execution_plan,
             lines=lines,
             source_map=source_map,
-            action=action,
+            result_names=result_names,
+            rendered_node_uuids=rendered_node_uuids,
+            material_sources=material_sources,
+            incoming=incoming,
+            node_by_uuid=node_by_uuid,
+            catalog_by_node=catalog_by_node,
+            device_symbols=device_symbols,
         )
-        rendered_node_uuids.add(node_uuid)
-        for child in children_by_parent[node_uuid]:
-            _append_action_source(
-                node=child,
-                indent_level=2,
-                lines=lines,
-                source_map=source_map,
-                result_names=result_names,
-                material_sources=material_sources,
-                incoming=incoming,
-                node_by_uuid=node_by_uuid,
-                catalog_by_node=catalog_by_node,
-                device_symbols=device_symbols,
-            )
-            rendered_node_uuids.add(str(child["uuid"]))
+    if rendered_node_uuids != set(node_by_uuid):
+        raise AuthoringGraphError(
+            "non_series_parallel",
+            "工作流依赖无法无损投影到递归 series/parallel 源码",
+        )
     if explicit_output_bindings:
         # 输出绑定字典由编译器按作者声明顺序建立；保留该顺序才能让输出合同
         # 在 Python→图→Python 往返中达到固定点。
@@ -383,6 +377,480 @@ def render_authoring_python(
         python_source="\n".join(lines).rstrip() + "\n",
         source_map=source_map,
     )
+
+
+def _structured_execution_plan(
+    *,
+    ordered_nodes: list[dict[str, Any]],
+    node_by_uuid: Mapping[str, dict[str, Any]],
+    edges: list[Any],
+    catalog_by_node: Mapping[str, AuthoringCatalogAction],
+) -> _StructuredExecutionPlan:
+    """把真实动作依赖递归分解为规范 series/parallel 结构。
+
+    展示分组只充当递归容器，不参与执行依赖。分组边界必须是依赖偏序的模块：
+    两个容器之间要么全部前置、要么全部后置、要么完全不可比；部分穿透边界会
+    产生无法由词法 group 无损表达的 DAG，并返回专用诊断。
+    """
+
+    order_index = {
+        str(node["uuid"]): index for index, node in enumerate(ordered_nodes)
+    }
+    children_by_parent: dict[str | None, list[str]] = defaultdict(list)
+    group_uuids = {
+        node_uuid
+        for node_uuid, action in catalog_by_node.items()
+        if _is_group(action)
+    }
+    for node in ordered_nodes:
+        node_uuid = str(node["uuid"])
+        parent = node.get("parent_uuid")
+        parent_uuid = parent if isinstance(parent, str) else None
+        if parent_uuid is not None and parent_uuid not in group_uuids:
+            raise AuthoringGraphError(
+                "non_series_parallel",
+                "工作流展示父级不能作为结构化执行容器",
+            )
+        children_by_parent[parent_uuid].append(node_uuid)
+    for children in children_by_parent.values():
+        children.sort(key=order_index.__getitem__)
+
+    executable_uuids = {
+        node_uuid
+        for node_uuid, action in catalog_by_node.items()
+        if not _is_group(action) and not _is_material_source(action)
+    }
+    outgoing: dict[str, set[str]] = {
+        node_uuid: set() for node_uuid in executable_uuids
+    }
+    for edge in edges:
+        if not isinstance(edge, Mapping):
+            raise AuthoringGraphError("candidate_invalid", "候选边必须是对象")
+        source_uuid = str(edge.get("source_node_uuid"))
+        target_uuid = str(edge.get("target_node_uuid"))
+        if source_uuid in executable_uuids and target_uuid in executable_uuids:
+            outgoing[source_uuid].add(target_uuid)
+
+    reachability: dict[str, set[str]] = {}
+
+    def reachable_from(node_uuid: str, visiting: set[str]) -> set[str]:
+        """返回动作节点的全部后继并拒绝依赖环。"""
+
+        cached = reachability.get(node_uuid)
+        if cached is not None:
+            return cached
+        if node_uuid in visiting:
+            raise AuthoringGraphError("candidate_invalid", "候选图包含依赖环")
+        visiting.add(node_uuid)
+        result: set[str] = set()
+        for target_uuid in outgoing[node_uuid]:
+            result.add(target_uuid)
+            result.update(reachable_from(target_uuid, visiting))
+        visiting.remove(node_uuid)
+        reachability[node_uuid] = result
+        return result
+
+    for executable_uuid in executable_uuids:
+        reachable_from(executable_uuid, set())
+
+    descendant_cache: dict[str, frozenset[str]] = {}
+
+    def executable_descendants(
+        node_uuid: str,
+        visiting: set[str],
+    ) -> frozenset[str]:
+        """读取动作或展示分组覆盖的真实可执行节点集合。"""
+
+        cached = descendant_cache.get(node_uuid)
+        if cached is not None:
+            return cached
+        if node_uuid in visiting:
+            raise AuthoringGraphError("candidate_invalid", "展示分组父级形成环")
+        if node_uuid in executable_uuids:
+            result = frozenset({node_uuid})
+        elif node_uuid in group_uuids:
+            visiting.add(node_uuid)
+            descendants: set[str] = set()
+            for child_uuid in children_by_parent.get(node_uuid, []):
+                descendants.update(executable_descendants(child_uuid, visiting))
+            visiting.remove(node_uuid)
+            result = frozenset(descendants)
+        else:
+            result = frozenset()
+        descendant_cache[node_uuid] = result
+        return result
+
+    for node_uuid in node_by_uuid:
+        executable_descendants(node_uuid, set())
+
+    group_blocks: dict[str, _ExecutionBlock] = {}
+
+    def build_container(parent_uuid: str | None) -> _ExecutionBlock | None:
+        """分解一个工作流或展示分组直接子级偏序。"""
+
+        units = [
+            child_uuid
+            for child_uuid in children_by_parent.get(parent_uuid, [])
+            if child_uuid in executable_uuids or child_uuid in group_uuids
+        ]
+        for unit_uuid in units:
+            if not descendant_cache[unit_uuid]:
+                raise AuthoringGraphError(
+                    "non_series_parallel",
+                    "展示分组必须至少包含一个真实可执行节点",
+                )
+        if not units:
+            return None
+
+        precedes: set[tuple[str, str]] = set()
+        for left_index, left_uuid in enumerate(units):
+            left_nodes = descendant_cache[left_uuid]
+            for right_uuid in units[left_index + 1 :]:
+                right_nodes = descendant_cache[right_uuid]
+                forward = [
+                    right_node in reachability[left_node]
+                    for left_node in left_nodes
+                    for right_node in right_nodes
+                ]
+                reverse = [
+                    left_node in reachability[right_node]
+                    for left_node in left_nodes
+                    for right_node in right_nodes
+                ]
+                if any(forward) and any(reverse):
+                    raise AuthoringGraphError("candidate_invalid", "候选图包含依赖环")
+                if any(forward):
+                    if not all(forward):
+                        raise AuthoringGraphError(
+                            "non_series_parallel",
+                            "工作流依赖部分穿透展示分组，无法结构化并行",
+                        )
+                    precedes.add((left_uuid, right_uuid))
+                elif any(reverse):
+                    if not all(reverse):
+                        raise AuthoringGraphError(
+                            "non_series_parallel",
+                            "工作流依赖部分穿透展示分组，无法结构化并行",
+                        )
+                    precedes.add((right_uuid, left_uuid))
+
+        return _decompose_series_parallel(
+            tuple(units),
+            precedes=precedes,
+            order_index=order_index,
+        )
+
+    for group_uuid in sorted(group_uuids, key=order_index.__getitem__, reverse=True):
+        block = build_container(group_uuid)
+        if block is None:
+            raise AuthoringGraphError(
+                "non_series_parallel",
+                "展示分组必须至少包含一个真实可执行节点",
+            )
+        group_blocks[group_uuid] = block
+
+    material_sources_by_parent: dict[str | None, tuple[str, ...]] = {}
+    for parent_uuid, children in children_by_parent.items():
+        material_sources_by_parent[parent_uuid] = tuple(
+            child_uuid
+            for child_uuid in children
+            if _is_material_source(catalog_by_node[child_uuid])
+        )
+    return _StructuredExecutionPlan(
+        root=build_container(None),
+        group_blocks=group_blocks,
+        material_sources_by_parent=material_sources_by_parent,
+    )
+
+
+def _decompose_series_parallel(
+    units: tuple[str, ...],
+    *,
+    precedes: set[tuple[str, str]],
+    order_index: Mapping[str, int],
+) -> _ExecutionBlock:
+    """按可比图/不可比图连通分量递归分解 series-parallel 偏序。"""
+
+    if len(units) == 1:
+        return _ExecutionAtom(units[0])
+
+    def components(*, comparable: bool) -> list[tuple[str, ...]]:
+        """返回可比图或不可比图的稳定无向连通分量。"""
+
+        remaining = set(units)
+        result: list[tuple[str, ...]] = []
+        while remaining:
+            start = min(remaining, key=order_index.__getitem__)
+            remaining.remove(start)
+            pending = [start]
+            component = {start}
+            while pending:
+                current = pending.pop()
+                neighbors: list[str] = []
+                for candidate in tuple(remaining):
+                    related = (
+                        (current, candidate) in precedes
+                        or (candidate, current) in precedes
+                    )
+                    if related is comparable:
+                        neighbors.append(candidate)
+                for candidate in neighbors:
+                    remaining.remove(candidate)
+                    component.add(candidate)
+                    pending.append(candidate)
+            result.append(tuple(sorted(component, key=order_index.__getitem__)))
+        return result
+
+    comparable_components = components(comparable=True)
+    if len(comparable_components) > 1:
+        branches = tuple(
+            _decompose_series_parallel(
+                component,
+                precedes=precedes,
+                order_index=order_index,
+            )
+            for component in sorted(
+                comparable_components,
+                key=lambda values: min(order_index[value] for value in values),
+            )
+        )
+        return _ExecutionParallel(branches)
+
+    incomparable_components = components(comparable=False)
+    if len(incomparable_components) > 1:
+        component_by_unit = {
+            unit_uuid: component_index
+            for component_index, component in enumerate(incomparable_components)
+            for unit_uuid in component
+        }
+        outgoing_components: dict[int, set[int]] = {
+            index: set() for index in range(len(incomparable_components))
+        }
+        indegree = {index: 0 for index in outgoing_components}
+        for source_uuid, target_uuid in precedes:
+            source_index = component_by_unit.get(source_uuid)
+            target_index = component_by_unit.get(target_uuid)
+            if (
+                source_index is None
+                or target_index is None
+                or source_index == target_index
+                or target_index in outgoing_components[source_index]
+            ):
+                continue
+            outgoing_components[source_index].add(target_index)
+            indegree[target_index] += 1
+        ready = sorted(
+            (index for index, count in indegree.items() if count == 0),
+            key=lambda index: min(
+                order_index[value] for value in incomparable_components[index]
+            ),
+        )
+        ordered_components: list[tuple[str, ...]] = []
+        while ready:
+            component_index = ready.pop(0)
+            ordered_components.append(incomparable_components[component_index])
+            for target_index in outgoing_components[component_index]:
+                indegree[target_index] -= 1
+                if indegree[target_index] == 0:
+                    ready.append(target_index)
+                    ready.sort(
+                        key=lambda index: min(
+                            order_index[value]
+                            for value in incomparable_components[index]
+                        )
+                    )
+        if len(ordered_components) != len(incomparable_components):
+            raise AuthoringGraphError("candidate_invalid", "候选图包含依赖环")
+        return _ExecutionSeries(
+            tuple(
+                _decompose_series_parallel(
+                    component,
+                    precedes=precedes,
+                    order_index=order_index,
+                )
+                for component in ordered_components
+            )
+        )
+
+    raise AuthoringGraphError(
+        "non_series_parallel",
+        "工作流依赖不是可结构化的 series-parallel DAG；请调整先后关系或拆分分组",
+    )
+
+
+def _execution_has_parallel(block: _ExecutionBlock | None) -> bool:
+    """递归判断结构块是否需要导入 ``parallel``。"""
+
+    if block is None or isinstance(block, _ExecutionAtom):
+        return False
+    if isinstance(block, _ExecutionParallel):
+        return True
+    return any(_execution_has_parallel(child) for child in block.children)
+
+
+def _append_material_sources_for_parent(
+    *,
+    parent_uuid: str | None,
+    execution_plan: _StructuredExecutionPlan,
+    indent_level: int,
+    lines: list[str],
+    source_map: list[dict[str, Any]],
+    result_names: set[str],
+    rendered_node_uuids: set[str],
+    material_sources: Mapping[str, RenderedMaterialSource],
+    incoming: Mapping[tuple[str, str], tuple[str, str]],
+    node_by_uuid: Mapping[str, dict[str, Any]],
+    catalog_by_node: Mapping[str, AuthoringCatalogAction],
+    device_symbols: Mapping[tuple[str, str | None], str],
+) -> None:
+    """在展示容器执行结构前生成其物料来源声明。"""
+
+    for node_uuid in execution_plan.material_sources_by_parent.get(parent_uuid, ()):
+        _append_action_source(
+            node=node_by_uuid[node_uuid],
+            indent_level=indent_level,
+            lines=lines,
+            source_map=source_map,
+            result_names=result_names,
+            material_sources=material_sources,
+            incoming=incoming,
+            node_by_uuid=node_by_uuid,
+            catalog_by_node=catalog_by_node,
+            device_symbols=device_symbols,
+        )
+        rendered_node_uuids.add(node_uuid)
+
+
+def _append_execution_block(
+    *,
+    block: _ExecutionBlock,
+    indent_level: int,
+    execution_plan: _StructuredExecutionPlan,
+    lines: list[str],
+    source_map: list[dict[str, Any]],
+    result_names: set[str],
+    rendered_node_uuids: set[str],
+    material_sources: Mapping[str, RenderedMaterialSource],
+    incoming: Mapping[tuple[str, str], tuple[str, str]],
+    node_by_uuid: Mapping[str, dict[str, Any]],
+    catalog_by_node: Mapping[str, AuthoringCatalogAction],
+    device_symbols: Mapping[tuple[str, str | None], str],
+) -> None:
+    """递归生成一个规范执行结构块。"""
+
+    if isinstance(block, _ExecutionSeries):
+        for child in block.children:
+            _append_execution_block(
+                block=child,
+                indent_level=indent_level,
+                execution_plan=execution_plan,
+                lines=lines,
+                source_map=source_map,
+                result_names=result_names,
+                rendered_node_uuids=rendered_node_uuids,
+                material_sources=material_sources,
+                incoming=incoming,
+                node_by_uuid=node_by_uuid,
+                catalog_by_node=catalog_by_node,
+                device_symbols=device_symbols,
+            )
+        return
+    if isinstance(block, _ExecutionParallel):
+        lines.append(f"{'    ' * indent_level}with parallel():")
+        for branch_index, branch in enumerate(block.children, start=1):
+            if (
+                isinstance(branch, _ExecutionAtom)
+                and _is_group(catalog_by_node[branch.node_uuid])
+            ):
+                _append_execution_block(
+                    block=branch,
+                    indent_level=indent_level + 1,
+                    execution_plan=execution_plan,
+                    lines=lines,
+                    source_map=source_map,
+                    result_names=result_names,
+                    rendered_node_uuids=rendered_node_uuids,
+                    material_sources=material_sources,
+                    incoming=incoming,
+                    node_by_uuid=node_by_uuid,
+                    catalog_by_node=catalog_by_node,
+                    device_symbols=device_symbols,
+                )
+                continue
+            lines.append(
+                f"{'    ' * (indent_level + 1)}"
+                f"with group(name={'并行支路 ' + str(branch_index)!r}):"
+            )
+            _append_execution_block(
+                block=branch,
+                indent_level=indent_level + 2,
+                execution_plan=execution_plan,
+                lines=lines,
+                source_map=source_map,
+                result_names=result_names,
+                rendered_node_uuids=rendered_node_uuids,
+                material_sources=material_sources,
+                incoming=incoming,
+                node_by_uuid=node_by_uuid,
+                catalog_by_node=catalog_by_node,
+                device_symbols=device_symbols,
+            )
+        return
+
+    node_uuid = block.node_uuid
+    node = node_by_uuid[node_uuid]
+    action = catalog_by_node[node_uuid]
+    if _is_group(action):
+        _append_group_source(
+            node=node,
+            indent_level=indent_level,
+            lines=lines,
+            source_map=source_map,
+            action=action,
+        )
+        rendered_node_uuids.add(node_uuid)
+        _append_material_sources_for_parent(
+            parent_uuid=node_uuid,
+            execution_plan=execution_plan,
+            indent_level=indent_level + 1,
+            lines=lines,
+            source_map=source_map,
+            result_names=result_names,
+            rendered_node_uuids=rendered_node_uuids,
+            material_sources=material_sources,
+            incoming=incoming,
+            node_by_uuid=node_by_uuid,
+            catalog_by_node=catalog_by_node,
+            device_symbols=device_symbols,
+        )
+        _append_execution_block(
+            block=execution_plan.group_blocks[node_uuid],
+            indent_level=indent_level + 1,
+            execution_plan=execution_plan,
+            lines=lines,
+            source_map=source_map,
+            result_names=result_names,
+            rendered_node_uuids=rendered_node_uuids,
+            material_sources=material_sources,
+            incoming=incoming,
+            node_by_uuid=node_by_uuid,
+            catalog_by_node=catalog_by_node,
+            device_symbols=device_symbols,
+        )
+        return
+    _append_action_source(
+        node=node,
+        indent_level=indent_level,
+        lines=lines,
+        source_map=source_map,
+        result_names=result_names,
+        material_sources=material_sources,
+        incoming=incoming,
+        node_by_uuid=node_by_uuid,
+        catalog_by_node=catalog_by_node,
+        device_symbols=device_symbols,
+    )
+    rendered_node_uuids.add(node_uuid)
 
 
 def _append_function_docstring(*, lines: list[str], docstring: str) -> None:
@@ -437,7 +905,7 @@ def _append_group_source(
     metadata_comment = _node_metadata_comment(node=node, action=action)
     if metadata_comment is not None:
         lines.append(f"{indent}{metadata_comment}")
-    lines.append(f"{indent}# unilab:node_uuid={node_uuid}")
+    lines.append(f"{indent}{_node_anchor(node_uuid, node)}")
     params = node.get("param")
     name = params.get("name") if isinstance(params, Mapping) else None
     if not isinstance(name, str) or not name.strip():
@@ -488,7 +956,7 @@ def _append_action_source(
     metadata_comment = _node_metadata_comment(node=node, action=action)
     if metadata_comment is not None:
         lines.append(f"{indent}{metadata_comment}")
-    lines.append(f"{indent}# unilab:node_uuid={node_uuid}")
+    lines.append(f"{indent}{_node_anchor(node_uuid, node)}")
     if node_uuid in material_sources:
         call = material_sources[node_uuid].call
     elif _is_published_workflow(action):
@@ -537,6 +1005,13 @@ class _NoDefault:
 
 
 _NO_DEFAULT = _NoDefault()
+
+
+def _node_anchor(node_uuid: str, node: Mapping[str, Any]) -> str:
+    """把静态禁用事实编码进仍与动作声明相邻的稳定 UUID 锚点。"""
+
+    suffix = " disabled=true" if node.get("disabled") is True else ""
+    return f"# unilab:node_uuid={node_uuid}{suffix}"
 
 
 def _node_index(nodes: list[Any]) -> dict[str, dict[str, Any]]:
@@ -677,38 +1152,77 @@ def _authoring_ordered_nodes(
     return ordered
 
 
-def _parallel_scope(node: Mapping[str, Any]) -> str | None:
-    """读取展示分组所属并行结构的稳定作用域身份。
+def _order_dependency_suppressions(
+    workflow: Mapping[str, Any],
+    *,
+    edges: list[Any],
+    catalog_by_node: Mapping[str, AuthoringCatalogAction],
+) -> list[tuple[str, str]]:
+    """读取并验证画布显式并行化的先后关系。
 
-    参数说明：``node`` 是展示分组候选节点。返回：未处于并行结构时返回
-    ``None``，否则返回已规范化 UUID。异常：元数据不是对象或作用域不是 UUID 时
-    抛出 ``AuthoringGraphError``，防止错误地串行生成并行分支。
+    参数说明：``workflow`` 提供作者级 Uni-Lab 元数据；``edges`` 是可见候选边；
+    ``catalog_by_node`` 证明源、目标节点及其 ready 连接点。返回按 UUID 排序的
+    源、目标节点对。关系格式非法、节点不存在或待抑制 ready 边仍存在时失败关闭。
     """
 
-    unilab = (node.get("meta_data") or {}).get("unilab", {})
+    unilab = (workflow.get("meta_data") or {}).get("unilab", {})
     if not isinstance(unilab, Mapping):
-        raise AuthoringGraphError("candidate_invalid", "展示分组创作元数据必须是对象")
-    value = unilab.get("parallel_scope")
-    if value is None:
-        return None
-    try:
-        return validate_uuid(value)
-    except (TypeError, ValueError) as error:
-        raise AuthoringGraphError("candidate_invalid", "并行结构作用域身份无效") from error
-
-
-def _parallel_order(node: Mapping[str, Any]) -> int:
-    """读取展示分组在同一并行结构内的稳定分支顺序。
-
-    参数说明：``node`` 是已确认属于并行结构的展示分组。返回：零基非负分支顺序。
-    异常：顺序缺失、布尔值或负数时抛出 ``AuthoringGraphError``。
-    """
-
-    unilab = (node.get("meta_data") or {}).get("unilab", {})
-    value = unilab.get("parallel_order") if isinstance(unilab, Mapping) else None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise AuthoringGraphError("candidate_invalid", "并行分支顺序必须是非负整数")
-    return value
+        raise AuthoringGraphError("candidate_invalid", "工作流创作元数据必须是对象")
+    raw = unilab.get("order_dependency_suppressions")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise AuthoringGraphError("candidate_invalid", "并行化先后关系必须是数组")
+    result: set[tuple[str, str]] = set()
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != {
+            "source_node_uuid",
+            "target_node_uuid",
+        }:
+            raise AuthoringGraphError("candidate_invalid", "并行化先后关系格式无效")
+        try:
+            source_uuid = validate_uuid(item.get("source_node_uuid"))
+            target_uuid = validate_uuid(item.get("target_node_uuid"))
+        except (TypeError, ValueError) as error:
+            raise AuthoringGraphError(
+                "candidate_invalid",
+                "并行化先后关系引用了无效 UUID",
+            ) from error
+        if source_uuid not in catalog_by_node or target_uuid not in catalog_by_node:
+            raise AuthoringGraphError("candidate_invalid", "并行化先后关系引用未知节点")
+        source_handles = [
+            handle
+            for handle in catalog_by_node[source_uuid].handles
+            if handle.get("handle_key") == "ready"
+            and handle.get("io_type") == "source"
+        ]
+        target_handles = [
+            handle
+            for handle in catalog_by_node[target_uuid].handles
+            if handle.get("handle_key") == "ready"
+            and handle.get("io_type") == "target"
+        ]
+        if len(source_handles) != 1 or len(target_handles) != 1:
+            raise AuthoringGraphError(
+                "template_catalog_mismatch",
+                "并行化先后关系缺少唯一 ready 连接点",
+            )
+        source_handle = source_handles[0]
+        target_handle = target_handles[0]
+        if any(
+            isinstance(edge, Mapping)
+            and edge.get("source_node_uuid") == source_uuid
+            and edge.get("target_node_uuid") == target_uuid
+            and edge.get("source_handle_uuid") == source_handle.get("uuid")
+            and edge.get("target_handle_uuid") == target_handle.get("uuid")
+            for edge in edges
+        ):
+            raise AuthoringGraphError(
+                "candidate_invalid",
+                "并行化先后关系对应的 ready 边仍然存在",
+            )
+        result.add((source_uuid, target_uuid))
+    return sorted(result)
 
 
 def _is_group(action: AuthoringCatalogAction) -> bool:

@@ -189,17 +189,69 @@ class TaskRuntimeProjection:
             aggregate = self._aggregate(connection, task_uuid)
             task_status = aggregate["task"]["status"]
             job_statuses = {job["status"] for job in aggregate["jobs"]}
-            if task_status == "pending" and job_statuses == {"pending"}:
-                return aggregate
-            # 协调器所有的物料来源解析作业可能已经成功；它不属于设备在途状态，
-            # 但不应阻止普通动作提交后的任务聚合校验。
-            if task_status == "running" and job_statuses <= (
+            # 协调器会在普通动作提交前完成 MaterialSource 作业，因此暂停的调试
+            # 任务可以合法呈现 ``pending task + succeeded sources + pending actions``。
+            # 物料来源成功不是物理派发，也不应迫使父任务提前进入 running。
+            if task_status in {"pending", "running"} and job_statuses <= (
                 _ACTIVE_JOB_STATES | {"succeeded"}
             ):
                 return aggregate
             raise StoreConflict(
                 f"本地提交状态与任务聚合冲突：{task_uuid}/{scheduler_state}"
             )
+
+    def project_canceled(self, task_uuid: str) -> dict[str, Any]:
+        """把已由调度器接受的取消投影为标准 Task/Job 终态。"""
+
+        now = utc_now()
+        with self._store.transaction() as connection:
+            task_row = self._task_row(connection, task_uuid)
+            job_rows = self._job_rows(connection, task_uuid)
+            if task_row["status"] == "canceled":
+                return self._aggregate(connection, task_uuid)
+            if task_row["status"] in {"succeeded", "failed", "timeout"}:
+                raise StoreConflict(f"终态任务不能取消：{task_uuid}")
+            for row in job_rows:
+                if row["status"] in _TERMINAL_JOB_STATES:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE workflow_node_job
+                    SET status = 'canceled', finished_at = ?, update_time = ?
+                    WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (now, now, row["uuid"]),
+                )
+                WorkflowStore._append_runtime_event(
+                    connection,
+                    task_uuid=task_uuid,
+                    job_uuid=str(row["uuid"]),
+                    kind="job_transition",
+                    from_status=str(row["status"]),
+                    to_status="canceled",
+                    now=now,
+                )
+            connection.execute(
+                """
+                UPDATE workflow_task
+                SET status = 'canceled', control_status = 'active',
+                    finished_at = ?, update_time = ?
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (now, now, task_uuid),
+            )
+            WorkflowStore._append_runtime_event(
+                connection,
+                task_uuid=task_uuid,
+                kind="task_transition",
+                from_status=str(task_row["status"]),
+                to_status="canceled",
+                now=now,
+            )
+            self._append_invalidation(
+                connection, task_uuid=task_uuid, now=now
+            )
+            return self._aggregate(connection, task_uuid)
 
     def project_material_source_blocked(self, task_uuid: str) -> dict[str, Any]:
         """验证并返回一次受阻的任务物料准入投影。

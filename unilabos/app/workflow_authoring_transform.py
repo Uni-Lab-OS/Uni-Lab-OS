@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, Protocol, Self
 
 from fastapi import APIRouter, FastAPI, Request
@@ -232,6 +233,53 @@ def _assert_closed_graph(graph: dict[str, Any]) -> None:
     )
 
 
+def _structured_generation_projection_equal(
+    generated: Mapping[str, Any],
+    requested: Mapping[str, Any],
+) -> bool:
+    """只允许图生成规范化瞬时删边意图与结构投影字段。
+
+    业务工作流字段、节点父级/参数、边和目录必须逐项保持；实体数组只忽略顺序。
+    这样 ``generate-python`` 可以返回真实递归结构对应的源码顺序，但不能借机
+    改名、增删节点或改变任何执行依赖。
+    """
+
+    def normalize(value: Mapping[str, Any]) -> dict[str, Any]:
+        result = deepcopy(dict(value))
+        workflow = result.get("workflow")
+        if isinstance(workflow, dict):
+            metadata = workflow.get("meta_data")
+            unilab = metadata.get("unilab") if isinstance(metadata, dict) else None
+            if isinstance(unilab, dict):
+                unilab.pop("order_dependency_suppressions", None)
+        nodes = result.get("nodes")
+        if isinstance(nodes, list):
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                metadata = node.get("meta_data")
+                unilab = metadata.get("unilab") if isinstance(metadata, dict) else None
+                if isinstance(unilab, dict):
+                    for field_name in (
+                        "authoring_source_order",
+                        "parallel_scope",
+                        "parallel_order",
+                    ):
+                        unilab.pop(field_name, None)
+        for collection_name in (
+            "nodes",
+            "edges",
+            "node_templates",
+            "handle_templates",
+        ):
+            collection = result.get(collection_name)
+            if isinstance(collection, list):
+                collection.sort(key=lambda item: str(item.get("uuid")))
+        return result
+
+    return strict_json_equal(normalize(generated), normalize(requested))
+
+
 def _closed_transform_data(
     result: Any,
     *,
@@ -240,6 +288,7 @@ def _closed_transform_data(
     revision: int,
     base_graph: dict[str, Any],
     require_unchanged_graph: bool,
+    allow_structured_normalization: bool,
 ) -> dict[str, Any]:
     """把内部引擎结果收紧为唯一公开转换 DTO。
 
@@ -304,6 +353,11 @@ def _closed_transform_data(
         _assert_closed_graph(graph)
         if require_unchanged_graph and not strict_json_equal(graph, base_graph):
             raise ValueError("纯源码转换改变了输入图")
+        if (
+            allow_structured_normalization
+            and not _structured_generation_projection_equal(graph, base_graph)
+        ):
+            raise ValueError("结构化源码生成改变了业务图")
 
     compiler_version = compilation.compiler_version
     fingerprint = compilation.template_catalog_fingerprint
@@ -333,6 +387,7 @@ def _transform_response(
     revision: int,
     base_graph: dict[str, Any],
     require_unchanged_graph: bool = False,
+    allow_structured_normalization: bool = False,
 ) -> JSONResponse:
     """执行一次转换并生成净化响应。
 
@@ -350,6 +405,7 @@ def _transform_response(
             revision=revision,
             base_graph=base_graph,
             require_unchanged_graph=require_unchanged_graph,
+            allow_structured_normalization=allow_structured_normalization,
         )
         if any(
             diagnostic["code"] == "template_catalog_unavailable"
@@ -396,7 +452,7 @@ def create_authoring_transform_router(engine: AuthoringTransform) -> APIRouter:
 
     @router.post("/generate-python")
     def generate_authoring_python(body: AuthoringGeneratePythonRequest) -> JSONResponse:
-        """生成规范 Python；参数是闭合候选图请求，返回图不变的源码结果。"""
+        """生成规范 Python；返回已证明等价的结构化图与源码。"""
 
         values = {
             "workflow_uuid": body.workflow_uuid,
@@ -412,7 +468,7 @@ def create_authoring_transform_router(engine: AuthoringTransform) -> APIRouter:
             workflow_uuid=body.workflow_uuid,
             revision=body.revision,
             base_graph=body.graph,
-            require_unchanged_graph=True,
+            allow_structured_normalization=True,
         )
 
     @router.post("/validate")

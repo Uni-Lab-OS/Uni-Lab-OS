@@ -29,7 +29,8 @@ from unilabos.workflow.source_coordinates import (
 )
 
 _NODE_ANCHOR = re.compile(
-    r"^[ \t]*#[ \t]*unilab:node_uuid=([0-9a-fA-F-]{36})[ \t]*$"
+    r"^[ \t]*#[ \t]*unilab:node_uuid=([0-9a-fA-F-]{36})"
+    r"(?:[ \t]+disabled=(true))?[ \t]*$"
 )
 _NODE_METADATA_PREFIX = re.compile(r"^[ \t]*#[ \t]*\[")
 _NODE_METADATA = re.compile(
@@ -118,8 +119,6 @@ class GroupDeclaration:
     name: str
     title: str | None
     description: str | None
-    parallel_scope: str | None
-    parallel_order: int | None
     source_node: ast.With
 
 
@@ -147,6 +146,7 @@ class WorkflowProgram:
     parent_by_node: tuple[tuple[str, str], ...]
     order_dependencies: tuple[tuple[str, str], ...]
     source_order: tuple[str, ...]
+    disabled_node_uuids: tuple[str, ...]
     outputs: tuple[tuple[str, ValueBinding], ...]
 
 
@@ -243,6 +243,7 @@ def parse_authoring_source(
         imports=imports,
     )
     anchors = _source_anchors(python_source)
+    disabled_node_uuids = _source_disabled_nodes(python_source)
     # 节点展示元数据以节点 UUID 锚点行号为键，只影响工作流节点（WorkflowNode）
     # 的展示字段，不改变动作结果变量或执行身份。
     node_metadata = _source_node_metadata(
@@ -289,6 +290,7 @@ def parse_authoring_source(
         parent_by_node=tuple(sorted(parent_by_node.items())),
         order_dependencies=tuple(order_dependencies),
         source_order=tuple(authoring_source_order),
+        disabled_node_uuids=tuple(sorted(disabled_node_uuids)),
         outputs=tuple(outputs),
     )
 
@@ -688,6 +690,19 @@ def _source_anchors(python_source: str) -> dict[int, str]:
     return anchors
 
 
+def _source_disabled_nodes(python_source: str) -> set[str]:
+    """读取 UUID 锚点上显式声明的静态禁用标记。"""
+
+    disabled: set[str] = set()
+    for line in source_lines(python_source):
+        if "unilab:node_uuid" not in line:
+            continue
+        match = _NODE_ANCHOR.fullmatch(line)
+        if match is not None and match.group(2) == "true":
+            disabled.add(validate_uuid(match.group(1)))
+    return disabled
+
+
 def _source_node_metadata(
     python_source: str,
     *,
@@ -881,20 +896,14 @@ def _parse_statement(
                 state=state,
                 available_results=available_results,
                 parent_uuid=parent_uuid,
-                parallel_scope=None,
-                parallel_order=None,
+                structural_branch=False,
             )
         if marker == "parallel":
-            if parent_uuid is not None:
-                _fail(
-                    "unsupported_authoring_syntax",
-                    "并行结构不能嵌套在展示分组中",
-                    statement,
-                )
             return _parse_parallel(
                 statement,
                 state=state,
                 available_results=available_results,
+                parent_uuid=parent_uuid,
             )
         _fail("unsupported_authoring_syntax", "工作流不支持该 with 语句", statement)
 
@@ -951,20 +960,17 @@ def _parse_group(
     state: _BodyState,
     available_results: set[str],
     parent_uuid: str | None,
-    parallel_scope: str | None,
-    parallel_order: int | None,
+    structural_branch: bool,
 ) -> _Flow:
-    """解析一个真实展示分组节点并递归解析其动作子节点。
+    """解析持久展示分组或 ``parallel`` 的源码级顺序支路。
 
     参数说明：``statement`` 是 ``with group``；``state`` 收集节点；
-    ``available_results`` 是进入分组前可见结果；``parent_uuid`` 用于拒绝当前未支持
-    的嵌套分组；``parallel_scope``/``parallel_order`` 标记可选并行同级关系。
-    返回：忽略分组节点本身后的真实动作入口/出口。异常：名称、锚点、空分组或
-    嵌套不合法时失败关闭。
+    ``available_results`` 是进入分组前可见结果；``parent_uuid`` 是可选展示父级；
+    ``structural_branch`` 仅在 ``parallel`` 的直接子级为真，此时允许没有 UUID
+    锚点的源码级顺序容器。返回真实动作入口/出口。带锚点的 group 始终是持久
+    展示节点；无锚点 group 绝不进入候选图。
     """
 
-    if parent_uuid is not None:
-        _fail("unsupported_authoring_syntax", "暂不支持嵌套展示分组", statement)
     context = statement.items[0].context_expr
     assert isinstance(context, ast.Call)
     if context.args or any(item.arg is None for item in context.keywords):
@@ -978,29 +984,33 @@ def _parse_group(
     ) or not name_expression.value.strip():
         _fail("invalid_group", "group name 必须是非空字符串字面量", name_expression)
     node_uuid = state.anchors.get(statement.lineno - 1)
-    if node_uuid is None:
-        _fail("invalid_node_anchor", "每个展示分组前必须有相邻节点 UUID 锚点", statement)
-    metadata = state.node_metadata.get(statement.lineno - 1)
-    declaration = GroupDeclaration(
-        node_uuid=node_uuid,
-        name=name_expression.value.strip(),
-        title=metadata[0] if metadata is not None else None,
-        description=metadata[1] if metadata is not None else None,
-        parallel_scope=parallel_scope,
-        parallel_order=parallel_order,
-        source_node=statement,
-    )
-    state.groups.append(declaration)
-    state.source_order.append(node_uuid)
+    if node_uuid is None and not structural_branch:
+        _fail("invalid_node_anchor", "展示分组前必须有相邻节点 UUID 锚点", statement)
+    child_parent_uuid = parent_uuid
+    if node_uuid is not None:
+        metadata = state.node_metadata.get(statement.lineno - 1)
+        declaration = GroupDeclaration(
+            node_uuid=node_uuid,
+            name=name_expression.value.strip(),
+            title=metadata[0] if metadata is not None else None,
+            description=metadata[1] if metadata is not None else None,
+            source_node=statement,
+        )
+        state.groups.append(declaration)
+        state.source_order.append(node_uuid)
+        if parent_uuid is not None:
+            state.parent_by_node[node_uuid] = parent_uuid
+        child_parent_uuid = node_uuid
     child_results = set(available_results)
     flow = _parse_sequence(
         list(statement.body),
         state=state,
         available_results=child_results,
-        parent_uuid=node_uuid,
+        parent_uuid=child_parent_uuid,
     )
     if not flow.entries:
-        _fail("invalid_group", "展示分组必须至少包含一个可执行动作", statement)
+        label = "并行支路" if node_uuid is None else "展示分组"
+        _fail("invalid_group", f"{label}必须至少包含一个可执行动作", statement)
     return flow
 
 
@@ -1009,13 +1019,14 @@ def _parse_parallel(
     *,
     state: _BodyState,
     available_results: set[str],
+    parent_uuid: str | None,
 ) -> _Flow:
-    """解析由直接展示分组构成的并行结构且隔离同级结果作用域。
+    """递归解析由直接 group 顺序容器构成的并行结构。
 
     参数说明：``statement`` 是 ``with parallel``；``state`` 收集各分支事实；
     ``available_results`` 是并行开始前已完成且所有分支共享的结果。返回：所有分支
-    入口、出口与合并后结果。异常：参数、非分组分支、嵌套并行、同级跨分支引用
-    或重复结果失败关闭。
+    入口、出口与合并后结果。直接 group 可以是带 UUID 的展示节点，也可以是规范
+    生成器使用的不持久源码支路；同级跨分支引用或重复结果失败关闭。
     """
 
     context = statement.items[0].context_expr
@@ -1027,29 +1038,20 @@ def _parse_parallel(
         or _with_marker(branch, state.imports) != "group"
         for branch in statement.body
     ):
-        _fail("invalid_parallel", "parallel 必须直接包含至少两个展示分组", statement)
-    group_uuids = [
-        state.anchors.get(branch.lineno - 1)
-        for branch in statement.body
-        if isinstance(branch, ast.With)
-    ]
-    if any(group_uuid is None for group_uuid in group_uuids):
-        _fail("invalid_node_anchor", "并行分组前必须有相邻节点 UUID 锚点", statement)
-    parallel_scope = str(group_uuids[0])
+        _fail("invalid_parallel", "parallel 必须直接包含至少两个 group 顺序支路", statement)
     entries: list[str] = []
     exits: list[str] = []
     merged_results: set[str] = set()
     base_results = set(available_results)
-    for branch_order, branch in enumerate(statement.body):
+    for branch in statement.body:
         assert isinstance(branch, ast.With)
         branch_results = set(base_results)
         branch_flow = _parse_group(
             branch,
             state=state,
             available_results=branch_results,
-            parent_uuid=None,
-            parallel_scope=parallel_scope,
-            parallel_order=branch_order,
+            parent_uuid=parent_uuid,
+            structural_branch=True,
         )
         duplicated = merged_results & set(branch_flow.result_names)
         if duplicated:

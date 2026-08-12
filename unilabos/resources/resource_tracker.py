@@ -1460,6 +1460,11 @@ class DeviceNodeResourceTracker(object):
 
         # 如果有 uuid，优先使用 uuid 查找
         if res_uuid:
+            indexed_resource = self.uuid_to_resources.get(res_uuid)
+            if indexed_resource is not None:
+                if try_mode:
+                    return [indexed_resource]
+                return indexed_resource
             res_list = []
             for r in self.resources:
                 if isinstance(query_resource, dict):

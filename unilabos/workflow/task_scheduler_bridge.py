@@ -64,6 +64,7 @@ class TaskSchedulerBridge:
         scheduler.add_admission_retry_listener(self._retry_pending_admissions)
         scheduler.add_job_pre_dispatch_listener(self._on_job_pre_dispatch)
         scheduler.add_job_finished_listener(self._on_job_finished)
+        scheduler.add_job_settled_listener(self._on_job_settled)
 
     def submit(self, task: Mapping[str, Any]) -> dict[str, Any]:
         """提交已经持久化的工作流任务（WorkflowTask）。
@@ -178,8 +179,9 @@ class TaskSchedulerBridge:
         if self._closed:
             raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
         normalized_uuid = self._required_text(task_uuid, field="task_uuid")
-        if normalized_uuid not in self._submitted_tasks:
-            raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
+        # ``_submitted_tasks`` 只是桥接层的监听路由账本，不是运行权威。工作区
+        # 重组或监听器世代切换后它可能暂时缺少仍由同一个 EdgeScheduler 持有的
+        # 运行；单步准入必须由调度器自身验证任务存在、单步模式和暂停状态。
         try:
             return self._scheduler.step_workflow(
                 normalized_uuid,
@@ -187,6 +189,23 @@ class TaskSchedulerBridge:
             )
         except ValueError as error:
             raise TaskSchedulerBridgeError(str(error)) from error
+
+    def cancel(self, task_uuid: str) -> dict[str, Any]:
+        """取消同一标准任务身份，并把调度器结果投影为 Task/Job 终态。"""
+
+        if self._closed:
+            raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
+        normalized_uuid = self._required_text(task_uuid, field="task_uuid")
+        if not self._scheduler.cancel_workflow(normalized_uuid):
+            raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
+        aggregate = self._projection.project_canceled(normalized_uuid)
+        self._store.stop_debug(normalized_uuid)
+        self._submitted_tasks.discard(normalized_uuid)
+        self._admission_pending_tasks.discard(normalized_uuid)
+        for job_uuid, routed_task_uuid in tuple(self._task_by_job.items()):
+            if routed_task_uuid == normalized_uuid:
+                self._task_by_job.pop(job_uuid, None)
+        return aggregate
 
     def recover_active_tasks(self) -> list[dict[str, Any]]:
         """恢复没有结果不明作业的活动工作流任务（WorkflowTask）。
@@ -389,6 +408,7 @@ class TaskSchedulerBridge:
         )
         self._scheduler.remove_job_pre_dispatch_listener(self._on_job_pre_dispatch)
         self._scheduler.remove_job_finished_listener(self._on_job_finished)
+        self._scheduler.remove_job_settled_listener(self._on_job_settled)
         self._task_by_job.clear()
         self._submitted_tasks.clear()
         self._admission_pending_tasks.clear()
@@ -480,6 +500,34 @@ class TaskSchedulerBridge:
                 task_uuid,
                 reason=f"workflow_{terminal_status}",
             )
+
+    def _on_job_settled(
+        self,
+        job_uuid: str,
+        success: bool,
+        ret_value: Any,
+        suc_type: str,
+    ) -> None:
+        """在调度 DAG 已结算当前节点后执行持久调试推进。"""
+
+        task_uuid = self._task_by_job.get(job_uuid)
+        if task_uuid is None:
+            return
+        # ``continue`` 只在下一个节点没有断点时复用既有单步派发原语；断点或
+        # 显式 ``step`` 会先创建新 Hold，绝不越过物理派发边界。
+        debug_action = self._store.advance_debug_after_job_finished(task_uuid)
+        if debug_action.get("type") == "step":
+            next_node_uuid = self._required_text(
+                debug_action.get("workflow_node_uuid"),
+                field="debug.workflow_node_uuid",
+            )
+            try:
+                self._scheduler.step_workflow(
+                    task_uuid,
+                    target_node_id=next_node_uuid,
+                )
+            except ValueError as error:
+                raise TaskSchedulerBridgeError(str(error)) from error
         self._task_by_job.pop(job_uuid, None)
         if task_uuid not in self._task_by_job.values():
             self._submitted_tasks.discard(task_uuid)
