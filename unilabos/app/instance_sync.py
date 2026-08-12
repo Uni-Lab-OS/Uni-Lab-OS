@@ -81,7 +81,7 @@ class InstanceSynchronizer:
                             f"node {local_id} references unknown parent {parent_local_id}"
                         )
                     continue
-                template = templates.get(node["class"])
+                template = _resolve_template(templates, node["class"])
                 if template is None:
                     raise InstanceSyncError(
                         f"resource template {node['class']} has not been synchronized"
@@ -157,7 +157,7 @@ class InstanceSynchronizer:
         }
         material_uuids: Dict[str, str] = {}
         for node in nodes:
-            template = templates.get(node["class"])
+            template = _resolve_template(templates, node["class"])
             if template is None:
                 raise InstanceSyncError(
                     f"resource template {node['class']} has not been synchronized"
@@ -185,16 +185,13 @@ class InstanceSynchronizer:
 
     def _list_templates(self) -> Dict[str, Dict[str, str]]:
         templates: Dict[str, Dict[str, str]] = {}
-        cursor: Optional[str] = None
+        page = 1
         while True:
-            params: Dict[str, Any] = {"limit": 100}
-            if cursor:
-                params["cursor_uuid"] = cursor
             result = self._request(
                 "GET",
                 "/resource-templates",
                 route="/api/v1/resource-templates",
-                params=params,
+                params={"page": page, "page_size": 100},
             )
             for template in _mapping_list(result.get("items")):
                 name = str(template.get("name") or "")
@@ -203,9 +200,7 @@ class InstanceSynchronizer:
                     templates[name] = {"uuid": template_uuid}
             if not result.get("has_more"):
                 return templates
-            cursor = str(result.get("next_cursor_uuid") or "")
-            if not cursor:
-                raise InstanceSyncError("template pagination cursor is missing")
+            page += 1
 
     def _list_materials(self) -> list[Mapping[str, Any]]:
         materials: list[Mapping[str, Any]] = []
@@ -283,6 +278,18 @@ def run_instance_sync_command(
         raise InstanceSyncError(f"cannot read device graph {graph_path}: {exc}") from exc
     if not isinstance(graph, Mapping):
         raise InstanceSyncError("device graph root must be an object")
+    if arguments.get("instance_devices_only", False):
+        raw_nodes = graph.get("nodes")
+        if not isinstance(raw_nodes, list):
+            raise InstanceSyncError("device graph nodes are required")
+        graph = {
+            **graph,
+            "nodes": [
+                node
+                for node in raw_nodes
+                if isinstance(node, Mapping) and node.get("type") == "device"
+            ],
+        }
     token_source = environment if environment is not None else os.environ
     operator_token = token_source.get(INSTANCE_TOKEN_ENV, "")
     synchronizer = InstanceSynchronizer(
@@ -325,6 +332,14 @@ def _mapping_list(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, list):
         return []
     return [entry for entry in value if isinstance(entry, Mapping)]
+
+
+def _resolve_template(
+    templates: Mapping[str, Dict[str, str]], class_name: str
+) -> Optional[Dict[str, str]]:
+    """同时兼容工作区完整类名与 Backend 中的模板短名。"""
+
+    return templates.get(class_name) or templates.get(class_name.rsplit(".", 1)[-1])
 
 
 def _object(value: Any) -> Dict[str, Any]:

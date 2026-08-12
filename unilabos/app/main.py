@@ -276,9 +276,12 @@ def parse_args():
     parser.add_argument(
         "--app_bridges",
         nargs="+",
-        choices=["websocket", "fastapi"],
+        choices=["websocket", "edge_control", "fastapi"],
         default=["websocket", "fastapi"],
-        help="Bridges to connect to: websocket (legacy) and fastapi.",
+        help=(
+            "Bridges to connect to: websocket (legacy cloud), edge_control "
+            "(production Backend/Scheduler), and fastapi."
+        ),
     )
     parser.add_argument(
         "--is_slave",
@@ -415,6 +418,12 @@ def parse_args():
         dest="instance_check_only",
         action="store_true",
         help="Only verify that every graph node has a matching backend instance",
+    )
+    instance_sync_parser.add_argument(
+        "--devices_only",
+        dest="instance_devices_only",
+        action="store_true",
+        help="Initialize only device nodes used by production Edge registration",
     )
     # workflow upload subcommand
     workflow_parser = subparsers.add_parser(
@@ -1195,7 +1204,10 @@ def main():
         dict_from_graph,
         modify_to_backend_format,
     )
-    from unilabos.app.communication import get_communication_client
+    from unilabos.app.communication import (
+        CommunicationClientFactory,
+        get_communication_client,
+    )
     from unilabos.app.backend import start_backend
     from unilabos.app.web import http_client
     from unilabos.app.web import start_server
@@ -1347,8 +1359,19 @@ def main():
         prepare_runtime_storage_session(args_dict, working_dir=working_dir)
         comm_client = None
         communication_clients = []
-        if "websocket" in args_dict["app_bridges"]:
-            comm_client = get_communication_client()
+        communication_bridge_enabled = any(
+            bridge in args_dict["app_bridges"]
+            for bridge in ("websocket", "edge_control")
+        )
+        if communication_bridge_enabled:
+            selected_protocol = (
+                "edge_control"
+                if "edge_control" in args_dict["app_bridges"]
+                else "websocket"
+            )
+            # 工作区加载与 Web 模块导入不得把生产 Edge 锁进旧云端客户端缓存。
+            CommunicationClientFactory.reset_client()
+            comm_client = get_communication_client(selected_protocol)
             args_dict["bridges"].append(comm_client)
             communication_clients.append(comm_client)
             comm_client.start()
@@ -1373,7 +1396,7 @@ def main():
         setup_edge_inventory(
             inventory_db,
             ws_client=(
-                comm_client if "websocket" in args_dict["app_bridges"] else None
+                comm_client if communication_bridge_enabled else None
             ),
             resource_tree_set=resource_tree_set if bootstrap_resource_graph else None,
             registry_snapshot=(
@@ -1399,7 +1422,7 @@ def main():
 
         _edge_sched, edge_exec_backend = setup_edge_scheduler(
             ws_client=(
-                comm_client if "websocket" in args_dict["app_bridges"] else None
+                comm_client if communication_bridge_enabled else None
             ),
             inventory_db_path=inventory_db,
             device_state_db_path=str(args_dict.get("edge_device_state_db") or ""),

@@ -287,7 +287,7 @@ class EdgeControlClient(BaseCommunicationClient):
         )
         return registration
 
-    def _registration_devices(self) -> List[Dict[str, str]]:
+    def _registration_devices(self) -> List[Dict[str, Any]]:
         host_node = self._host_node_provider()
         if host_node is None:
             raise RuntimeError("HostNode is not ready")
@@ -297,21 +297,55 @@ class EdgeControlClient(BaseCommunicationClient):
                 resource_id = str(resource.get("id") or "").strip()
                 if resource_id:
                     nodes[resource_id] = resource
-        devices: List[Dict[str, str]] = []
+        candidates: List[Dict[str, Any]] = []
         for local_id in sorted(host_node.devices_names):
             resource = nodes.get(str(local_id), {})
             barcode = str(resource.get("barcode") or "").strip()
             if not barcode:
                 continue
-            devices.append(
+            candidates.append(
                 {
                     "local_id": str(local_id),
                     "name": str(resource.get("name") or local_id),
                     "barcode": barcode,
                 }
             )
-        if not devices:
+        if not candidates:
             raise RuntimeError("Edge production registration requires a device barcode")
+
+        material_uuids = self.data_plane.material_uuids_by_barcode(
+            candidate["barcode"] for candidate in candidates
+        )
+        missing = sorted(
+            candidate["barcode"]
+            for candidate in candidates
+            if candidate["barcode"] not in material_uuids
+        )
+        if missing:
+            raise RuntimeError(
+                "Edge production devices have not been initialized in Backend: "
+                + ", ".join(missing)
+            )
+
+        from unilabos.ros.nodes.base_device_node import registered_devices
+
+        devices: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            device_info = registered_devices.get(candidate["local_id"], {})
+            action_servers = device_info.get("actions", {})
+            actions = []
+            for action_name, action_server in sorted(action_servers.items()):
+                action_type = getattr(action_server, "_action_type", None)
+                action_type_name = str(getattr(action_type, "__name__", "")).strip()
+                if action_type_name:
+                    actions.append({"name": str(action_name), "type": action_type_name})
+            devices.append(
+                {
+                    **candidate,
+                    "material_uuid": material_uuids[candidate["barcode"]],
+                    "actions": actions,
+                }
+            )
         return devices
 
     async def _connect_once(self) -> None:

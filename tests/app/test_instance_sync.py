@@ -47,7 +47,8 @@ class FakeSession:
                             },
                         ],
                         "has_more": False,
-                        "next_cursor_uuid": None,
+                        "page": 1,
+                        "page_size": 100,
                     },
                 }
             )
@@ -111,7 +112,7 @@ def test_instance_sync_creates_device_and_instrument_through_material_api():
                 "id": "pump_01",
                 "name": "模拟注射泵",
                 "type": "device",
-                "class": "virtual_transfer_pump",
+                "class": "community.example.virtual_transfer_pump",
                 "barcode": "DEV-PUMP-01",
                 "config": {"port": "MOCK"},
                 "data": {"status": "Idle"},

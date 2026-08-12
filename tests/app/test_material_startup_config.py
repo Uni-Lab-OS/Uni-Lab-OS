@@ -188,6 +188,23 @@ def test_legacy_cloud_and_backend_arguments_remain_supported() -> None:
     assert args["backend"] == "ros"
 
 
+def test_instance_sync_can_select_production_devices_only() -> None:
+    args = vars(
+        parse_args().parse_args(["instance-sync", "--devices_only", "--check_only"])
+    )
+
+    assert args["instance_devices_only"] is True
+    assert args["instance_check_only"] is True
+
+
+def test_production_edge_control_bridge_is_supported() -> None:
+    args = vars(
+        parse_args().parse_args(["--app_bridges", "edge_control", "fastapi"])
+    )
+
+    assert args["app_bridges"] == ["edge_control", "fastapi"]
+
+
 def test_action_mode_is_the_only_public_hardware_simulation_switch() -> None:
     """证明动作执行模式使用明确枚举且默认触发真实设备调用。
 
@@ -251,17 +268,6 @@ def test_json_output_is_not_a_root_startup_argument() -> None:
 
     with pytest.raises(SystemExit):
         parse_args().parse_args(["--json", "whoami"])
-
-
-def test_os_startup_rejects_formal_backend_control_bridge() -> None:
-    """证明 OS 主启动不再提供正式后端（Backend）控制面接入。
-
-    参数：无。返回：无；断言 ``edge_control`` 不能作为公开启动桥。异常：解析器
-    重新接受该桥时测试失败。
-    """
-
-    with pytest.raises(SystemExit):
-        parse_args().parse_args(["--app_bridges", "edge_control", "fastapi"])
 
 
 def test_local_graph_does_not_request_legacy_remote_startup() -> None:

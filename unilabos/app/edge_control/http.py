@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 import requests
 
@@ -39,6 +39,38 @@ class EdgeDataPlane:
             http_route="/api/v1/edge/sessions",
             json=payload,
         )
+
+    def material_uuids_by_barcode(
+        self, barcodes: Iterable[str]
+    ) -> Dict[str, str]:
+        """从正式 Backend 解析本次注册涉及的设备物料身份。"""
+
+        wanted = {str(barcode).strip() for barcode in barcodes if str(barcode).strip()}
+        resolved: Dict[str, str] = {}
+        page = 1
+        while wanted - resolved.keys():
+            result = self._request(
+                "GET",
+                f"{self.backend_api}/materials",
+                span_name="edge.http.material.list",
+                http_route="/api/v1/materials",
+                params={"page": page, "page_size": 100},
+            )
+            items = result.get("items")
+            if not isinstance(items, list):
+                raise EdgeProtocolHTTPError("GET /materials returned invalid items")
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                barcode = str(item.get("barcode") or "").strip()
+                material_uuid = str(item.get("uuid") or "").strip()
+                if barcode in wanted and material_uuid:
+                    resolved[barcode] = material_uuid
+            total = int(result.get("total") or 0)
+            if not items or page * 100 >= total:
+                break
+            page += 1
+        return resolved
 
     def fetch_job(self, job: StoredJob) -> Dict[str, Any]:
         return self._request(
