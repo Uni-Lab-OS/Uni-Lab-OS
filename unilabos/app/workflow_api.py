@@ -209,13 +209,45 @@ class DebugWorkflowTaskCreateRequest(_BackendModel):
     input: Dict[str, Any] = Field(default_factory=dict)
     description: Optional[str] = None
     meta_data: Dict[str, Any] = Field(default_factory=dict)
+    launch_overrides: List[Dict[str, Any]] = Field(default_factory=list)
+    preflight_hash: Optional[HashToken] = None
 
-    @field_validator("start_node_uuids", "breakpoint_node_uuids", mode="before")
+    @field_validator(
+        "start_node_uuids",
+        "breakpoint_node_uuids",
+        "launch_overrides",
+        mode="before",
+    )
     @classmethod
     def _json_array(cls, value: Any) -> List[Any]:
         return normalize_json_array(value)
 
     @field_validator("input", "meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        return normalize_json_object(value)
+
+
+class DebugWorkflowTaskPreflightRequest(_BackendModel):
+    """只读调试启动预检请求。"""
+
+    workflow_uuid: str
+    start_node_uuids: List[str]
+    breakpoint_node_uuids: List[str] = Field(default_factory=list)
+    input: Dict[str, Any] = Field(default_factory=dict)
+    launch_overrides: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator(
+        "start_node_uuids",
+        "breakpoint_node_uuids",
+        "launch_overrides",
+        mode="before",
+    )
+    @classmethod
+    def _json_array(cls, value: Any) -> List[Any]:
+        return normalize_json_array(value)
+
+    @field_validator("input", mode="before")
     @classmethod
     def _json_object(cls, value: Any) -> Dict[str, Any]:
         return normalize_json_object(value)
@@ -328,6 +360,8 @@ def _error(error: WorkflowError) -> _BackendJSONResponse:
         "draft_invalid",
         "candidate_invalid",
         "workflow_identity_mismatch",
+        "debug_launch_requires_input",
+        "debug_preflight_conflict",
     }
     if error.code == "invalid_input":
         business_code = 1000
@@ -470,8 +504,26 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
                 input_value=body.input,
                 description=body.description,
                 meta_data=body.meta_data,
+                launch_overrides=body.launch_overrides,
+                preflight_hash=body.preflight_hash,
             ),
             status=201,
+        )
+
+    @router.post("/debug/workflow-tasks:preflight")
+    def preflight_debug_workflow_task(
+        body: DebugWorkflowTaskPreflightRequest,
+    ) -> JSONResponse:
+        """只读返回缺失普通值、兼容物料事实与可解释推断建议。"""
+
+        return _success(
+            service.preflight_debug_workflow_task(
+                workflow_uuid=body.workflow_uuid,
+                start_node_uuids=body.start_node_uuids,
+                breakpoint_node_uuids=body.breakpoint_node_uuids,
+                input_value=body.input,
+                launch_overrides=body.launch_overrides,
+            )
         )
 
     @router.get("/debug/workflow-tasks/{task_uuid}")

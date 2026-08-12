@@ -129,6 +129,7 @@ def compose_workflow_runtime(
     editable_package_roots: Iterable[str | Path] = (),
     editable_source_discovery_plan: Optional[EditableSourceDiscoveryPlan] = None,
     material_resolver: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
+    material_candidates: Optional[Callable[[], list[dict[str, Any]]]] = None,
     scheduler: Optional[Any] = None,
     start_source_monitor: bool = True,
 ) -> WorkflowService:
@@ -206,6 +207,7 @@ def compose_workflow_runtime(
                 compiler=compiler,
                 compiler_rebuilder=compiler_rebuilder,
                 material_resolver=material_resolver,
+                material_candidates=material_candidates,
                 task_scheduler_bridge=task_scheduler_bridge,
             )
             # ``discovery_plan`` 是全量文件预校验结果；服务在单事务中注册后，
@@ -366,19 +368,56 @@ def compose_local_workflow_template_runtime(
             # 不把可变物料快照复制进工作流写模型。
             material_row = inventory_store.query_one(
                 """
-                SELECT uuid, resource_template_uuid, meta_data
+                SELECT material.uuid, material.resource_template_uuid,
+                       material.name, material.meta_data,
+                       material_inventory.inventory_status,
+                       site.uuid AS current_site_uuid,
+                       site.name AS current_site_name
                 FROM material
-                WHERE uuid = ? AND deleted_at IS NULL
+                LEFT JOIN material_inventory
+                  ON material_inventory.material_uuid = material.uuid
+                LEFT JOIN site
+                  ON site.occupied_material_uuid = material.uuid
+                 AND site.deleted_at IS NULL
+                WHERE material.uuid = ? AND material.deleted_at IS NULL
                 """,
                 (material_uuid,),
             )
-            return dict(material_row) if material_row is not None else None
+            if material_row is None:
+                return None
+            result = dict(material_row)
+            result["current_site"] = (
+                {
+                    "uuid": result.pop("current_site_uuid"),
+                    "name": result.pop("current_site_name"),
+                }
+                if result.get("current_site_uuid")
+                else None
+            )
+            result.pop("current_site_uuid", None)
+            result.pop("current_site_name", None)
+            return result
+
+        def list_debug_material_candidates() -> list[dict[str, Any]]:
+            """返回当前实验室全部活动物料的最小可确认事实投影。"""
+
+            rows = inventory_store.query_all(
+                """
+                SELECT material.uuid
+                FROM material
+                WHERE material.deleted_at IS NULL
+                ORDER BY material.name, material.uuid
+                """
+            )
+            return [
+                material
+                for row in rows
+                if (material := resolve_material_identity(str(row["uuid"]))) is not None
+            ]
 
         configured_roots = _configured_package_roots(editable_package_roots)
         if configured_roots and editable_source_discovery_plan is not None:
-            raise TypeError(
-                "工作流源码授权目录与预编译发现计划不能同时提供"
-            )
+            raise TypeError("工作流源码授权目录与预编译发现计划不能同时提供")
         publication_plan = (
             editable_source_discovery_plan
             if editable_source_discovery_plan is not None
@@ -433,8 +472,8 @@ def compose_local_workflow_template_runtime(
         try:
             # ``resource_reference_resolver`` 只读取 C3 已提交的本地资源图物料事实，
             # 让物料来源（MaterialSource）和普通动作共享同一业务 ID→UUID 规则。
-            resource_reference_resolver = (
-                build_inventory_resource_reference_resolver(inventory_store)
+            resource_reference_resolver = build_inventory_resource_reference_resolver(
+                inventory_store
             )
 
             def rebuild_compiler() -> AuthoringCompiler:
@@ -447,9 +486,7 @@ def compose_local_workflow_template_runtime(
 
                 snapshot = projection.refresh(registry_snapshot)
                 if published_generation is None:
-                    raise RegistryTemplateProjectionError(
-                        "已发布工作流目录扩展未执行"
-                    )
+                    raise RegistryTemplateProjectionError("已发布工作流目录扩展未执行")
                 return WorkflowAuthoringEngine(
                     catalog=snapshot,
                     resource_reference_resolver=resource_reference_resolver,
@@ -468,6 +505,7 @@ def compose_local_workflow_template_runtime(
                 editable_package_roots=editable_package_roots,
                 editable_source_discovery_plan=editable_source_discovery_plan,
                 material_resolver=resolve_material_identity,
+                material_candidates=list_debug_material_candidates,
                 scheduler=scheduler,
                 start_source_monitor=start_source_monitor,
             )
