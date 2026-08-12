@@ -370,6 +370,38 @@ def test_ping_pong_is_sent_on_current_connection_without_outbox(
     asyncio.run(scenario())
 
 
+def test_material_changed_is_acknowledged_without_dropping_connection(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = EdgeControlStore(str(tmp_path / "runtime.db"))
+        client = EdgeControlClient(_settings(tmp_path / "runtime.db"), store=store)
+        command_uuid = str(uuid.uuid4())
+        await client._handle_envelope(
+            {
+                "protocol_version": 1,
+                "message_uuid": command_uuid,
+                "sequence": 9,
+                "type": "material.changed",
+                "sent_at": "2026-08-02T00:00:00.000000Z",
+                "payload": {
+                    "device_material_uuid": str(uuid.uuid4()),
+                    "material_uuid": str(uuid.uuid4()),
+                    "action": "update",
+                },
+            }
+        )
+
+        assert store.command_status(command_uuid) == "completed"
+        assert store.last_ack_command_sequence() == 9
+        events = store.pending_events(float("inf"))
+        assert [event.event_type for event in events] == ["command.ack"]
+        assert events[0].payload == {"command_uuid": command_uuid}
+        store.close()
+
+    asyncio.run(scenario())
+
+
 def test_http_data_plane_uses_three_uuid_identity() -> None:
     job = StoredJob(
         job_uuid=str(uuid.uuid4()),

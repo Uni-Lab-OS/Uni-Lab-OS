@@ -53,6 +53,7 @@ class InstanceSynchronizer:
         if not isinstance(raw_nodes, list) or not raw_nodes:
             raise InstanceSyncError("device graph nodes are required")
         nodes = [_graph_node(node) for node in raw_nodes]
+        nodes = _attach_external_roots(nodes)
         node_ids = [node["id"] for node in nodes]
         if len(set(node_ids)) != len(node_ids):
             raise InstanceSyncError("device graph contains duplicate node ids")
@@ -76,11 +77,11 @@ class InstanceSynchronizer:
             for local_id, node in list(pending.items()):
                 parent_local_id = node.get("parent")
                 if parent_local_id and parent_local_id not in material_uuids:
-                    if parent_local_id not in pending:
-                        raise InstanceSyncError(
-                            f"node {local_id} references unknown parent {parent_local_id}"
-                        )
-                    continue
+                    if parent_local_id in pending:
+                        continue
+                    raise InstanceSyncError(
+                        f"node {local_id} references unknown parent {parent_local_id}"
+                    )
                 template = _resolve_template(templates, node["class"])
                 if template is None:
                     raise InstanceSyncError(
@@ -149,6 +150,7 @@ class InstanceSynchronizer:
         if not isinstance(raw_nodes, list) or not raw_nodes:
             raise InstanceSyncError("device graph nodes are required")
         nodes = [_graph_node(node) for node in raw_nodes]
+        nodes = _attach_external_roots(nodes)
         templates = self._list_templates()
         materials_by_barcode = {
             str(material.get("barcode") or ""): material
@@ -210,7 +212,11 @@ class InstanceSynchronizer:
                 "GET",
                 "/materials",
                 route="/api/v1/materials",
-                params={"page": page, "page_size": 100},
+                params={
+                    "page": page,
+                    "page_size": 100,
+                    "with_children": "true",
+                },
             )
             page_materials = _mapping_list(result.get("items"))
             materials.extend(page_materials)
@@ -308,13 +314,12 @@ def _graph_node(raw_node: Any) -> Dict[str, Any]:
     local_id = str(raw_node.get("id") or "").strip()
     template_name = str(raw_node.get("class") or "").strip()
     barcode = str(raw_node.get("barcode") or "").strip()
-    resource_type = str(raw_node.get("type") or "").strip()
-    if not local_id or not template_name or not barcode:
-        raise InstanceSyncError("every graph node requires id, class, and barcode")
-    if resource_type not in {"device", "resource"}:
-        raise InstanceSyncError(
-            f"node {local_id} type must be device or resource"
-        )
+    raw_resource_type = str(raw_node.get("type") or "").strip()
+    if not local_id or not template_name:
+        raise InstanceSyncError("every graph node requires id and class")
+    if not barcode:
+        barcode = f"UNILAB-GRAPH-{local_id}"
+    resource_type = "device" if raw_resource_type == "device" else "resource"
     parent = raw_node.get("parent")
     return {
         "id": local_id,
@@ -332,6 +337,45 @@ def _mapping_list(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, list):
         return []
     return [entry for entry in value if isinstance(entry, Mapping)]
+
+
+def _attach_external_roots(
+    nodes: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    """把未随设备图提供的场景根收口到正式 HostNode 实例。"""
+
+    node_ids = {node["id"] for node in nodes}
+    external_roots = {
+        node["parent"]
+        for node in nodes
+        if node.get("parent") and node["parent"] not in node_ids
+    }
+    if not external_roots:
+        return nodes
+    host_id = "host_node"
+    if host_id not in node_ids:
+        nodes = [
+            {
+                "id": host_id,
+                "name": "Host Node",
+                "type": "device",
+                "class": host_id,
+                "barcode": "UNILAB-GRAPH-host_node",
+                "config": {},
+                "data": {},
+                "parent": "",
+            },
+            *nodes,
+        ]
+    return [
+        {
+            **node,
+            "parent": (
+                host_id if node.get("parent") in external_roots else node.get("parent", "")
+            ),
+        }
+        for node in nodes
+    ]
 
 
 def _resolve_template(

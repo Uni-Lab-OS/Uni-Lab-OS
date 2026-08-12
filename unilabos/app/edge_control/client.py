@@ -448,6 +448,7 @@ class EdgeControlClient(BaseCommunicationClient):
         if message_type not in {
             "job.start",
             "job.cancel",
+            "material.changed",
         }:
             raise ValueError(f"unsupported Edge command {message_type!r}")
         command_uuid = str(uuid.UUID(str(envelope["message_uuid"])))
@@ -468,6 +469,8 @@ class EdgeControlClient(BaseCommunicationClient):
                 await self._accept_job_start(command_uuid, payload, command_trace)
             elif message_type == "job.cancel":
                 await self._accept_job_cancel(command_uuid, payload, command_trace)
+            else:
+                self._accept_material_changed(command_uuid, payload, command_trace)
 
     async def _send_pong(
         self, ping_uuid: str, parent_carrier: Dict[str, str]
@@ -520,6 +523,28 @@ class EdgeControlClient(BaseCommunicationClient):
         self.store.mark_command_completed(command_uuid)
         if job.status in {"received", "fetch_retry"}:
             self._spawn(self._execute_job(job.job_uuid))
+
+    def _accept_material_changed(
+        self,
+        command_uuid: str,
+        payload: Dict[str, Any],
+        command_trace: Dict[str, str],
+    ) -> None:
+        """Acknowledge the Backend's cache-invalidation-only material notice."""
+
+        expected_keys = {"device_material_uuid", "material_uuid", "action"}
+        if set(payload) != expected_keys:
+            raise ValueError("material.changed payload has invalid fields")
+        uuid.UUID(str(payload["device_material_uuid"]))
+        uuid.UUID(str(payload["material_uuid"]))
+        if payload["action"] not in {"add", "update", "remove"}:
+            raise ValueError("material.changed action is invalid")
+        self._enqueue_event(
+            "command.ack",
+            {"command_uuid": command_uuid},
+            fallback_carrier=command_trace,
+        )
+        self.store.mark_command_completed(command_uuid)
 
     async def _accept_job_cancel(
         self,

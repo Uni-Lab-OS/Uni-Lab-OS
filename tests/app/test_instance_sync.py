@@ -45,6 +45,16 @@ class FakeSession:
                                 "name": "tube_15ml",
                                 "resource_type": "resource",
                             },
+                            {
+                                "uuid": "warehouse-template-uuid",
+                                "name": "sample_warehouse",
+                                "resource_type": "resource",
+                            },
+                            {
+                                "uuid": "host-template-uuid",
+                                "name": "host_node",
+                                "resource_type": "device",
+                            },
                         ],
                         "has_more": False,
                         "page": 1,
@@ -149,6 +159,7 @@ def test_instance_sync_creates_device_and_instrument_through_material_api():
         "http://backend:8080/api/v1/resource-templates",
         "http://backend:8080/api/v1/materials",
     ]
+    assert get_calls[1][2]["params"]["with_children"] == "true"
     post_calls = [call for call in session.calls if call[0] == "POST"]
     assert [call[2]["json"]["barcode"] for call in post_calls] == [
         "DEV-PUMP-01",
@@ -212,6 +223,39 @@ def test_instance_sync_command_reads_graph_without_starting_edge(tmp_path):
 
     assert report.created_count == 1
     assert report.material_uuids == {"pump_01": "material-uuid-1"}
+
+
+def test_instance_sync_normalizes_barcode_less_graph_resources():
+    graph = {
+        "nodes": [
+            {
+                "id": "sample_warehouse_01",
+                "name": "样品仓",
+                "type": "warehouse",
+                "class": "community.example.sample_warehouse",
+                "parent": "external_deck",
+            }
+        ]
+    }
+    session = FakeSession()
+    synchronizer = InstanceSynchronizer(
+        "http://backend:8080/api/v1",
+        "operator-secret",
+        session=session,
+    )
+
+    report = synchronizer.sync_graph(graph)
+
+    assert report.created_count == 2
+    assert report.material_uuids == {
+        "host_node": "material-uuid-1",
+        "sample_warehouse_01": "material-uuid-2",
+    }
+    requests = [call[2]["json"] for call in session.calls if call[0] == "POST"]
+    request = requests[1]
+    assert request["barcode"] == "UNILAB-GRAPH-sample_warehouse_01"
+    assert request["parent_uuid"] == "material-uuid-1"
+    assert request["meta_data"]["edge_resource_type"] == "resource"
 
 
 def test_read_only_check_blocks_edge_until_instances_exist():
