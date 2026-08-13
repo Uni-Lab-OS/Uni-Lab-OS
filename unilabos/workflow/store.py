@@ -1410,6 +1410,47 @@ class WorkflowStore:
             ).fetchone()
             return self._task_command_row(row), True
 
+    def set_task_control_status(
+        self,
+        task_uuid: str,
+        *,
+        control_status: str,
+    ) -> Dict[str, Any]:
+        """Persist the Agent-visible pause/resume state on the standard Task."""
+
+        if control_status not in {"active", "paused"}:
+            raise StoreConflict("任务控制状态非法")
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM workflow_task WHERE uuid = ? AND deleted_at IS NULL",
+                (task_uuid,),
+            ).fetchone()
+            if row is None:
+                raise StoreNotFound(f"workflow task {task_uuid} not found")
+            if row["status"] in {"succeeded", "failed", "canceled", "timeout"}:
+                raise StoreConflict("终态任务不能修改控制状态")
+            previous = str(row["control_status"])
+            if previous != control_status:
+                conn.execute(
+                    """
+                    UPDATE workflow_task
+                    SET control_status = ?, update_time = ?
+                    WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (control_status, now, task_uuid),
+                )
+                self._append_event(
+                    conn,
+                    event="workflow.runtime.changed",
+                    data={"workflow_task_uuid": task_uuid},
+                    now=now,
+                )
+            updated = conn.execute(
+                "SELECT * FROM workflow_task WHERE uuid = ?", (task_uuid,)
+            ).fetchone()
+            return self._task_row(updated)
+
     def complete_task_command(
         self,
         command_uuid: str,

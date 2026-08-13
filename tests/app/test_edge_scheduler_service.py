@@ -117,6 +117,27 @@ class TestStepControl:
         assert [item["node_id"] for item in second["dispatched"]] == ["B"]
 
 
+class TestPauseResumeControl:
+    def test_pause_stops_future_dispatch_and_resume_continues_same_run(self):
+        scheduler, dispatcher = _make()
+        submitted = scheduler.submit_workflow(_chain_spec("wf-paused"))
+
+        paused = scheduler.pause_workflow("wf-paused")
+        assert paused["state"] == "paused"
+
+        settled = scheduler.on_job_finished(
+            submitted["dispatched"][0]["job_id"], success=True, ret_value={}
+        )
+        assert settled["workflow_state"] == "paused"
+        assert settled["dispatched"] == []
+        assert [item["node_id"] for item in dispatcher.dispatched] == ["A"]
+
+        resumed = scheduler.resume_workflow("wf-paused")
+        assert resumed["state"] == "running"
+        assert [item["node_id"] for item in resumed["dispatched"]] == ["B"]
+        assert [item["node_id"] for item in dispatcher.dispatched] == ["A", "B"]
+
+
 class TestTriggerOnJobFinish:
     def test_finish_dispatches_next(self):
         scheduler, dispatcher = _make()

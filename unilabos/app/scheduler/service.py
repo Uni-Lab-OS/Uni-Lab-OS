@@ -482,6 +482,49 @@ class EdgeScheduler:
         self._fire_notifications(notifications)
         return result
 
+    def pause_workflow(self, workflow_id: str) -> Dict[str, Any]:
+        """Pause future dispatch for a normal workflow without stopping in-flight work."""
+
+        with self._lock:
+            run = self._workflows.get(workflow_id)
+            if run is None:
+                raise ValueError(f"workflow {workflow_id} not found")
+            if run.spec.run_mode == "step":
+                raise ValueError(f"workflow {workflow_id} is in step mode")
+            if run.state in self._TERMINAL_STATES:
+                raise ValueError(f"workflow {workflow_id} is terminal")
+            if run.state is not WorkflowState.PAUSED:
+                run.state = WorkflowState.PAUSED
+                self._emit_monitor(
+                    "scheduler",
+                    "workflow_paused",
+                    {"workflow_id": workflow_id, "reason": "command"},
+                )
+                self._safe_history("record_state", workflow_id, "paused")
+            return {"workflow_id": workflow_id, "state": run.state.value}
+
+    def resume_workflow(self, workflow_id: str) -> Dict[str, Any]:
+        """Resume a command-paused normal workflow and run one scheduling round."""
+
+        with self._lock:
+            run = self._workflows.get(workflow_id)
+            if run is None:
+                raise ValueError(f"workflow {workflow_id} not found")
+            if run.spec.run_mode == "step":
+                raise ValueError(f"workflow {workflow_id} is in step mode")
+            if run.state is not WorkflowState.PAUSED:
+                raise ValueError(f"workflow {workflow_id} is not paused")
+            run.state = WorkflowState.RUNNING
+            dispatched = self._reschedule_locked()
+            notifications = self._collect_terminal_notifications()
+            result = {
+                "workflow_id": workflow_id,
+                "state": run.state.value,
+                "dispatched": dispatched,
+            }
+        self._fire_notifications(notifications)
+        return result
+
     def restore_workflow(
         self,
         spec: WorkflowSpec,

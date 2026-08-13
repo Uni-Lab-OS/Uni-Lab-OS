@@ -27,6 +27,12 @@ from .output import (
     print_error,
     print_warning,
 )
+from .domain import (
+    DOMAIN_CLIENT_SCHEMA,
+    DomainBackendClient,
+    DomainClientError,
+    DomainSource,
+)
 
 __all__ = [
     "Envelope",
@@ -49,4 +55,8 @@ __all__ = [
     "print_success",
     "print_error",
     "print_warning",
+    "DOMAIN_CLIENT_SCHEMA",
+    "DomainBackendClient",
+    "DomainClientError",
+    "DomainSource",
 ]

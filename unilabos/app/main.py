@@ -203,6 +203,16 @@ def dispatch_workspace_host_command(args_dict: dict[str, Any]) -> bool:
     return dispatch_workspace_command(args_dict)
 
 
+def dispatch_workflow_domain_command(args_dict: dict[str, Any]) -> bool:
+    """Dispatch Agent-safe Workflow Domain commands before OS composition."""
+
+    if args_dict.get("command") != "workflow":
+        return False
+    from unilabos.app.cli.workflow import dispatch_workflow_domain_command as dispatch
+
+    return dispatch(args_dict)
+
+
 def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
     """在产品启动前分派不依赖远端配置的包命令。
 
@@ -670,6 +680,10 @@ def parse_args():
     )
     _add_json_output_argument(wf_upload_parser)
 
+    from unilabos.app.cli.workflow import register_workflow_domain_subcommands
+
+    register_workflow_domain_subcommands(workflow_grp_subparsers)
+
     return parser
 
 
@@ -693,6 +707,8 @@ def main():
     # Workspace Host commands are deliberately dispatched before runtime topology
     # validation and before any device/package product composition.
     if dispatch_workspace_host_command(args_dict):
+        return
+    if dispatch_workflow_domain_command(args_dict):
         return
 
     from unilabos.app.runtime_topology import resolve_runtime_process_plan

@@ -446,6 +446,35 @@ def test_step_command_api_is_idempotent_and_dispatches_once(
         bridge.close()
 
 
+def test_pause_resume_command_api_updates_standard_task_control_status(
+    store: WorkflowStore,
+) -> None:
+    task = _seed_task(store, with_material=False)
+    scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    bridge = _bridge(store, scheduler)
+    service = WorkflowService(store, task_scheduler_bridge=bridge)
+    client = TestClient(create_workflow_app(service))
+    try:
+        bridge.submit(task)
+        paused = client.post(
+            f"/api/v1/workflow-tasks/{TASK_UUID}/commands",
+            json={"type": "pause", "idempotency_key": "pause-once"},
+        )
+        assert paused.status_code == 201, paused.text
+        assert paused.json()["data"]["status"] == "succeeded"
+        assert store.get_task(TASK_UUID)["control_status"] == "paused"
+
+        resumed = client.post(
+            f"/api/v1/workflow-tasks/{TASK_UUID}/commands",
+            json={"type": "resume", "idempotency_key": "resume-once"},
+        )
+        assert resumed.status_code == 201, resumed.text
+        assert resumed.json()["data"]["status"] == "succeeded"
+        assert store.get_task(TASK_UUID)["control_status"] == "active"
+    finally:
+        bridge.close()
+
+
 def test_debug_hold_step_continue_and_stop_use_real_scheduler_projection(
     store: WorkflowStore,
 ) -> None:

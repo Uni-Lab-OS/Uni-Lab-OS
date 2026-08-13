@@ -207,6 +207,36 @@ class TaskSchedulerBridge:
                 self._task_by_job.pop(job_uuid, None)
         return aggregate
 
+    def pause(self, task_uuid: str) -> dict[str, Any]:
+        """Pause future dispatch while preserving already in-flight device work."""
+
+        if self._closed:
+            raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
+        normalized_uuid = self._required_text(task_uuid, field="task_uuid")
+        try:
+            result = self._scheduler.pause_workflow(normalized_uuid)
+            task = self._store.set_task_control_status(
+                normalized_uuid, control_status="paused"
+            )
+            return {"task": task, "scheduler": result}
+        except (StoreConflict, ValueError) as error:
+            raise TaskSchedulerBridgeError(str(error)) from error
+
+    def resume(self, task_uuid: str) -> dict[str, Any]:
+        """Resume a command-paused workflow under the same Task identity."""
+
+        if self._closed:
+            raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
+        normalized_uuid = self._required_text(task_uuid, field="task_uuid")
+        try:
+            result = self._scheduler.resume_workflow(normalized_uuid)
+            task = self._store.set_task_control_status(
+                normalized_uuid, control_status="active"
+            )
+            return {"task": task, "scheduler": result}
+        except (StoreConflict, ValueError) as error:
+            raise TaskSchedulerBridgeError(str(error)) from error
+
     def recover_active_tasks(self) -> list[dict[str, Any]]:
         """恢复没有结果不明作业的活动工作流任务（WorkflowTask）。
 

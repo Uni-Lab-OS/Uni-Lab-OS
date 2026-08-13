@@ -593,13 +593,13 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         """幂等执行本地工作流任务控制命令。
 
-        当前 Edge 调度内核先开放单步命令；它只允许暂停的 ``step`` 任务放行
-        一个就绪节点。返回与 Backend 相同的 WorkflowTaskCommand 投影。
+        暂停只阻止后续派发，不中断已在途设备动作；恢复、单步和取消都复用
+        同一个 Task 身份。返回与 Backend 相同的 WorkflowTaskCommand 投影。
         """
 
         try:
             task_uuid = validate_uuid(task_uuid)
-            if command_type not in {"step", "cancel"}:
+            if command_type not in {"step", "pause", "resume", "cancel"}:
                 raise WorkflowError("invalid_input")
             if target_node_uuid is not None:
                 target_node_uuid = validate_uuid(target_node_uuid)
@@ -640,14 +640,17 @@ class WorkflowService:
                     result={"reason": "scheduler_unavailable"},
                 )
             try:
-                result = (
-                    self._task_scheduler_bridge.step(
+                if command_type == "step":
+                    result = self._task_scheduler_bridge.step(
                         task_uuid,
                         target_node_uuid=target_node_uuid,
                     )
-                    if command_type == "step"
-                    else self._task_scheduler_bridge.cancel(task_uuid)
-                )
+                elif command_type == "pause":
+                    result = self._task_scheduler_bridge.pause(task_uuid)
+                elif command_type == "resume":
+                    result = self._task_scheduler_bridge.resume(task_uuid)
+                else:
+                    result = self._task_scheduler_bridge.cancel(task_uuid)
             except TaskSchedulerBridgeError as error:
                 return self._store.complete_task_command(
                     command["uuid"],
