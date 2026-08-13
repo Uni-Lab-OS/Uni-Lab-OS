@@ -289,6 +289,28 @@ def test_authoring_worker_failure_preserves_last_valid_generation(
     )
 
 
+def test_authoring_worker_reports_selected_module_import_failure(
+    tmp_path: Path,
+) -> None:
+    """物理图选中模块的坏 import 必须在隔离进程内成为稳定诊断。"""
+
+    workspace_root = tmp_path / "workspace"
+    source = write_runtime_workspace(workspace_root)
+    selected_device = source.root / "runtime_lab" / "selected_device.py"
+    selected_device.write_text(
+        "import dependency_that_does_not_exist_for_unilab_test\n"
+        + selected_device.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(authoring_worker.AuthoringWorkerError) as captured:
+        prepare_stable_workspace_product_generation_in_worker(
+            runtime_arguments(source)
+        )
+
+    assert captured.value.code == "python_import_error"
+
+
 def test_authoring_worker_timeout_has_stable_failure_code(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

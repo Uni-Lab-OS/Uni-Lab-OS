@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib
 import json
 import os
 import subprocess
@@ -507,6 +508,7 @@ def _run_worker(request_path: Path, response_path: Path) -> int:
         prepared = prepare_stable_workspace_product_generation(arguments)
         if prepared is None:
             raise ValueError("请求缺少工作区")
+        _validate_selected_python_modules(prepared.candidate)
         response = {
             "protocol_version": _PROTOCOL_VERSION,
             "ok": True,
@@ -535,6 +537,49 @@ def _run_worker(request_path: Path, response_path: Path) -> int:
     )
     temporary_path.replace(response_path)
     return 0 if response.get("ok") is True else 2
+
+
+def _validate_selected_python_modules(candidate: WorkspaceRegistryRuntime) -> None:
+    """只在一次性 Worker 中导入本代真正可能执行的作者模块。
+
+    设备和资源限定为物理图激活计划；显式工作流清单中的模块全部验证。导入
+    可能产生的装饰器注册、全局变量或第三方副作用都随 Worker 退出销毁，不会
+    进入常驻 Local Backend。依赖导入失败与声明符号缺失使用稳定错误码返回。
+    """
+
+    import_roots = tuple(
+        str(item.source.root) for item in candidate.package_catalog_sources
+    )
+    for import_root in reversed(import_roots):
+        if import_root not in sys.path:
+            sys.path.insert(0, import_root)
+    definitions = (
+        *candidate.activation_plan.devices,
+        *candidate.activation_plan.resources,
+        *candidate.registry_snapshot.workflows,
+    )
+    loaded_modules: dict[str, Any] = {}
+    for definition in definitions:
+        try:
+            module = loaded_modules.get(definition.module)
+            if module is None:
+                module = importlib.import_module(definition.module)
+                loaded_modules[definition.module] = module
+        except ImportError as error:
+            raise AuthoringWorkerError(
+                "python_import_error",
+                f"作者模块导入失败: {definition.module}: {error}",
+            ) from error
+        except Exception as error:
+            raise AuthoringWorkerError(
+                "python_module_error",
+                f"作者模块执行失败: {definition.module}: {error}",
+            ) from error
+        if not hasattr(module, definition.symbol):
+            raise AuthoringWorkerError(
+                "python_symbol_missing",
+                f"作者模块缺少声明符号: {definition.module}:{definition.symbol}",
+            )
 
 
 def _worker_error_code(error: Exception) -> str:
