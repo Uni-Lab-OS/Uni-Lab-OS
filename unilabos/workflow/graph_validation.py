@@ -406,7 +406,6 @@ def _node_kind(
         "tool_call": "tool_call",
         "manual_confirm": "manual_confirm",
         "material_source": "material_source",
-        "material_transfer": "material_transfer",
         # 组合工作流调用（CompositeWorkflowInvocation）是创作层层级节点；
         # 运行时仍只执行其静态展开的叶动作，不创建嵌套工作流任务（WorkflowTask）。
         "workflow": "workflow",
