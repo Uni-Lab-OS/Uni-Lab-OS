@@ -83,7 +83,6 @@ class NodeType(str, Enum):
 
     ILAB = "ILab"
     MANUAL_CONFIRM = "manual_confirm"
-    MATERIAL_TRANSFER = "material_transfer"
 
 
 class ExecutorKind(str, Enum):

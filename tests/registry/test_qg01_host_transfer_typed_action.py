@@ -47,25 +47,25 @@ def test_builtin_host_transfer_is_projected_with_material_lock_contract(
     monkeypatch.setattr(registry, "device_type_registry", {})
     monkeypatch.setattr(registry, "resource_type_registry", {})
     registry.setup(external_only=True)
-    # ``legacy_mapping`` 保留旧前端/设备传输层依赖的参数名、占位符和免排队标记；
-    # 工作流创作连接点则由下方 canonical schema 投影，避免双份合同漂移。
-    legacy_mapping = registry.device_type_registry["host_node"]["class"][
+    # ``action_mapping`` 是设备传输层使用的动作参数、占位符和免排队标记；工作流
+    # 创作连接点由下方 canonical schema 投影，避免双份合同漂移。
+    action_mapping = registry.device_type_registry["host_node"]["class"][
         "action_value_mappings"
     ]["transfer_resource"]
-    assert legacy_mapping["goal"] == {
+    assert action_mapping["goal"] == {
         "resource": "resource",
         "target_device": "target_device",
         "mount_resource": "mount_resource",
         "site": "site",
     }
-    assert legacy_mapping["placeholder_keys"] == {
+    assert action_mapping["placeholder_keys"] == {
         "resource": "unilabos_resources",
         "target_device": "unilabos_devices",
         "mount_resource": "unilabos_nodes",
     }
-    assert legacy_mapping["always_free"] is True
-    assert legacy_mapping["node_type"] == "ILab"
-    assert legacy_mapping["executor_kind"] == "material_transfer"
+    assert action_mapping["always_free"] is True
+    assert action_mapping["node_type"] == "ILab"
+    assert action_mapping["executor_kind"] == "material_transfer"
 
     # ``projection`` 是工作流创作使用的持久模板权威；宿主资源模板 UUID 模拟已由
     # 库存权威（Inventory Authority）稳定解析，测试不创建第二套身份。
