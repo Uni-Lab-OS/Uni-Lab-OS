@@ -9,7 +9,7 @@ import asyncio
 import inspect
 import traceback
 from abc import abstractmethod
-from typing import Type, Any, Dict, Optional, TypeVar, Generic, List
+from typing import Type, Any, Callable, Dict, Iterable, Optional, TypeVar, Generic, List
 
 from unilabos.resources.resource_tracker import DeviceNodeResourceTracker, ResourceTreeSet, ResourceDictInstance, \
     ResourceTreeInstance
@@ -18,6 +18,12 @@ from unilabos.utils.cls_creator import create_instance_from_config
 
 # 定义泛型类型变量
 T = TypeVar("T")
+
+# 这两个动作由 ROS 节点包装器提供，只存在于运行时传输映射中；它们不是
+# 设备工厂返回实例必须实现的公开业务动作。
+_ROS_TRANSPORT_ACTIONS = frozenset(
+    {"_execute_driver_command", "_execute_driver_command_async"}
+)
 
 
 class ClassCreator(Generic[T]):
@@ -33,7 +39,15 @@ class DeviceClassCreator(Generic[T]):
     这个类提供了从任意类创建实例的通用方法。
     """
 
-    def __init__(self, cls: Type[T], children: List[ResourceDictInstance], resource_tracker: DeviceNodeResourceTracker):
+    def __init__(
+        self,
+        cls: Type[T],
+        children: List[ResourceDictInstance],
+        resource_tracker: DeviceNodeResourceTracker,
+        constructor: Optional[Callable[..., Any]] = None,
+        required_action_members: Iterable[str] = (),
+        required_status_members: Iterable[str] = (),
+    ):
         """
         初始化设备类创建器
 
@@ -41,6 +55,9 @@ class DeviceClassCreator(Generic[T]):
             cls: 要创建实例的类
         """
         self.device_cls = cls
+        self.constructor = constructor
+        self.required_action_members = tuple(sorted(set(required_action_members)))
+        self.required_status_members = tuple(sorted(set(required_status_members)))
         self.device_instance: Optional[T] = None
         self.children = children
         self.resource_tracker = resource_tracker
@@ -73,15 +90,71 @@ class DeviceClassCreator(Generic[T]):
         Returns:
             设备类的实例
         """
-        self.device_instance = create_instance_from_config(
-            {
-                "_cls": self.device_cls.__module__ + ":" + self.device_cls.__name__,
-                "_params": data,
-            }
-        )
+        if self.constructor is not None:
+            # 工厂是已经由 Driver Runtime 验证并唯一选中的构造入口，只调用一次。
+            self.device_instance = self.constructor(**data)
+        else:
+            self.device_instance = create_instance_from_config(
+                {
+                    "_cls": self.device_cls.__module__ + ":" + self.device_cls.__name__,
+                    "_params": data,
+                }
+            )
+        if not isinstance(self.device_instance, self.device_cls):
+            self._dispose_invalid_instance(self.device_instance)
+            self.device_instance = None
+            from unilabos.ros.nodes.base_device_node import DeviceInitError
+
+            raise DeviceInitError("factory_return_type_mismatch")
+        if self.constructor is not None:
+            self._validate_factory_contract_members(self.device_instance)
+        self.before_post_create()
         self.post_create()
         self.attach_resource()
         return self.device_instance
+
+    @staticmethod
+    def _dispose_invalid_instance(instance: Any) -> None:
+        """尽力释放错误工厂返回值，不启动异步生命周期。"""
+
+        for method_name in ("close", "shutdown", "stop"):
+            method = getattr(instance, method_name, None)
+            if callable(method) and not inspect.iscoroutinefunction(method):
+                try:
+                    method()
+                except Exception:
+                    logger.warning("释放非法设备工厂返回值失败", exc_info=True)
+                return
+
+    def _validate_factory_contract_members(self, instance: T) -> None:
+        """核对工厂实例仍实现 Catalog 冻结的动作和状态成员。"""
+
+        missing_actions = [
+            name
+            for name in self.required_action_members
+            if name not in _ROS_TRANSPORT_ACTIONS
+            and not callable(inspect.getattr_static(instance, name, None))
+        ]
+        missing_statuses = [
+            name
+            for name in self.required_status_members
+            if inspect.getattr_static(instance, name, None) is None
+        ]
+        if not missing_actions and not missing_statuses:
+            return
+        self._dispose_invalid_instance(instance)
+        self.device_instance = None
+        from unilabos.ros.nodes.base_device_node import DeviceInitError
+
+        details = ", ".join(
+            part
+            for part in (
+                f"actions={','.join(missing_actions)}" if missing_actions else "",
+                f"statuses={','.join(missing_statuses)}" if missing_statuses else "",
+            )
+            if part
+        )
+        raise DeviceInitError(f"factory_contract_member_missing: {details}")
 
     def get_instance(self) -> Optional[T]:
         """
@@ -91,6 +164,11 @@ class DeviceClassCreator(Generic[T]):
             当前设备类实例，如果尚未创建则返回None
         """
         return self.device_instance
+
+    def before_post_create(self) -> None:
+        """设备生命周期启动前的同步扩展点。"""
+
+        return
 
     def post_create(self):
         pass
@@ -103,7 +181,15 @@ class PyLabRobotCreator(DeviceClassCreator[T]):
     这个类提供了针对PyLabRobot设备类的实例创建方法，特别处理deserialize方法。
     """
 
-    def __init__(self, cls: Type[T], children: List[ResourceDictInstance], resource_tracker: DeviceNodeResourceTracker):
+    def __init__(
+        self,
+        cls: Type[T],
+        children: List[ResourceDictInstance],
+        resource_tracker: DeviceNodeResourceTracker,
+        constructor: Optional[Callable[..., Any]] = None,
+        required_action_members: Iterable[str] = (),
+        required_status_members: Iterable[str] = (),
+    ):
         """
         初始化PyLabRobot设备类创建器
 
@@ -111,14 +197,37 @@ class PyLabRobotCreator(DeviceClassCreator[T]):
             cls: PyLabRobot设备类
             children: 子资源字典，用于资源替换
         """
-        super().__init__(cls, children, resource_tracker)
+        super().__init__(
+            cls,
+            children,
+            resource_tracker,
+            constructor=constructor,
+            required_action_members=required_action_members,
+            required_status_members=required_status_members,
+        )
         # 检查类是否具有deserialize方法
-        self.has_deserialize = hasattr(cls, "deserialize") and callable(getattr(cls, "deserialize"))
+        self.has_deserialize = (
+            constructor is None
+            and hasattr(cls, "deserialize")
+            and callable(getattr(cls, "deserialize"))
+        )
         if not self.has_deserialize:
             logger.warning(f"类 {cls.__name__} 没有deserialize方法，将使用标准构造函数")
+        self._factory_name_to_uuid: Dict[str, str] = {}
 
     def attach_resource(self):
         pass  # 只能增加实例化物料，原来默认物料仅为字典查询
+
+    def before_post_create(self) -> None:
+        """先登记工厂自产的完整 PLR 根树，再启动异步 setup。"""
+
+        if self.device_instance is not None:
+            if self._factory_name_to_uuid:
+                self.resource_tracker.loop_set_uuid(
+                    self.device_instance,
+                    self._factory_name_to_uuid,
+                )
+            self.resource_tracker.add_resource(self.device_instance)
 
     # def _process_resource_mapping(self, resource, source_type):
     #     if source_type == dict:
@@ -227,6 +336,7 @@ class PyLabRobotCreator(DeviceClassCreator[T]):
 
         name_to_uuid = {}
         collect_name_to_uuid(self.children, name_to_uuid)
+        self._factory_name_to_uuid = name_to_uuid
         if self.has_deserialize:
             deserialize_method = getattr(self.device_cls, "deserialize")
             spect = inspect.signature(deserialize_method)
@@ -269,7 +379,8 @@ class PyLabRobotCreator(DeviceClassCreator[T]):
 
         if self.device_instance is None:
             try:
-                spect = inspect.signature(self.device_cls.__init__)
+                constructor = self.constructor or self.device_cls
+                spect = inspect.signature(constructor)
                 spec_args = spect.parameters
                 for param_name, param_value in data.copy().items():
                     if (
@@ -334,7 +445,15 @@ class WorkstationNodeCreator(DeviceClassCreator[T]):
     这个类提供了针对WorkstationNode设备类的实例创建方法，处理children参数。
     """
 
-    def __init__(self, cls: Type[T], children: List[ResourceDictInstance], resource_tracker: DeviceNodeResourceTracker):
+    def __init__(
+        self,
+        cls: Type[T],
+        children: List[ResourceDictInstance],
+        resource_tracker: DeviceNodeResourceTracker,
+        constructor: Optional[Callable[..., Any]] = None,
+        required_action_members: Iterable[str] = (),
+        required_status_members: Iterable[str] = (),
+    ):
         """
         初始化WorkstationNode设备类创建器
 
@@ -342,7 +461,14 @@ class WorkstationNodeCreator(DeviceClassCreator[T]):
             cls: WorkstationNode设备类
             children: 子资源字典，用于资源替换
         """
-        super().__init__(cls, children, resource_tracker)
+        super().__init__(
+            cls,
+            children,
+            resource_tracker,
+            constructor=constructor,
+            required_action_members=required_action_members,
+            required_status_members=required_status_members,
+        )
 
     def create_instance(self, data: Dict[str, Any]) -> T:
         """

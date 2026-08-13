@@ -47,6 +47,7 @@ Usage:
 
 from enum import Enum
 from functools import wraps
+import inspect
 import re
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -205,7 +206,7 @@ class HardwareInterface(BaseModel):
 # ---------------------------------------------------------------------------
 # 全局注册表 -- 记录所有被装饰器标记的类/函数
 # ---------------------------------------------------------------------------
-_registered_devices: Dict[str, type] = {}  # device_id -> class
+_registered_devices: Dict[str, Callable[..., Any]] = {}  # device_id -> class or sync factory
 _registered_resources: Dict[str, Any] = {}  # resource_id -> class or function
 
 
@@ -261,7 +262,7 @@ def device(
     metadata: Optional[Dict[str, Any]] = None,
 ):
     """
-    设备类装饰器
+    设备类或同步工厂函数装饰器
 
     将类标记为一个 UniLab-OS 设备，并附加注册表元数据。
 
@@ -321,17 +322,21 @@ def device(
         "metadata": dict(metadata or {}),
     }
 
-    def decorator(cls):
-        cls._device_registry_meta = base_meta
-        cls._device_registry_id_meta = id_meta
-        cls._device_registry_ids = device_ids
+    def decorator(target):
+        if not (inspect.isclass(target) or inspect.isfunction(target)):
+            raise TypeError("@device 只能装饰设备类或同步工厂函数")
+        if inspect.iscoroutinefunction(target):
+            raise TypeError("@device v1 不支持异步工厂函数")
+        target._device_registry_meta = base_meta
+        target._device_registry_id_meta = id_meta
+        target._device_registry_ids = device_ids
 
         for did in device_ids:
             if did in _registered_devices:
                 raise ValueError(f"@device id 重复: '{did}' 已被 {_registered_devices[did]} 注册")
-            _registered_devices[did] = cls
+            _registered_devices[did] = target
 
-        return cls
+        return target
 
     return decorator
 

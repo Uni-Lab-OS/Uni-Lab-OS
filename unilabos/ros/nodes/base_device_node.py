@@ -20,6 +20,7 @@ from typing import (
     TYPE_CHECKING,
     Union,
     Tuple,
+    Callable,
 )
 
 from concurrent.futures import ThreadPoolExecutor
@@ -342,6 +343,8 @@ def init_wrapper(
     print_publish: bool,
     driver_params: Dict[str, Any],
     driver_is_ros: bool = False,
+    driver_factory: Optional[Callable[..., Any]] = None,
+    driver_type: str = "python",
     *args,
     **kwargs,
 ):
@@ -356,6 +359,8 @@ def init_wrapper(
     kwargs["hardware_interface"] = hardware_interface
     kwargs["print_publish"] = print_publish
     kwargs["driver_is_ros"] = driver_is_ros
+    kwargs["driver_factory"] = driver_factory
+    kwargs["driver_type"] = driver_type
     super(type(self), self).__init__(*args, **kwargs)
 
 
@@ -3536,6 +3541,8 @@ class ROS2DeviceNode:
         hardware_interface: Dict[str, Any],
         print_publish: bool = True,
         driver_is_ros: bool = False,
+        driver_factory: Optional[Callable[..., Any]] = None,
+        driver_type: str = "python",
     ):
         """
         初始化ROS2设备节点
@@ -3562,6 +3569,8 @@ class ROS2DeviceNode:
         # 保存设备类是否支持异步上下文
         self._has_async_context = hasattr(driver_class, "__aenter__") and hasattr(driver_class, "__aexit__")
         self._driver_class = driver_class
+        self._driver_factory = driver_factory
+        self._driver_type = driver_type
         self.device_config = device_config
         children: List[ResourceDictInstance] = device_config.children
         self.driver_is_ros = driver_is_ros
@@ -3570,7 +3579,8 @@ class ROS2DeviceNode:
 
         # use_pylabrobot_creator 使用 cls的包路径检测
         use_pylabrobot_creator = (
-            driver_class.__module__.startswith("pylabrobot")
+            driver_type == "pylabrobot"
+            or driver_class.__module__.startswith("pylabrobot")
             or driver_class.__name__ == "LiquidHandlerAbstract"
             or driver_class.__name__ == "LiquidHandlerBiomek"
             or driver_class.__name__ == "PRCXI9300Handler"
@@ -3584,7 +3594,12 @@ class ROS2DeviceNode:
             # 在下方对于加载Deck等Resource要手动import
             register()
             self._driver_creator = PyLabRobotCreator(
-                driver_class, children=children, resource_tracker=self.resource_tracker
+                driver_class,
+                children=children,
+                resource_tracker=self.resource_tracker,
+                constructor=driver_factory,
+                required_action_members=action_value_mappings,
+                required_status_members=status_types,
             )
         else:
             from unilabos.devices.workstation.workstation_base import WorkstationBase
@@ -3594,11 +3609,21 @@ class ROS2DeviceNode:
             ):  # 是WorkstationNode的子节点，就要调用WorkstationNodeCreator
                 self.driver_is_workstation = True
                 self._driver_creator = WorkstationNodeCreator(
-                    driver_class, children=children, resource_tracker=self.resource_tracker
+                    driver_class,
+                    children=children,
+                    resource_tracker=self.resource_tracker,
+                    constructor=driver_factory,
+                    required_action_members=action_value_mappings,
+                    required_status_members=status_types,
                 )
             else:
                 self._driver_creator = DeviceClassCreator(
-                    driver_class, children=children, resource_tracker=self.resource_tracker
+                    driver_class,
+                    children=children,
+                    resource_tracker=self.resource_tracker,
+                    constructor=driver_factory,
+                    required_action_members=action_value_mappings,
+                    required_status_members=status_types,
                 )
 
         if driver_is_ros:

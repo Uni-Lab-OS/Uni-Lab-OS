@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 
@@ -42,6 +43,8 @@ class PythonDriverActivation:
     content_hash: str | None
     package_catalog_digest: str | None
     driver_class: type[Any]
+    driver_factory: Callable[..., Any] | None
+    driver_type: str
     driver_is_ros: bool
     _driver_params: dict[str, Any] = field(repr=False)
     _status_types: dict[str, Any] = field(repr=False)
@@ -61,6 +64,8 @@ class PythonDriverActivation:
         action_value_mappings: dict[str, Any],
         hardware_interface: dict[str, Any],
         driver_is_ros: bool,
+        driver_factory: Callable[..., Any] | None = None,
+        driver_type: str = "python",
     ) -> None:
         """冻结身份、包证据、驱动类及全部可变运行配置。
 
@@ -84,6 +89,8 @@ class PythonDriverActivation:
             package_catalog_digest,
         )
         object.__setattr__(self, "driver_class", driver_class)
+        object.__setattr__(self, "driver_factory", driver_factory)
+        object.__setattr__(self, "driver_type", driver_type)
         object.__setattr__(self, "driver_is_ros", driver_is_ros)
         object.__setattr__(self, "_driver_params", copy.deepcopy(driver_params))
         object.__setattr__(self, "_status_types", copy.deepcopy(status_types))

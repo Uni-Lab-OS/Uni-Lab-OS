@@ -84,6 +84,39 @@ def test_catalog_snapshot_is_detached_and_fingerprinted() -> None:
     assert original_fingerprint.startswith("sha256:")
 
 
+def test_catalog_keeps_shared_implementation_actions_uuid_addressable() -> None:
+    """共享设备实现的动作按模板 UUID 保留，源码业务键必须明确消歧。"""
+
+    first_node = _node_template()
+    second_node = {
+        **_node_template(),
+        "uuid": "30000000-0000-4000-8000-000000000002",
+        "resource_template_uuid": "31000000-0000-4000-8000-000000000002",
+        "display_name": "Prepare backup",
+    }
+    first_handle = _handle_template()
+    second_handle = {
+        **_handle_template(),
+        "uuid": "40000000-0000-4000-8000-000000000002",
+        "workflow_node_template_uuid": second_node["uuid"],
+    }
+
+    snapshot = AuthoringCatalogSnapshot.from_entities(
+        [first_node, second_node],
+        [first_handle, second_handle],
+    )
+
+    assert len(snapshot.actions) == 2
+    assert snapshot.require_template(str(first_node["uuid"])).template[
+        "resource_template_uuid"
+    ] == first_node["resource_template_uuid"]
+    assert snapshot.require_template(str(second_node["uuid"])).template[
+        "resource_template_uuid"
+    ] == second_node["resource_template_uuid"]
+    with pytest.raises(AuthoringCatalogError, match="动作身份不唯一"):
+        snapshot.require_action("lab.devices:Reactor", "prepare")
+
+
 @pytest.mark.parametrize(
     "unsafe_source_identity",
     (

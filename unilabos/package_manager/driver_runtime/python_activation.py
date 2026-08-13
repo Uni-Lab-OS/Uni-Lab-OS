@@ -7,7 +7,7 @@ import inspect
 import keyword
 import re
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, get_type_hints
 
 from unilabos.registry.init_enforce import merge_init_param_enforce
 
@@ -77,14 +77,36 @@ def activate_python_driver(
             definition_identity,
             "设备注册表条目缺少 class 对象",
         )
-    # ``source_identity`` 是经过语法门禁后唯一允许交给加载器的作者源码身份。
-    source_identity = class_mapping.get("module")
-    if not _valid_source_identity(source_identity):
+    # ``class_source_identity`` 始终指向动作与状态合同的真实设备类。
+    class_source_identity = class_mapping.get("module")
+    if not _valid_source_identity(class_source_identity):
         raise DriverActivationError(
             "invalid_registry_entry",
             definition_identity,
             "设备驱动必须使用合法的绝对 module:symbol 源码身份",
         )
+    factory_mapping = registry_entry.get("factory")
+    factory_source_identity: str | None = None
+    if factory_mapping is not None:
+        if not isinstance(factory_mapping, Mapping):
+            raise DriverActivationError(
+                "invalid_registry_entry",
+                definition_identity,
+                "设备工厂注册表条目必须是对象",
+            )
+        factory_source_identity = factory_mapping.get("module")
+        return_class_identity = factory_mapping.get("return_class")
+        if (
+            not _valid_source_identity(factory_source_identity)
+            or return_class_identity != class_source_identity
+        ):
+            raise DriverActivationError(
+                "invalid_registry_entry",
+                definition_identity,
+                "设备工厂入口或返回类身份非法",
+            )
+    # 包证据绑定实际激活入口；类设备仍保持 class.module 不变。
+    source_identity = factory_source_identity or class_source_identity
     # 三项 ``driver_contract`` 在加载作者代码前完成关闭式结构校验；只有缺键可默认。
     status_types = _contract_mapping(
         class_mapping,
@@ -114,9 +136,14 @@ def activate_python_driver(
         definition_identity=definition_identity,
         package_definition_fqid=package_evidence[0],
     )
+    driver_factory: Callable[..., Any] | None = None
     try:
-        # ``driver_class`` 是本次唯一允许加载的物理图选中驱动实现。
-        driver_class = loader(source_identity)
+        if factory_source_identity is not None:
+            driver_factory = loader(factory_source_identity)
+            driver_class = loader(class_source_identity)
+        else:
+            # ``driver_class`` 是本次唯一允许加载的物理图选中驱动实现。
+            driver_class = loader(class_source_identity)
     except Exception as error:
         raise DriverActivationError(
             "driver_load_error",
@@ -127,8 +154,35 @@ def activate_python_driver(
         raise DriverActivationError(
             "driver_not_class",
             resolved_definition_identity,
-            f"设备驱动源码身份没有解析为类: {source_identity}",
+            f"设备驱动源码身份没有解析为类: {class_source_identity}",
         )
+    if driver_factory is not None:
+        if inspect.isclass(driver_factory) or not callable(driver_factory):
+            raise DriverActivationError(
+                "factory_not_callable",
+                resolved_definition_identity,
+                f"设备工厂源码身份没有解析为同步函数: {factory_source_identity}",
+            )
+        if inspect.iscoroutinefunction(driver_factory):
+            raise DriverActivationError(
+                "factory_async_unsupported",
+                resolved_definition_identity,
+                "设备工厂不能是异步函数",
+            )
+        try:
+            runtime_return_class = get_type_hints(driver_factory).get("return")
+        except Exception as error:
+            raise DriverActivationError(
+                "factory_return_class_mismatch",
+                resolved_definition_identity,
+                "设备工厂运行时返回注解无法解析",
+            ) from error
+        if runtime_return_class is not driver_class:
+            raise DriverActivationError(
+                "factory_return_class_mismatch",
+                resolved_definition_identity,
+                "设备工厂运行时返回类与静态目录不一致",
+            )
 
     try:
         # ``driver_params`` 是实例配置与注册表强制值恰好一次合并的隔离结果。
@@ -136,6 +190,15 @@ def activate_python_driver(
             runtime_config,
             registry_entry.get("init_param_enforce"),
         )
+        if driver_factory is not None:
+            try:
+                inspect.signature(driver_factory).bind(**driver_params)
+            except TypeError as error:
+                raise DriverActivationError(
+                    "factory_argument_bind_error",
+                    resolved_definition_identity,
+                    "设备运行配置无法绑定到工厂签名",
+                ) from error
         return PythonDriverActivation(
             definition_identity=resolved_definition_identity,
             source_identity=source_identity,
@@ -147,6 +210,8 @@ def activate_python_driver(
             action_value_mappings=action_value_mappings,
             hardware_interface=hardware_interface,
             driver_is_ros=class_mapping.get("type") == "ros2",
+            driver_factory=driver_factory,
+            driver_type=str(class_mapping.get("type") or "python"),
         )
     except DriverActivationError:
         raise

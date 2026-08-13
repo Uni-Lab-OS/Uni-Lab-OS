@@ -53,6 +53,7 @@ from unilabos.utils.banner_print import print_status, print_unilab_banner
 _restart_requested: bool = False
 _restart_reason: str = ""
 
+
 def _request_workspace_restart(reasons: tuple[str, ...]) -> None:
     """把安全工作区待重启原因提交给现有产品重启循环。
 
@@ -132,9 +133,7 @@ def configure_workflow_editable_package_roots(
     return frozen_roots
 
 
-def should_bootstrap_local_resource_graph(
-    *, is_host_mode: bool
-) -> bool:
+def should_bootstrap_local_resource_graph(*, is_host_mode: bool) -> bool:
     """判断当前 OS 节点是否应建立本地资源图投影（Resource Graph Projection）。
 
     参数：``is_host_mode`` 表示当前节点是否为主机。返回：主机承担本地库存权威
@@ -169,11 +168,7 @@ def should_request_remote_startup(
     异常：无；普通 OS 启动始终关闭失败，不隐式连接后端（Backend）。
     """
 
-    return (
-        use_remote_resource
-        and startup_json is None
-        and graph_file_path is None
-    )
+    return use_remote_resource and startup_json is None and graph_file_path is None
 
 
 def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
@@ -299,7 +294,7 @@ def parse_args():
         default=None,
         help="ROS_DOMAIN_ID for this process. Host: also advertised to slaves via "
         "HostLink handshake (network-wide domain). Slave: local fallback only — "
-            "the value downloaded from host wins once connected.",
+        "the value downloaded from host wins once connected.",
     )
     parser.add_argument(
         "--ros_discovery_port",
@@ -1156,9 +1151,7 @@ def main():
             install_workspace_product_lifecycle(
                 prepared_workspace_generation,
                 registry=lab_registry,
-                restart_mode=(
-                    os.environ.get("UNILABOS_RESTART_SUPERVISED") == "1"
-                ),
+                restart_mode=(os.environ.get("UNILABOS_RESTART_SUPERVISED") == "1"),
                 request_restart=_request_workspace_restart,
             )
 
@@ -1307,6 +1300,24 @@ def main():
         )
         resource_tree_set.merge_remote_resources(remote_tree_set)
         print_status("远端物料同步完成", "info")
+
+    # Opted-in PyLabRobot factories are the single source of truth for their
+    # default rack/site topology.  Expand them before Inventory freezes the
+    # startup graph; the exact same prepared instance is consumed later by the
+    # ROS device wrapper, so the device factory still runs only once.
+    from unilabos.package_manager.driver_runtime.factory_resource_projection import (
+        project_factory_resource_trees,
+    )
+
+    inferred_factory_count = project_factory_resource_trees(
+        lab_registry,
+        resource_tree_set,
+    )
+    if inferred_factory_count:
+        print_status(
+            f"已从 {inferred_factory_count} 个设备工厂推断默认培养架与点位",
+            "info",
+        )
 
     # 第二次设备包依赖检查：云端物料同步后，community 包可能引入新的 requirements
     # TODO: 当 community device package 功能上线后，在这里调用

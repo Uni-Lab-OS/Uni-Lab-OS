@@ -10,10 +10,8 @@ from typing import Any
 import pytest
 
 from tests.registry.test_template_projection import FakeRegistry
-from unilabos.registry.template_projection import (
-    RegistryTemplateProjection,
-    RegistryTemplateProjectionError,
-)
+from unilabos.registry.template_projection import RegistryTemplateProjection
+from unilabos.workflow.authoring_kernel import AuthoringCatalogError
 from unilabos.workflow.store import WorkflowStore
 
 PRIMARY_RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
@@ -27,8 +25,8 @@ class _DuplicateActionBusinessIdentityRegistry(FakeRegistry):
         """构造会污染工作流创作目录（Authoring Catalog）的重复动作。
 
         参数：无。返回：两个资源模板（ResourceTemplate）身份不同，但设备类与
-        动作业务名完全相同的设备注册表（Registry）定义；候选模板持久化层允许
-        各自的节点业务键，完整目录校验必须拒绝重复动作业务身份。
+        动作业务名完全相同的设备注册表（Registry）定义；目录应完整发布两套
+        UUID 模板，同时把仅凭源码业务键的查询标记为歧义。
         """
 
         devices = super().obtain_registry_device_info()
@@ -36,6 +34,26 @@ class _DuplicateActionBusinessIdentityRegistry(FakeRegistry):
         secondary["id"] = "backup_pump"
         secondary["displayname"] = "备用注射泵"
         return [devices[0], secondary]
+
+
+class _DistinctFactorySourceRegistry(FakeRegistry):
+    """发布共用返回类、但激活工厂源码身份不同的两个设备定义。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """构造两个合法复用同一合同类的工厂设备定义。
+
+        参数：无。返回：两个资源模板共享 ``class.module`` 和动作合同，但分别
+        声明唯一 ``source_fqid``；工作流创作目录必须按实际工厂入口消歧。
+        """
+
+        devices = super().obtain_registry_device_info()
+        primary = devices[0]
+        primary["source_fqid"] = "lab.devices:make_primary_pump"
+        secondary = deepcopy(primary)
+        secondary["id"] = "backup_pump"
+        secondary["displayname"] = "备用注射泵"
+        secondary["source_fqid"] = "lab.devices:make_backup_pump"
+        return [primary, secondary]
 
 
 def _projection(database_path: Path) -> RegistryTemplateProjection:
@@ -121,41 +139,61 @@ def _persisted_projection_state(database_path: Path) -> dict[str, Any]:
     }
 
 
-def test_invalid_catalog_generation_rolls_back_before_durable_publish(
+def test_shared_action_identity_publishes_uuid_addressable_templates(
     tmp_path: Path,
 ) -> None:
-    """完整目录校验失败必须回滚同一模板投影事务。
+    """共享实现的多设备动作必须完整发布且不被任意源码解析。
 
-    参数说明：``tmp_path`` 提供隔离数据库目录。返回：无；先发布合法代际，再用
-    重复动作业务身份触发工作流创作目录（Authoring Catalog）校验异常，并断言
-    内存快照、SQLite 代际、节点、连接点（Handle）、资源身份和重启恢复全部保持
-    合法代际；对外只暴露 ``RegistryTemplateProjectionError``。
+    参数说明：``tmp_path`` 提供隔离数据库目录。返回：无；断言共享类与动作名的
+    两个资源模板均持久发布、可按模板 UUID 区分，且源码业务键查询明确报告歧义；
+    重启后保持同一目录事实。
     """
 
     database_path = tmp_path / "workflow_history.db"
     projection = _projection(database_path)
-    good_snapshot = projection.refresh(FakeRegistry())
-    # ``good_delta`` 是最近成功提交的模板投影差量，失败刷新不得提前替换它。
-    good_delta = projection.last_delta()
-    good_state = _persisted_projection_state(database_path)
-
-    with pytest.raises(RegistryTemplateProjectionError, match="动作业务身份重复"):
-        projection.refresh(_DuplicateActionBusinessIdentityRegistry())
-
-    assert projection.snapshot().fingerprint == good_snapshot.fingerprint
-    assert projection.last_delta() == good_delta
-    assert _persisted_projection_state(database_path) == good_state
+    snapshot = projection.refresh(_DuplicateActionBusinessIdentityRegistry())
+    matching_actions = tuple(
+        action
+        for action in snapshot.actions
+        if action.template.get("class") == "lab.devices:Pump"
+        and action.template.get("name") == "transfer"
+    )
+    assert {
+        action.template["resource_template_uuid"] for action in matching_actions
+    } == {PRIMARY_RESOURCE_TEMPLATE_UUID, SECONDARY_RESOURCE_TEMPLATE_UUID}
+    for action in matching_actions:
+        assert snapshot.require_template(str(action.template["uuid"])) is action
+    with pytest.raises(AuthoringCatalogError, match="动作身份不唯一"):
+        snapshot.require_action("lab.devices:Pump", "transfer")
+    persisted_state = _persisted_projection_state(database_path)
     projection.close()
 
     restarted = _projection(database_path)
-    assert restarted.snapshot().fingerprint == good_snapshot.fingerprint
-    assert (
-        restarted.snapshot()
-        .require_action(
-            "lab.devices:Pump",
-            "transfer",
-        )
-        .template["resource_template_uuid"]
-        == PRIMARY_RESOURCE_TEMPLATE_UUID
-    )
+    assert restarted.snapshot().fingerprint == snapshot.fingerprint
+    assert _persisted_projection_state(database_path) == persisted_state
+    with pytest.raises(AuthoringCatalogError, match="动作身份不唯一"):
+        restarted.snapshot().require_action("lab.devices:Pump", "transfer")
     restarted.close()
+
+
+def test_factory_source_identity_disambiguates_shared_return_class(
+    tmp_path: Path,
+) -> None:
+    """工厂设备应按实际激活入口建立动作业务身份。
+
+    参数说明：``tmp_path`` 隔离 SQLite。返回：无；断言两个工厂即使共用同一
+    返回类和动作名也可同时发布，并可分别通过工厂源码身份精确取得。
+    """
+
+    projection = _projection(tmp_path / "workflow_history.db")
+    snapshot = projection.refresh(_DistinctFactorySourceRegistry())
+
+    assert snapshot.require_action(
+        "lab.devices:make_primary_pump",
+        "transfer",
+    ).template["resource_template_uuid"] == PRIMARY_RESOURCE_TEMPLATE_UUID
+    assert snapshot.require_action(
+        "lab.devices:make_backup_pump",
+        "transfer",
+    ).template["resource_template_uuid"] == SECONDARY_RESOURCE_TEMPLATE_UUID
+    projection.close()

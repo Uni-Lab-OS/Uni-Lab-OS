@@ -76,6 +76,7 @@ class _SharedImplementationRegistry(_Registry):
         """
 
         primary = super().obtain_registry_device_info()[0]
+        primary["source_fqid"] = "m2b_native_e2e.mount:M2BMount"
         secondary = {
             **primary,
             "id": "m2b_mount_secondary",
@@ -157,38 +158,42 @@ class _ConfigSiteResourceTree:
         """返回父子物料与配置式库位声明，不伪造显式库位节点。"""
         owner_runtime_uuid = "64000000-0000-4000-8000-0000000002c0"
         child_runtime_uuid = "64000000-0000-4000-8000-0000000002c1"
-        return [[
-            {
-                "id": "m2b_mount",
-                "uuid": owner_runtime_uuid,
-                "name": "Stacker A",
-                "parent_uuid": None,
-                "type": "device",
-                "class": "m2b_mount",
-                "pose": _pose(0, 0, 0, 360, 300, 720),
-                "config": {
-                    "sites": [{
-                        "label": "Slot 1",
-                        "position": {"x": 10, "y": 20, "z": 30},
-                        "size": {"width": 100, "height": 90, "depth": 80},
-                        "content_type": ["m2b_child"],
-                        "occupied_by": "m2b_child",
-                    }]
+        return [
+            [
+                {
+                    "id": "m2b_mount",
+                    "uuid": owner_runtime_uuid,
+                    "name": "Stacker A",
+                    "parent_uuid": None,
+                    "type": "device",
+                    "class": "m2b_mount",
+                    "pose": _pose(0, 0, 0, 360, 300, 720),
+                    "config": {
+                        "sites": [
+                            {
+                                "label": "Slot 1",
+                                "position": {"x": 10, "y": 20, "z": 30},
+                                "size": {"width": 100, "height": 90, "depth": 80},
+                                "content_type": ["m2b_child"],
+                                "occupied_by": "m2b_child",
+                            }
+                        ]
+                    },
+                    "data": {},
                 },
-                "data": {},
-            },
-            {
-                "id": "m2b_child",
-                "uuid": child_runtime_uuid,
-                "name": "Child A",
-                "parent_uuid": owner_runtime_uuid,
-                "type": "device",
-                "class": "community.m2b_native_e2e.m2b_child",
-                "pose": _pose(10, 20, 30, 100, 90, 80),
-                "config": {},
-                "data": {},
-            },
-        ]]
+                {
+                    "id": "m2b_child",
+                    "uuid": child_runtime_uuid,
+                    "name": "Child A",
+                    "parent_uuid": owner_runtime_uuid,
+                    "type": "device",
+                    "class": "community.m2b_native_e2e.m2b_child",
+                    "pose": _pose(10, 20, 30, 100, 90, 80),
+                    "config": {},
+                    "data": {},
+                },
+            ]
+        ]
 
 
 class _ResourceTree:
@@ -206,6 +211,7 @@ class _ResourceTree:
         site_parent_uuid: str = "64000000-0000-4000-8000-0000000002b0",
         mount_name: str = "Stacker A",
         mount_scale: float = 1,
+        site_type: str = "well",
     ) -> None:
         """保存测试资源树的可变输入。
 
@@ -216,6 +222,7 @@ class _ResourceTree:
         self._site_parent_uuid = site_parent_uuid
         self._mount_name = mount_name
         self._mount_scale = mount_scale
+        self._site_type = site_type
 
     def dump(self) -> list[list[dict[str, Any]]]:
         """返回设备物料和两个有序库位（Site）的序列化树。
@@ -254,10 +261,10 @@ class _ResourceTree:
                     "name": "Slot 1",
                     "description": "",
                     "parent_uuid": self._site_parent_uuid,
-                    "type": "well",
+                    "type": self._site_type,
                     "class": "",
                     "pose": _pose(0, 0, 40, 100, 100, 24),
-                    "config": {"category": "well"},
+                    "config": {"category": self._site_type},
                     "data": {},
                     "barcode": "",
                 },
@@ -267,10 +274,10 @@ class _ResourceTree:
                     "name": "Slot 2",
                     "description": "",
                     "parent_uuid": runtime_mount_uuid,
-                    "type": "well",
+                    "type": self._site_type,
                     "class": "",
                     "pose": _pose(120, 0, 40, 100, 100, 24),
-                    "config": {"category": "well"},
+                    "config": {"category": self._site_type},
                     "data": {},
                     "barcode": "",
                 },
@@ -353,6 +360,24 @@ def test_first_bootstrap_exposes_stable_device_material_and_ordered_sites() -> N
     assert all(site["material_uuid"] == MOUNT_MATERIAL_UUID for site in sites)
 
 
+@pytest.mark.parametrize("site_type", ["plate_holder", "resource_holder"])
+def test_pylabrobot_holder_categories_project_as_inventory_sites(
+    site_type: str,
+) -> None:
+    """Factory-owned holders are Sites and never require a material class."""
+
+    store = InventoryStore(":memory:")
+    try:
+        receipt = _bootstrap(store, _ResourceTree(site_type=site_type))
+        graph = BackendResourceService(store).material_graph()
+    finally:
+        store.close()
+
+    assert receipt["material_count"] == 1
+    assert receipt["site_count"] == 2
+    assert len(graph["nodes"][0]["sites"]) == 2
+
+
 def test_bootstrap_projects_public_shape_kind_and_model_url() -> None:
     """物料读模型必须携带外形类型与 OS 公开模型 URL。
 
@@ -397,8 +422,12 @@ def test_config_sites_project_ordered_occupied_inventory_sites() -> None:
     finally:
         store.close()
 
-    owner = next(node for node in graph["nodes"] if node["material"]["name"] == "Stacker A")
-    child = next(node for node in graph["nodes"] if node["material"]["name"] == "Child A")
+    owner = next(
+        node for node in graph["nodes"] if node["material"]["name"] == "Stacker A"
+    )
+    child = next(
+        node for node in graph["nodes"] if node["material"]["name"] == "Child A"
+    )
     assert receipt["site_count"] == 1
     assert owner["sites"][0]["name"] == "Slot 1"
     assert owner["sites"][0]["occupied_material_uuid"] == child["material"]["uuid"]
@@ -522,9 +551,7 @@ def test_registry_action_change_does_not_invalidate_identical_inventory_graph(
     database_path = tmp_path / "inventory.db"
     first = InventoryStore(str(database_path))
     try:
-        assert _bootstrap(first, _ResourceTree())[
-            "status"
-        ] == "imported"
+        assert _bootstrap(first, _ResourceTree())["status"] == "imported"
     finally:
         first.close()
     reopened = InventoryStore(str(database_path))

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Dict, Any, Optional, Type, TypeVar
 
 from unilabos.ros.msgs.message_converter import (
@@ -24,6 +25,8 @@ def ros2_device_node(
     action_value_mappings: Optional[Dict[str, Any]] = None,
     hardware_interface: Optional[Dict[str, Any]] = None,
     print_publish: bool = False,
+    driver_factory: Optional[Callable[..., Any]] = None,
+    driver_type: str = "python",
 ) -> Type[ROS2DeviceNodeWrapper]:
     """Create a ROS2 Node class for a device class with properties and actions.
 
@@ -81,6 +84,8 @@ def ros2_device_node(
                 action_value_mappings=action_value_mappings,
                 hardware_interface=hardware_interface,
                 print_publish=print_publish,
+                driver_factory=driver_factory,
+                driver_type=driver_type,
                 *args,
                 **kwargs,
             ),

@@ -6,7 +6,11 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from unilabos.registry.ast_registry_scanner import _parse_file
+from unilabos.registry.ast_registry_scanner import (
+    DeviceFactoryScanError,
+    _build_static_symbol_index,
+    _parse_file,
+)
 
 from ...model import (
     PackageCompileError,
@@ -35,6 +39,7 @@ def compile_registry_definitions(
     # ``device_metadata`` 与 ``resource_metadata`` 是同一注册表解析器的完整候选结果。
     device_metadata: dict[str, dict[str, Any]] = {}
     resource_metadata: dict[str, dict[str, Any]] = {}
+    symbol_index = _build_static_symbol_index(list(python_files), workspace_root)
     for python_file in python_files:
         try:
             # ``scanned_devices`` 与 ``scanned_resources`` 是单个源码文件的 AST 候选，
@@ -42,7 +47,15 @@ def compile_registry_definitions(
             scanned_devices, scanned_resources = _parse_file(
                 python_file,
                 workspace_root,
+                symbol_index,
             )
+        except DeviceFactoryScanError as error:
+            logical_path = python_file.relative_to(workspace_root).as_posix()
+            raise _compile_error(
+                code=error.code,
+                message=str(error),
+                path=logical_path,
+            ) from error
         except Exception as error:
             # ``logical_path`` 是编译诊断采用的包内源码证据身份，不泄漏绝对路径。
             logical_path = python_file.relative_to(workspace_root).as_posix()
@@ -132,7 +145,10 @@ def _device_definition(
             path=logical_path,
         ) from error
     # ``module`` 与 ``symbol`` 是设备定义的 Python 源码身份，不代替规范 FQID。
-    module, symbol = _module_symbol(metadata)
+    module, symbol = _module_symbol(
+        metadata,
+        identity_field="factory_module" if metadata.get("is_factory") else "module",
+    )
     return PackageDefinition(
         kind="device",
         id=definition_id,
@@ -327,6 +343,11 @@ def _static_device_entry(
         "registry_type": "device",
         "version": metadata.get("version", "1.0.0"),
     }
+    if metadata.get("is_factory"):
+        entry["factory"] = {
+            "module": metadata.get("factory_module", ""),
+            "return_class": metadata.get("return_class_module", ""),
+        }
     if metadata.get("model") is not None:
         entry["model"] = metadata["model"]
     return entry
@@ -351,7 +372,11 @@ def _logical_declaring_path(metadata: Mapping[str, Any], workspace_root: Path) -
         ) from error
 
 
-def _module_symbol(metadata: Mapping[str, Any]) -> tuple[str, str]:
+def _module_symbol(
+    metadata: Mapping[str, Any],
+    *,
+    identity_field: str = "module",
+) -> tuple[str, str]:
     """拆分静态定义的模块和符号身份。
 
     参数：``metadata`` 是注册表 AST 元数据。
@@ -360,7 +385,7 @@ def _module_symbol(metadata: Mapping[str, Any]) -> tuple[str, str]:
     """
 
     # ``module_identity`` 必须保持 ``module:symbol``，供模板身份映射稳定复用。
-    module_identity = metadata.get("module")
+    module_identity = metadata.get(identity_field)
     if not isinstance(module_identity, str) or ":" not in module_identity:
         raise _compile_error(
             code="definition_identity_invalid",

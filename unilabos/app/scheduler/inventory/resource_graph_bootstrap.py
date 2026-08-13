@@ -19,7 +19,16 @@ from unilabos.registry.local_template_identity import (
 )
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 
-_SITE_TYPES = frozenset({"well", "tipspot", "tip_spot", "tip-spot"})
+_SITE_TYPES = frozenset(
+    {
+        "well",
+        "tipspot",
+        "tip_spot",
+        "tip-spot",
+        "plate_holder",
+        "resource_holder",
+    }
+)
 _SOURCE_KEY = "resource_graph_bootstrap_source"
 _FINGERPRINT_KEY = "resource_graph_bootstrap_fingerprint"
 _FINGERPRINT_VERSION_KEY = "resource_graph_bootstrap_fingerprint_version"
@@ -157,14 +166,17 @@ def _with_implicit_host_executor(
 def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     """建立注册表别名到资源模板业务 ID 的唯一映射。
 
-    参数：``snapshot`` 是单代注册表快照。返回：业务 ID、显式源码身份及全代唯一
-    实现类身份与全代唯一社区包短 ID 的映射；歧义别名不会进入返回值。异常：空
-    业务身份，或业务 ID/显式源码身份相互冲突时抛出 ``ResourceGraphBootstrapError``。
+    参数：``snapshot`` 是单代注册表快照。返回：业务 ID、全代唯一源码身份、
+    全代唯一实现类身份与全代唯一社区包短 ID 的映射；歧义别名不会进入返回值。
+    异常：业务身份为空或业务 ID 本身冲突时抛出
+    ``ResourceGraphBootstrapError``。
     """
 
     # ``aliases`` 保存作者显式业务身份，以及稍后证明全代唯一的遗留实现类别名。
     aliases: dict[str, str] = {}
-    # ``class_owners`` 汇总同代每个 Python 实现类的所有业务模板所有者。
+    # 工厂注册和多 ID 装饰器会合法共享 ``source_fqid`` 与 Python 实现类；二者
+    # 都只能在证明全代唯一后作为便利别名。
+    source_owners: dict[str, set[str]] = {}
     class_owners: dict[str, set[str]] = {}
     package_short_owners: dict[str, set[str]] = {}
     for definition in snapshot.detached_definitions():
@@ -172,15 +184,15 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
         class_definition = definition.get("class")
         if not template_name:
             raise ResourceGraphBootstrapError("资源模板业务 ID 不能为空")
-        # 业务 ID 与 ``source_fqid`` 都是作者明确选择的一一身份；冲突必须关闭。
-        for candidate in (template_name, definition.get("source_fqid")):
-            if not isinstance(candidate, str) or not candidate.strip():
-                continue
-            alias = candidate.strip()
-            previous = aliases.get(alias)
-            if previous is not None and previous != template_name:
-                raise ResourceGraphBootstrapError(f"资源模板别名不唯一: {alias}")
-            aliases[alias] = template_name
+        previous = aliases.get(template_name)
+        if previous is not None and previous != template_name:
+            raise ResourceGraphBootstrapError(
+                f"资源模板别名不唯一: {template_name}"
+            )
+        aliases[template_name] = template_name
+        source_fqid = definition.get("source_fqid")
+        if isinstance(source_fqid, str) and source_fqid.strip():
+            source_owners.setdefault(source_fqid.strip(), set()).add(template_name)
         class_module = (
             class_definition.get("module")
             if isinstance(class_definition, Mapping)
@@ -195,11 +207,12 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     for short_alias, owners in package_short_owners.items():
         if len(owners) == 1 and short_alias not in aliases:
             aliases[short_alias] = next(iter(owners))
-    for class_alias, owners in class_owners.items():
-        # 共享实现类没有唯一业务语义；保留业务 ID，丢弃该遗留便利别名。
-        if len(owners) != 1 or class_alias in aliases:
-            continue
-        aliases[class_alias] = next(iter(owners))
+    for convenience_owners in (source_owners, class_owners):
+        for convenience_alias, owners in convenience_owners.items():
+            # 共享源码/实现类没有唯一业务语义；保留业务 ID，丢弃便利别名。
+            if len(owners) != 1 or convenience_alias in aliases:
+                continue
+            aliases[convenience_alias] = next(iter(owners))
     return aliases
 
 
@@ -712,8 +725,7 @@ def _projection_matches_persisted_rows(
     )
     persisted_materials = []
     for row in connection.execute(
-        f"SELECT {','.join(material_fields)} FROM material "
-        "WHERE deleted_at IS NULL"
+        f"SELECT {','.join(material_fields)} FROM material WHERE deleted_at IS NULL"
     ).fetchall():
         normalized = list(row)
         normalized[2] = _stable_projection_meta(normalized[2])
@@ -1012,9 +1024,7 @@ def _stable_projection_meta_object(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     return {
-        str(key): item
-        for key, item in value.items()
-        if key != "source_runtime_uuid"
+        str(key): item for key, item in value.items() if key != "source_runtime_uuid"
     }
 
 

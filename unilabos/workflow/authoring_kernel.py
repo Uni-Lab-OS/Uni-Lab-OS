@@ -48,6 +48,7 @@ class AuthoringCatalogSnapshot:
     fingerprint: str
     actions: tuple[AuthoringCatalogAction, ...]
     _by_business_key: Mapping[tuple[str, str], AuthoringCatalogAction]
+    _ambiguous_business_keys: frozenset[tuple[str, str]]
     _by_template_uuid: Mapping[str, AuthoringCatalogAction]
     _resource_template_uuid_by_symbol: Mapping[str, str]
     _resource_template_symbol_by_uuid: Mapping[str, str]
@@ -63,8 +64,10 @@ class AuthoringCatalogSnapshot:
         """从后端形状目录实体建立不可变快照。
 
         参数说明：``node_templates`` 是完整节点模板集合，``handle_templates``
-        是完整连接点集合。返回值按稳定 JSON 计算 SHA-256 指纹；重复业务身份、
-        重复 UUID 或孤儿连接点会抛出 ``AuthoringCatalogError``；
+        是完整连接点集合。返回值按稳定 JSON 计算 SHA-256 指纹；重复 UUID 或
+        孤儿连接点会抛出 ``AuthoringCatalogError``。多个资源模板可以合法复用
+        同一设备实现及动作名；这类动作仍按模板 UUID 完整保留，但不能再仅凭
+        ``(class, action)`` 业务键解析；
         ``resource_template_symbols`` 把资源模板源码符号冻结到本地模板 UUID。
         """
 
@@ -86,6 +89,7 @@ class AuthoringCatalogSnapshot:
 
         actions: list[AuthoringCatalogAction] = []
         by_business_key: dict[tuple[str, str], AuthoringCatalogAction] = {}
+        ambiguous_business_keys: set[tuple[str, str]] = set()
         by_template_uuid: dict[str, AuthoringCatalogAction] = {}
         for node in sorted(nodes, key=lambda item: str(item["uuid"])):
             class_identity = node.get("class")
@@ -106,9 +110,12 @@ class AuthoringCatalogSnapshot:
                 ),
             )
             business_key = (class_identity, action_name)
-            if business_key in by_business_key:
-                raise AuthoringCatalogError("工作流创作目录动作业务身份重复")
-            by_business_key[business_key] = action
+            if business_key not in ambiguous_business_keys:
+                previous = by_business_key.pop(business_key, None)
+                if previous is None:
+                    by_business_key[business_key] = action
+                else:
+                    ambiguous_business_keys.add(business_key)
             by_template_uuid[node_uuid] = action
             actions.append(action)
 
@@ -160,6 +167,7 @@ class AuthoringCatalogSnapshot:
             fingerprint=fingerprint,
             actions=tuple(actions),
             _by_business_key=MappingProxyType(by_business_key),
+            _ambiguous_business_keys=frozenset(ambiguous_business_keys),
             _by_template_uuid=MappingProxyType(by_template_uuid),
             _resource_template_uuid_by_symbol=MappingProxyType(
                 resource_uuid_by_symbol
@@ -231,11 +239,18 @@ class AuthoringCatalogSnapshot:
         """按设备类和动作业务名取得唯一目录动作。
 
         参数说明：两个字符串来自纯 AST（抽象语法树）静态解析；返回不可变动作
-        aggregate，缺失时抛出 ``AuthoringCatalogError``，不进行模糊匹配。
+        aggregate；缺失或有多个模板共享该业务键时抛出
+        ``AuthoringCatalogError``，不进行模糊匹配或任意选取。
         """
 
         try:
-            return self._by_business_key[(class_identity, action_name)]
+            business_key = (class_identity, action_name)
+            if business_key in self._ambiguous_business_keys:
+                raise AuthoringCatalogError("工作流创作目录动作身份不唯一")
+        except TypeError:
+            raise AuthoringCatalogError("工作流创作目录缺少动作身份") from None
+        try:
+            return self._by_business_key[business_key]
         except (KeyError, TypeError):
             raise AuthoringCatalogError("工作流创作目录缺少动作身份") from None
 

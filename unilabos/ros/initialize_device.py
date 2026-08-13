@@ -12,6 +12,26 @@ from unilabos.utils.exception import DeviceClassInvalid
 from unilabos.utils.import_manager import default_manager
 
 
+def _resolve_runtime_status_types(
+    definition_identity: str,
+    status_types: dict[str, object],
+) -> dict[str, object]:
+    """把 Catalog 的可序列化状态类型解析为 ROS 发布者所需的消息类。"""
+
+    return {
+        name: (
+            lab_registry._replace_type_with_class(
+                type_ref,
+                definition_identity,
+                f"状态 {name}",
+            )
+            if isinstance(type_ref, str)
+            else type_ref
+        )
+        for name, type_ref in status_types.items()
+    }
+
+
 def initialize_device_from_dict(
     device_id: str, device_config: ResourceDictInstance
 ) -> ROS2DeviceNode | None:
@@ -64,13 +84,36 @@ def initialize_device_from_dict(
         runtime_action_mappings = build_runtime_action_mappings(
             activation.action_value_mappings
         )
+        runtime_status_types = _resolve_runtime_status_types(
+            activation.definition_identity,
+            activation.status_types,
+        )
+        runtime_factory = activation.driver_factory
+        if runtime_factory is not None:
+            from unilabos.package_manager.driver_runtime.factory_resource_projection import (
+                take_prepared_factory_instance,
+            )
+
+            prepared_instance = take_prepared_factory_instance(
+                runtime_device_uuid,
+                activation.definition_identity,
+                activation.driver_class,
+            )
+            if prepared_instance is not None:
+
+                def use_prepared_instance(**_params: object) -> object:
+                    return prepared_instance
+
+                runtime_factory = use_prepared_instance
         # 不管是ros2的实例，还是python的，都必须包一次，除了HostNode
         wrapped_driver = ros2_device_node(
             activation.driver_class,
-            status_types=activation.status_types,
+            status_types=runtime_status_types,
             device_config=device_config,
             action_value_mappings=runtime_action_mappings,
             hardware_interface=activation.hardware_interface,
+            driver_factory=runtime_factory,
+            driver_type=activation.driver_type,
         )
         try:
             initialized_device = wrapped_driver(

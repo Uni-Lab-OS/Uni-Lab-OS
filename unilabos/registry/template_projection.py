@@ -412,9 +412,22 @@ class RegistryTemplateProjection:
         class_definition = device.get("class")
         if not isinstance(class_definition, Mapping):
             raise RegistryTemplateProjectionError("设备定义缺少类合同")
-        class_identity = class_definition.get("module")
-        if not isinstance(class_identity, str) or not class_identity:
+        contract_class_identity = class_definition.get("module")
+        if not isinstance(contract_class_identity, str) or not contract_class_identity:
             raise RegistryTemplateProjectionError("设备定义缺少类身份")
+        # 包托管工厂设备的 ``source_fqid`` 指向真正的激活入口。它也是作者源码
+        # 中可唯一导入的设备选择器身份；多个型号可以合法复用同一个返回合同类。
+        # 遗留类设备未声明 ``source_fqid`` 时继续使用 ``class.module``，保持原
+        # 工作流源码和重复业务身份拒绝规则不变。
+        raw_source_identity = device.get("source_fqid")
+        try:
+            class_identity = canonical_python_source_identity(
+                raw_source_identity
+                if isinstance(raw_source_identity, str) and raw_source_identity.strip()
+                else contract_class_identity
+            )
+        except PythonSourceIdentityError as error:
+            raise RegistryTemplateProjectionError("设备源码身份不能安全解析") from error
         action_mappings = class_definition.get("action_value_mappings") or {}
         if not isinstance(action_mappings, Mapping):
             raise RegistryTemplateProjectionError("设备动作映射必须是对象")
@@ -660,7 +673,7 @@ class RegistryTemplateProjection:
 
         参数说明：``action_name`` 与 ``resource_template_uuid`` 构成持久业务身份；
         ``action`` 提供 Schema 和展示字段；``class_identity`` 供 F02 工作流创作编译
-        按 Python 设备类解析动作；``resource_name`` 和 ``resource_display_name``
+        按实际设备激活入口解析动作（工厂优先、类设备兼容）；``resource_name`` 和 ``resource_display_name``
         固化 HTTP 摘要；``resource_template_identity_resolver`` 把动作中的源码资源
         约束解析为本地模板 UUID。返回一个节点模板及其完整控制/数据连接点。
         """
