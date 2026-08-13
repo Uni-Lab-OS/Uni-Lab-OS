@@ -86,6 +86,19 @@ def compute_host_node_diff(current: dict, previous: dict) -> dict:
     return diff
 
 
+def _build_device_status_message(host_info: dict) -> dict:
+    """构建设备状态消息，供 WebSocket 推送和 HTTP 快照共同使用。"""
+    return {
+        "type": "device_status",
+        "data": {
+            "device_status": host_info.get("device_status", {}),
+            "device_status_timestamps": host_info.get(
+                "device_status_timestamps", {}
+            ),
+        },
+    }
+
+
 async def broadcast_device_status():
     """广播设备状态到所有连接的客户端"""
     while True:
@@ -93,14 +106,7 @@ async def broadcast_device_status():
             # 获取最新的设备状态
             host_info = get_host_node_info()
             if host_info["available"]:
-                # 准备要发送的数据
-                status_data = {
-                    "type": "device_status",
-                    "data": {
-                        "device_status": host_info["device_status"],
-                        "device_status_timestamps": host_info["device_status_timestamps"],
-                    },
-                }
+                status_data = _build_device_status_message(host_info)
                 # 发送到所有连接的客户端
                 for connection in active_connections:
                     try:
@@ -243,6 +249,12 @@ async def broadcast_status_page_data():
         except Exception as e:
             print(f"Error in status page broadcast: {e}")
             await asyncio.sleep(1)
+
+
+@api.get("/device_status")
+async def get_device_status_snapshot():
+    """返回当前设备状态快照，供 WebSocket 不可用时降级轮询。"""
+    return _build_device_status_message(get_host_node_info())
 
 
 @api.websocket("/ws/device_status")
