@@ -59,6 +59,9 @@ def project_device_catalog(
         items.append(
             {
                 "id": device_id,
+                # Local 与 Backend 运行接口都以设备 Material UUID 作为执行身份；
+                # 实例名只用于 ROS/Driver 路由，不能再代替物料身份。
+                "materialUuid": str(raw.get("uuid") or ""),
                 "deviceTypeId": device_type_id,
                 "deviceKey": str(
                     online_fact.get("device_key")
