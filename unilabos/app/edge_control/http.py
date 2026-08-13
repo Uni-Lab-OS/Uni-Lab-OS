@@ -11,8 +11,22 @@ from unilabos.app.edge_control.store import StoredJob
 from unilabos.utils.tracing import inject_trace_context, span
 
 
+BACKEND_UNAUTHORIZED_BUSINESS_CODE = 1001
+
+
 class EdgeProtocolHTTPError(RuntimeError):
     """后端拒绝 Edge 数据面请求。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        business_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.business_code = business_code
 
 
 class EdgeDataPlane:
@@ -165,20 +179,24 @@ class EdgeDataPlane:
                 payload = response.json()
             except ValueError as exc:
                 raise EdgeProtocolHTTPError(
-                    f"{method} {url} returned non-JSON HTTP {response.status_code}"
+                    f"{method} {url} returned non-JSON HTTP {response.status_code}",
+                    status_code=response.status_code,
                 ) from exc
             if response.status_code < 200 or response.status_code >= 300:
                 raise EdgeProtocolHTTPError(
-                    f"{method} {url} returned HTTP {response.status_code}: {payload}"
+                    f"{method} {url} returned HTTP {response.status_code}: {payload}",
+                    status_code=response.status_code,
                 )
             if not isinstance(payload, dict):
                 raise EdgeProtocolHTTPError(
                     f"{method} {url} returned a non-object payload"
                 )
             if "code" in payload and int(payload.get("code") or 0) != 0:
+                business_code = int(payload.get("code") or 0)
                 raise EdgeProtocolHTTPError(
-                    f"{method} {url} returned business error {payload.get('code')}: "
-                    f"{payload.get('error')}"
+                    f"{method} {url} returned business error {business_code}: "
+                    f"{payload.get('error')}",
+                    business_code=business_code,
                 )
             result = payload.get("data", payload)
             if not isinstance(result, dict):

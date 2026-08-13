@@ -549,6 +549,34 @@ class EdgeControlStore:
             self._connection.commit()
         return event_uuid
 
+    def retire_pending_outcome(self, job_uuid: str) -> bool:
+        """退役 Backend 已明确拒绝的结果，避免永久重放失效 Job Token。"""
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            pending = self._connection.execute(
+                "SELECT 1 FROM edge_job_outcome_pending WHERE job_uuid = ?",
+                (job_uuid,),
+            ).fetchone()
+            if pending is None:
+                self._connection.rollback()
+                return False
+            self._connection.execute(
+                """
+                UPDATE edge_job_runtime
+                SET status = 'outcome_retired', updated_at = ?
+                WHERE job_uuid = ?
+                """,
+                (time.time(), job_uuid),
+            )
+            self._connection.execute(
+                "DELETE FROM edge_job_outcome_pending WHERE job_uuid = ?",
+                (job_uuid,),
+            )
+            self._connection.commit()
+            return True
+
+
 def _stored_job(row: sqlite3.Row) -> StoredJob:
     return StoredJob(
         job_uuid=str(row["job_uuid"]),

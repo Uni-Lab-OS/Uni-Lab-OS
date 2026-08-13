@@ -13,7 +13,11 @@ from unilabos.app.edge_control.client import (
     EdgeControlSettings,
     _stored_event_envelope,
 )
-from unilabos.app.edge_control.http import EdgeDataPlane
+from unilabos.app.edge_control.http import (
+    BACKEND_UNAUTHORIZED_BUSINESS_CODE,
+    EdgeDataPlane,
+    EdgeProtocolHTTPError,
+)
 from unilabos.app.edge_control.store import EdgeControlStore, StoredJob
 
 
@@ -580,6 +584,59 @@ def test_job_start_fetches_http_payload_and_outcome_precedes_notification(
         assert all(event.tracestate == "vendor=value" for event in events)
         assert store.get_job(job_uuid).status == "outcome_committed"  # type: ignore[union-attr]
         assert store.get_pending_outcome(job_uuid) is None
+        store.close()
+
+    asyncio.run(scenario())
+
+
+def test_terminal_job_token_rejection_retires_pending_outcome(
+    tmp_path: Path,
+) -> None:
+    class RevokedJobDataPlane(FakeDataPlane):
+        def commit_outcome(
+            self,
+            job: StoredJob,
+            outcome: str,
+            return_info: Dict[str, Any],
+            error_info: List[Dict[str, Any]],
+        ) -> Dict[str, Any]:
+            self.outcomes.append({"job": job, "outcome": outcome})
+            raise EdgeProtocolHTTPError(
+                "Job token was revoked after manual reconciliation",
+                business_code=BACKEND_UNAUTHORIZED_BUSINESS_CODE,
+            )
+
+    async def scenario() -> None:
+        path = tmp_path / "runtime.db"
+        store = EdgeControlStore(str(path))
+        job_uuid = str(uuid.uuid4())
+        task_uuid = str(uuid.uuid4())
+        node_uuid = str(uuid.uuid4())
+        command_uuid = str(uuid.uuid4())
+        store.save_job_start(
+            {
+                "job_uuid": job_uuid,
+                "task_uuid": task_uuid,
+                "node_uuid": node_uuid,
+                "job_access_token": "revoked-token",
+            },
+            command_uuid,
+        )
+        store.save_pending_outcome(job_uuid, "succeeded", {"suc": True}, [])
+        data_plane = RevokedJobDataPlane()
+        client = EdgeControlClient(
+            _settings(path),
+            store=store,
+            data_plane=data_plane,  # type: ignore[arg-type]
+        )
+
+        await asyncio.wait_for(client._commit_pending_outcome(job_uuid), timeout=1)
+
+        assert len(data_plane.outcomes) == 1
+        assert store.get_pending_outcome(job_uuid) is None
+        stored_job = store.get_job(job_uuid)
+        assert stored_job is not None
+        assert stored_job.status == "outcome_retired"
         store.close()
 
     asyncio.run(scenario())

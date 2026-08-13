@@ -21,7 +21,12 @@ from unilabos.app.communication import BaseCommunicationClient
 from unilabos.app.device_action_capabilities import (
     project_device_action_capabilities,
 )
-from unilabos.app.edge_control.http import EdgeDataPlane, websocket_url
+from unilabos.app.edge_control.http import (
+    BACKEND_UNAUTHORIZED_BUSINESS_CODE,
+    EdgeDataPlane,
+    EdgeProtocolHTTPError,
+    websocket_url,
+)
 from unilabos.app.edge_control.store import EdgeControlStore, StoredEvent, StoredJob
 from unilabos.config.config import BasicConfig, EdgeControlConfig, HTTPConfig
 from unilabos.resources.instance_identity import normalize_resource_instance_barcode
@@ -797,6 +802,20 @@ class EdgeControlClient(BaseCommunicationClient):
                 with self._active_jobs_lock:
                     self._active_jobs.discard(job_uuid)
                 return
+            except EdgeProtocolHTTPError as exc:
+                if exc.business_code == BACKEND_UNAUTHORIZED_BUSINESS_CODE:
+                    self.store.retire_pending_outcome(job_uuid)
+                    with self._active_jobs_lock:
+                        self._active_jobs.discard(job_uuid)
+                    logger.warning(
+                        f"[EdgeControl] Job {job_uuid[:8]} 凭证已由 Backend 终结，"
+                        f"退役本地 pending outcome: {exc}"
+                    )
+                    return
+                logger.warning(
+                    f"[EdgeControl] 提交 Job {job_uuid[:8]} outcome 失败，稍后重试: {exc}"
+                )
+                await asyncio.sleep(max(self.settings.reconnect_interval, 0.5))
             except Exception as exc:
                 logger.warning(
                     f"[EdgeControl] 提交 Job {job_uuid[:8]} outcome 失败，稍后重试: {exc}"
