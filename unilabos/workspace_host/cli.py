@@ -1,0 +1,139 @@
+"""`unilab workspace` adapter over the Workspace Host client SDK."""
+
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from typing import Any
+
+from .client import WorkspaceHostClient, ensure_workspace_host
+from .model import COMPONENT_NAMES, SCHEMA_VERSION, WorkspaceHostError, WorkspacePaths
+
+
+def register_workspace_subcommands(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "workspace",
+        help="Control the per-workspace Local Backend, OS, PLC-Sim, and renderer",
+    )
+    actions = parser.add_subparsers(dest="workspace_action", required=True)
+    for action in ("status", "start", "stop", "restart"):
+        leaf = actions.add_parser(action)
+        leaf.add_argument("--workspace", dest="workspace_cli_path", default=None)
+        leaf.add_argument("--json", action="store_true", dest="workspace_json")
+        if action != "status":
+            leaf.add_argument(
+                "--component",
+                choices=["backend", "os", "plc"],
+                default="backend" if action == "start" else "os",
+            )
+            leaf.add_argument("--operation-id", default=None)
+            leaf.add_argument("--wait", type=float, default=120.0)
+        if action in {"start", "restart"}:
+            leaf.add_argument("--graph", default=None)
+            leaf.add_argument(
+                "--runtime-mode", choices=["normal", "dry-run"], default=None
+            )
+    logs = actions.add_parser("logs")
+    logs.add_argument("--workspace", dest="workspace_cli_path", default=None)
+    logs.add_argument("--component", choices=COMPONENT_NAMES, default="backend")
+    logs.add_argument("--max-bytes", type=int, default=64 * 1024)
+    logs.add_argument("--json", action="store_true", dest="workspace_json")
+    operation = actions.add_parser("operation")
+    operation.add_argument("operation_id")
+    operation.add_argument("--workspace", dest="workspace_cli_path", default=None)
+    operation.add_argument("--json", action="store_true", dest="workspace_json")
+
+
+def dispatch_workspace_command(args: dict[str, Any]) -> bool:
+    if args.get("command") != "workspace":
+        return False
+    workspace = args.get("workspace_cli_path") or args.get("workspace") or os.getcwd()
+    action = str(args.get("workspace_action") or "")
+    output_json = bool(args.get("workspace_json"))
+    try:
+        if action == "status":
+            result = _status(workspace)
+        elif action == "logs":
+            client = WorkspaceHostClient.discover(workspace)
+            result = client.logs(
+                str(args["component"]), max_bytes=int(args["max_bytes"])
+            )
+        elif action == "operation":
+            client = WorkspaceHostClient.discover(workspace)
+            result = client.operation(str(args["operation_id"]))
+        else:
+            client = ensure_workspace_host(workspace)
+            parameters = {
+                key: value
+                for key, value in {
+                    "graphPath": args.get("graph"),
+                    "runtimeMode": args.get("runtime_mode"),
+                }.items()
+                if value is not None
+            }
+            command = _command(action, str(args.get("component")))
+            submitted = client.submit(
+                command,
+                parameters=parameters,
+                operation_id=args.get("operation_id") or str(uuid.uuid4()),
+            )
+            result = client.wait(
+                str(submitted["operationId"]),
+                timeout=float(args.get("wait") or 120.0),
+            )
+            if result.get("phase") == "failed":
+                failure = result.get("error")
+                if isinstance(failure, dict):
+                    raise WorkspaceHostError(
+                        str(failure.get("code") or "operation_failed"),
+                        str(failure.get("message") or "Workspace Host 操作失败"),
+                        details=failure.get("details"),
+                    )
+                raise WorkspaceHostError("operation_failed", "Workspace Host 操作失败")
+    except WorkspaceHostError as error:
+        _print({"ok": False, "error": error.as_dict()}, output_json=True)
+        raise SystemExit(1) from error
+    _print(result, output_json=output_json)
+    return True
+
+
+def _status(workspace: str | os.PathLike[str]) -> dict[str, object]:
+    paths = WorkspacePaths.resolve(workspace)
+    try:
+        return WorkspaceHostClient.discover(paths.workspace).snapshot(timeout=0.5)
+    except WorkspaceHostError as error:
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "workspacePath": str(paths.workspace),
+            "host": {"phase": "offline", "pid": None, "endpoint": None},
+            "components": {
+                name: {
+                    "name": name,
+                    "phase": "unknown",
+                    "pid": None,
+                    "address": None,
+                    "generation": None,
+                    "capabilities": [],
+                }
+                for name in COMPONENT_NAMES
+            },
+            "diagnostic": error.as_dict(),
+        }
+
+
+def _command(action: str, component: str) -> str:
+    names = {"backend": "backend", "os": "os", "plc": "plc"}
+    if action not in {"start", "stop", "restart"} or component not in names:
+        raise WorkspaceHostError("invalid_request", "无效 workspace 操作")
+    return f"{names[component]}.{action}"
+
+
+def _print(payload: object, *, output_json: bool) -> None:
+    if output_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    if isinstance(payload, dict) and "content" in payload:
+        print(str(payload.get("content") or ""), end="")
+        return
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

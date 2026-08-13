@@ -185,7 +185,22 @@ def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
     异常：无。
     """
 
-    return args_dict.get("command") not in {"package", "pkg"}
+    return args_dict.get("command") not in {"package", "pkg", "workspace"}
+
+
+def dispatch_workspace_host_command(args_dict: dict[str, Any]) -> bool:
+    """Dispatch the AI-native Workspace Host CLI before product composition.
+
+    The command is a client adapter only: it never imports a laboratory package,
+    creates a scheduler, or owns a component process. The persistent Workspace
+    Host is the single lifecycle authority shared with Workbench.
+    """
+
+    if args_dict.get("command") != "workspace":
+        return False
+    from unilabos.workspace_host.cli import dispatch_workspace_command
+
+    return dispatch_workspace_command(args_dict)
 
 
 def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
@@ -564,6 +579,11 @@ def parse_args():
 
     register_package_subcommands(subparsers)
 
+    # AIW-02: the CLI and Workbench share one per-workspace lifecycle authority.
+    from unilabos.workspace_host.cli import register_workspace_subcommands
+
+    register_workspace_subcommands(subparsers)
+
     # HTTP 客户端子命令（与现有 --ak/--sk/--addr 复用）。输出格式只属于真正
     # 产生客户端输出的叶子命令，不再污染常驻 OS 根启动合同。
     def _add_json_output_argument(command_parser: argparse.ArgumentParser) -> None:
@@ -669,6 +689,11 @@ def main():
     convert_argv_dashes_to_underscores(parser)
     args = parser.parse_args()
     args_dict = vars(args)
+
+    # Workspace Host commands are deliberately dispatched before runtime topology
+    # validation and before any device/package product composition.
+    if dispatch_workspace_host_command(args_dict):
+        return
 
     from unilabos.app.runtime_topology import resolve_runtime_process_plan
 
