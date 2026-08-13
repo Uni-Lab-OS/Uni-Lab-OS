@@ -142,6 +142,43 @@ class WorkflowAgentTools:
             timeout=timeout,
         )
 
+    def reset_local_workspace_state(
+        self,
+        *,
+        confirm: bool = False,
+        graph_path: str | None = None,
+        runtime_mode: str | None = None,
+        operation_id: str | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Rebuild Local Domain and Edge state after explicit confirmation.
+
+        The reset stops Backend/Edge, removes only their audited rebuildable
+        databases, and starts a clean Local Backend. Starting Edge remains a
+        separate explicit operation so no device action is dispatched by the
+        destructive maintenance command itself.
+        """
+
+        if not confirm:
+            raise WorkspaceHostError(
+                "confirmation_required",
+                "重建本地数据需要 confirm=true；该操作会删除可重建的 Local Domain 与 Edge 状态",
+            )
+        parameters = {
+            key: value
+            for key, value in {
+                "graphPath": graph_path,
+                "runtimeMode": runtime_mode,
+            }.items()
+            if value is not None
+        }
+        return self._workspace_client(ensure=True).execute(
+            "local.reset-state",
+            parameters=parameters,
+            operation_id=operation_id,
+            timeout=timeout,
+        )
+
     def _workspace_component_operation(
         self,
         action: str,
@@ -453,6 +490,7 @@ def build_mcp_server(
     server.tool()(tools.restart_workspace_component)
     server.tool()(tools.read_workspace_logs)
     server.tool()(tools.switch_workspace_authority)
+    server.tool()(tools.reset_local_workspace_state)
     server.tool()(tools.list_workflows)
     server.tool()(tools.inspect_workflow)
     server.tool()(tools.inspect_task)

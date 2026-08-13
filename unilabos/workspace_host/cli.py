@@ -16,22 +16,29 @@ def register_workspace_subcommands(subparsers: Any) -> None:
         help="Control the per-workspace Local Backend, OS, PLC-Sim, and renderer",
     )
     actions = parser.add_subparsers(dest="workspace_action", required=True)
-    for action in ("status", "start", "stop", "restart"):
+    for action in ("status", "start", "stop", "restart", "reset-local"):
         leaf = actions.add_parser(action)
         leaf.add_argument("--workspace", dest="workspace_cli_path", default=None)
         leaf.add_argument("--json", action="store_true", dest="workspace_json")
-        if action != "status":
+        if action not in {"status", "reset-local"}:
             leaf.add_argument(
                 "--component",
                 choices=["backend", "os", "plc"],
                 default="backend" if action == "start" else "os",
             )
+        if action != "status":
             leaf.add_argument("--operation-id", default=None)
             leaf.add_argument("--wait", type=float, default=120.0)
-        if action in {"start", "restart"}:
+        if action in {"start", "restart", "reset-local"}:
             leaf.add_argument("--graph", default=None)
             leaf.add_argument(
                 "--runtime-mode", choices=["normal", "dry-run"], default=None
+            )
+        if action == "reset-local":
+            leaf.add_argument(
+                "--yes",
+                action="store_true",
+                help="Confirm deletion of rebuildable Local Domain and Edge state",
             )
     logs = actions.add_parser("logs")
     logs.add_argument("--workspace", dest="workspace_cli_path", default=None)
@@ -76,6 +83,27 @@ def dispatch_workspace_command(args: dict[str, Any]) -> bool:
                     "mode": args.get("mode"),
                     "backendUrl": args.get("backend_url"),
                 },
+                operation_id=args.get("operation_id"),
+                timeout=float(args.get("wait") or 120.0),
+            )
+        elif action == "reset-local":
+            if not args.get("yes"):
+                raise WorkspaceHostError(
+                    "confirmation_required",
+                    "重建本地数据会删除可重建的 Local Domain 与 Edge 状态；请显式传入 --yes",
+                )
+            client = ensure_workspace_host(workspace)
+            parameters = {
+                key: value
+                for key, value in {
+                    "graphPath": args.get("graph"),
+                    "runtimeMode": args.get("runtime_mode"),
+                }.items()
+                if value is not None
+            }
+            result = client.execute(
+                "local.reset-state",
+                parameters=parameters,
                 operation_id=args.get("operation_id"),
                 timeout=float(args.get("wait") or 120.0),
             )

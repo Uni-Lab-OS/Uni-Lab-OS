@@ -56,12 +56,18 @@ unilab workspace restart --workspace /path/to/workspace --component os \
 unilab workspace logs --workspace /path/to/workspace --component edge --json
 unilab workspace authority backend --workspace /path/to/workspace \
   --backend-url http://127.0.0.1:18080 --json
+unilab workspace reset-local --workspace /path/to/workspace --yes --json
 ```
 
 安装可选依赖 `pip install 'unilabos[mcp]'` 后，`unilab-mcp --workspace
 /path/to/workspace` 暴露相同的状态、启停、日志和 Authority 操作，以及工作流
 运行/调试、Authoring 等待、物料截图和布局 CAS 工具。MCP 只是传输适配器；CLI
 与 MCP 的业务行为、失败码和离线状态都由同一 Python SDK 定义。
+
+`reset-local` / MCP `reset_local_workspace_state(confirm=true)` 只用于调试时
+显式清空可重建的 Local Domain 与 Edge 协议状态。它会停止 Backend/Edge 并启动
+干净的 Local Backend，但不会隐式重新启动 Edge；Agent 必须另行调用 `workspace
+start --component os`，避免维护命令自动下发设备动作。
 
 ## 启动流程详解
 

@@ -3,7 +3,10 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
+import pytest
+
 from unilabos.agent_tools.workflow import WorkflowAgentTools, build_mcp_server
+from unilabos.workspace_host.model import WorkspaceHostError
 
 
 class RecordingClient:
@@ -136,11 +139,19 @@ def test_agent_workspace_tools_delegate_to_the_shared_host_client(
         operation_id="mcp-authority",
         timeout=6,
     )
+    reset = tools.reset_local_workspace_state(
+        confirm=True,
+        graph_path="deployment/graphs/lab.json",
+        runtime_mode="normal",
+        operation_id="mcp-reset-local",
+        timeout=11,
+    )
     logs = tools.read_workspace_logs("edge", max_bytes=2048)
 
     assert status["revision"] == 12
     assert restarted["operationId"] == "mcp-restart"
     assert switched["operationId"] == "mcp-authority"
+    assert reset["operationId"] == "mcp-reset-local"
     assert logs["content"] == "ready\n"
     assert host.calls == [
         (
@@ -168,8 +179,31 @@ def test_agent_workspace_tools_delegate_to_the_shared_host_client(
                 },
             ),
         ),
+        (
+            "execute",
+            (
+                "local.reset-state",
+                {
+                    "parameters": {
+                        "graphPath": "deployment/graphs/lab.json",
+                        "runtimeMode": "normal",
+                    },
+                    "operation_id": "mcp-reset-local",
+                    "timeout": 11,
+                },
+            ),
+        ),
         ("logs", ("edge", {"max_bytes": 2048})),
     ]
+
+
+def test_agent_local_reset_requires_explicit_confirmation(tmp_path) -> None:
+    tools = WorkflowAgentTools(tmp_path)
+
+    with pytest.raises(WorkspaceHostError) as caught:
+        tools.reset_local_workspace_state()
+
+    assert caught.value.code == "confirmation_required"
 
 
 def test_mcp_registers_workspace_lifecycle_tools(monkeypatch, tmp_path) -> None:
@@ -203,6 +237,7 @@ def test_mcp_registers_workspace_lifecycle_tools(monkeypatch, tmp_path) -> None:
         "restart_workspace_component",
         "read_workspace_logs",
         "switch_workspace_authority",
+        "reset_local_workspace_state",
         "run_workflow",
         "watch_task",
         "capture_material_scene",
