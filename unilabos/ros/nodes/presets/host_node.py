@@ -1904,14 +1904,20 @@ class HostNode(BaseROS2DeviceNode):
                                         f"for remote device {device_id} (class: {class_name})"
                                     )
 
-                    # Merge slave devices_config into self.devices_config tree
+                    # Workspace Backend 已持有工作区物理图；Edge Runtime 会重报
+                    # 同一图但 UUID 可能不同。按稳定资源 ID 合并，避免每次注册
+                    # 都复制设备，同时仍兼容真正新增的远程 Slave 资源树。
                     try:
                         slave_tree_set = ResourceTreeSet.load(devices_config)  # slave一定是根节点的tree
-                        for tree in slave_tree_set.trees:
-                            self.devices_config.trees.append(tree)
+                        added_count, duplicate_ids = (
+                            self.devices_config.merge_disjoint_trees_by_id(
+                                slave_tree_set
+                            )
+                        )
                         self.lab_logger().info(
-                            f"[Host Node] Merged {len(slave_tree_set.trees)} slave device trees "
-                            f"(machine: {machine_name}) into devices_config"
+                            f"[Host Node] Merged {added_count} new slave resource trees "
+                            f"(machine: {machine_name}); kept authoritative nodes for "
+                            f"{len(duplicate_ids)} repeated resource IDs"
                         )
                     except Exception as e:
                         self.lab_logger().error(f"[Host Node] Failed to merge slave devices_config: {e}")
