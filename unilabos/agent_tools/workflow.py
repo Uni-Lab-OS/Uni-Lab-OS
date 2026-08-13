@@ -1,7 +1,7 @@
-"""Workflow Agent tools sharing the exact Domain client used by the CLI.
+"""UniLab Agent tools sharing the same Domain and Workspace Host SDKs as CLI.
 
-This module deliberately contains no process control, database reads, or Node
-RPC.  MCP is an optional transport around :class:`DomainBackendClient`.
+This module deliberately contains no direct process control, database reads,
+or Node RPC. MCP is an optional transport around public Python client SDKs.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from unilabos.client.material_visual_regression import (
     approve_material_baseline,
     compare_material_capture,
 )
+from unilabos.workspace_host.client import WorkspaceHostClient, ensure_workspace_host
+from unilabos.workspace_host.model import WorkspaceHostError
 
 
 class WorkflowAgentTools:
@@ -39,6 +41,134 @@ class WorkflowAgentTools:
             self.workspace,
             ak=self.ak,
             sk=self.sk,
+        )
+
+    def _workspace_client(self, *, ensure: bool = False) -> WorkspaceHostClient:
+        """Discover the shared Host; only mutating tools may start it."""
+
+        if ensure:
+            return ensure_workspace_host(self.workspace)
+        return WorkspaceHostClient.discover(self.workspace)
+
+    def workspace_status(self) -> dict[str, Any]:
+        """Return the same stable online/offline snapshot as the CLI."""
+
+        return WorkspaceHostClient.status(self.workspace)
+
+    def start_workspace_component(
+        self,
+        component: str = "backend",
+        *,
+        graph_path: str | None = None,
+        runtime_mode: str | None = None,
+        operation_id: str | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Start one managed Backend, OS, or PLC component through the Host."""
+
+        return self._workspace_component_operation(
+            "start",
+            component,
+            graph_path=graph_path,
+            runtime_mode=runtime_mode,
+            operation_id=operation_id,
+            timeout=timeout,
+        )
+
+    def stop_workspace_component(
+        self,
+        component: str = "os",
+        *,
+        operation_id: str | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Stop one managed Backend, OS, or PLC component through the Host."""
+
+        return self._workspace_component_operation(
+            "stop",
+            component,
+            operation_id=operation_id,
+            timeout=timeout,
+        )
+
+    def restart_workspace_component(
+        self,
+        component: str = "os",
+        *,
+        graph_path: str | None = None,
+        runtime_mode: str | None = None,
+        operation_id: str | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Restart one managed component without killing processes directly."""
+
+        return self._workspace_component_operation(
+            "restart",
+            component,
+            graph_path=graph_path,
+            runtime_mode=runtime_mode,
+            operation_id=operation_id,
+            timeout=timeout,
+        )
+
+    def read_workspace_logs(
+        self,
+        component: str = "backend",
+        *,
+        max_bytes: int = 64 * 1024,
+    ) -> dict[str, Any]:
+        """Read a bounded managed-component log tail through the Host."""
+
+        if component not in {"backend", "edge", "plc", "renderer"}:
+            raise WorkspaceHostError("component_invalid", f"未知组件：{component}")
+        return self._workspace_client().logs(component, max_bytes=max_bytes)
+
+    def switch_workspace_authority(
+        self,
+        mode: str,
+        *,
+        backend_url: str | None = None,
+        operation_id: str | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Atomically switch Local/Backend Domain Authority through the Host."""
+
+        if mode not in {"local", "backend"}:
+            raise WorkspaceHostError("authority_invalid", f"无效 Authority：{mode}")
+        return self._workspace_client(ensure=True).execute(
+            "authority.switch",
+            parameters={"mode": mode, "backendUrl": backend_url},
+            operation_id=operation_id,
+            timeout=timeout,
+        )
+
+    def _workspace_component_operation(
+        self,
+        action: str,
+        component: str,
+        *,
+        graph_path: str | None = None,
+        runtime_mode: str | None = None,
+        operation_id: str | None = None,
+        timeout: float,
+    ) -> dict[str, Any]:
+        if action not in {"start", "stop", "restart"}:
+            raise WorkspaceHostError("invalid_request", f"无效操作：{action}")
+        if component not in {"backend", "os", "plc"}:
+            raise WorkspaceHostError("component_invalid", f"未知组件：{component}")
+        parameters = {
+            key: value
+            for key, value in {
+                "graphPath": graph_path,
+                "runtimeMode": runtime_mode,
+            }.items()
+            if value is not None
+        }
+        return self._workspace_client(ensure=True).execute(
+            f"{component}.{action}",
+            parameters=parameters,
+            operation_id=operation_id,
+            timeout=timeout,
         )
 
     def list_workflows(
@@ -317,6 +447,12 @@ def build_mcp_server(
 
     tools = WorkflowAgentTools(workspace, ak=ak, sk=sk)
     server = FastMCP("UniLab Workspace")
+    server.tool()(tools.workspace_status)
+    server.tool()(tools.start_workspace_component)
+    server.tool()(tools.stop_workspace_component)
+    server.tool()(tools.restart_workspace_component)
+    server.tool()(tools.read_workspace_logs)
+    server.tool()(tools.switch_workspace_authority)
     server.tool()(tools.list_workflows)
     server.tool()(tools.inspect_workflow)
     server.tool()(tools.inspect_task)
@@ -337,7 +473,7 @@ def build_mcp_server(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve UniLab workflow MCP tools")
+    parser = argparse.ArgumentParser(description="Serve UniLab workspace MCP tools")
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--ak", default="")
     parser.add_argument("--sk", default="")

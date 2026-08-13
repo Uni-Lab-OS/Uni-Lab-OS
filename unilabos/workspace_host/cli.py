@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from typing import Any
 
 from .client import WorkspaceHostClient, ensure_workspace_host
-from .model import COMPONENT_NAMES, SCHEMA_VERSION, WorkspaceHostError, WorkspacePaths
+from .model import COMPONENT_NAMES, WorkspaceHostError
 
 
 def register_workspace_subcommands(subparsers: Any) -> None:
@@ -60,7 +59,7 @@ def dispatch_workspace_command(args: dict[str, Any]) -> bool:
     output_json = bool(args.get("workspace_json"))
     try:
         if action == "status":
-            result = _status(workspace)
+            result = WorkspaceHostClient.status(workspace)
         elif action == "logs":
             client = WorkspaceHostClient.discover(workspace)
             result = client.logs(
@@ -71,27 +70,15 @@ def dispatch_workspace_command(args: dict[str, Any]) -> bool:
             result = client.operation(str(args["operation_id"]))
         elif action == "authority":
             client = ensure_workspace_host(workspace)
-            submitted = client.submit(
+            result = client.execute(
                 "authority.switch",
                 parameters={
                     "mode": args.get("mode"),
                     "backendUrl": args.get("backend_url"),
                 },
-                operation_id=args.get("operation_id") or str(uuid.uuid4()),
-            )
-            result = client.wait(
-                str(submitted["operationId"]),
+                operation_id=args.get("operation_id"),
                 timeout=float(args.get("wait") or 120.0),
             )
-            if result.get("phase") == "failed":
-                failure = result.get("error")
-                if isinstance(failure, dict):
-                    raise WorkspaceHostError(
-                        str(failure.get("code") or "operation_failed"),
-                        str(failure.get("message") or "Workspace Host 操作失败"),
-                        details=failure.get("details"),
-                    )
-                raise WorkspaceHostError("operation_failed", "Workspace Host 操作失败")
         else:
             client = ensure_workspace_host(workspace)
             parameters = {
@@ -103,53 +90,17 @@ def dispatch_workspace_command(args: dict[str, Any]) -> bool:
                 if value is not None
             }
             command = _command(action, str(args.get("component")))
-            submitted = client.submit(
+            result = client.execute(
                 command,
                 parameters=parameters,
-                operation_id=args.get("operation_id") or str(uuid.uuid4()),
-            )
-            result = client.wait(
-                str(submitted["operationId"]),
+                operation_id=args.get("operation_id"),
                 timeout=float(args.get("wait") or 120.0),
             )
-            if result.get("phase") == "failed":
-                failure = result.get("error")
-                if isinstance(failure, dict):
-                    raise WorkspaceHostError(
-                        str(failure.get("code") or "operation_failed"),
-                        str(failure.get("message") or "Workspace Host 操作失败"),
-                        details=failure.get("details"),
-                    )
-                raise WorkspaceHostError("operation_failed", "Workspace Host 操作失败")
     except WorkspaceHostError as error:
         _print({"ok": False, "error": error.as_dict()}, output_json=True)
         raise SystemExit(1) from error
     _print(result, output_json=output_json)
     return True
-
-
-def _status(workspace: str | os.PathLike[str]) -> dict[str, object]:
-    paths = WorkspacePaths.resolve(workspace)
-    try:
-        return WorkspaceHostClient.discover(paths.workspace).snapshot(timeout=0.5)
-    except WorkspaceHostError as error:
-        return {
-            "schemaVersion": SCHEMA_VERSION,
-            "workspacePath": str(paths.workspace),
-            "host": {"phase": "offline", "pid": None, "endpoint": None},
-            "components": {
-                name: {
-                    "name": name,
-                    "phase": "unknown",
-                    "pid": None,
-                    "address": None,
-                    "generation": None,
-                    "capabilities": [],
-                }
-                for name in COMPONENT_NAMES
-            },
-            "diagnostic": error.as_dict(),
-        }
 
 
 def _command(action: str, component: str) -> str:

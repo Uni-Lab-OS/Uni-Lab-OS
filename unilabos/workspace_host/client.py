@@ -13,7 +13,13 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .model import SCHEMA_VERSION, WorkspaceHostError, WorkspacePaths, read_json
+from .model import (
+    COMPONENT_NAMES,
+    SCHEMA_VERSION,
+    WorkspaceHostError,
+    WorkspacePaths,
+    read_json,
+)
 
 
 class WorkspaceHostClient:
@@ -44,6 +50,37 @@ class WorkspaceHostClient:
                 "host_token_invalid", "Workspace Host token 不可读"
             ) from error
         return cls(paths, str(host["endpoint"]), token)
+
+    @classmethod
+    def status(cls, workspace: str | os.PathLike[str]) -> dict[str, Any]:
+        """Return one stable snapshot even when the Host is offline.
+
+        Read-only callers must not start a Host just to inspect a workspace.
+        Keeping this fallback in the SDK gives CLI and MCP identical offline
+        semantics instead of making each transport invent its own response.
+        """
+
+        paths = WorkspacePaths.resolve(workspace)
+        try:
+            return cls.discover(paths.workspace).snapshot(timeout=0.5)
+        except WorkspaceHostError as error:
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "workspacePath": str(paths.workspace),
+                "host": {"phase": "offline", "pid": None, "endpoint": None},
+                "components": {
+                    name: {
+                        "name": name,
+                        "phase": "unknown",
+                        "pid": None,
+                        "address": None,
+                        "generation": None,
+                        "capabilities": [],
+                    }
+                    for name in COMPONENT_NAMES
+                },
+                "diagnostic": error.as_dict(),
+            }
 
     def snapshot(self, *, timeout: float = 2.0) -> dict[str, Any]:
         return self._request("GET", "/v1/snapshot", timeout=timeout)
@@ -82,6 +119,45 @@ class WorkspaceHostClient:
             f"等待操作完成超时：{operation_id}",
             details=latest,
         )
+
+    def execute(
+        self,
+        command: str,
+        *,
+        parameters: dict[str, object] | None = None,
+        operation_id: str | None = None,
+        expected_revision: int | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Submit and await one idempotent Host operation.
+
+        CLI, MCP, and UI adapters must share this failure normalization rather
+        than each interpreting persisted operation documents independently.
+        """
+
+        submitted = self.submit(
+            command,
+            parameters=parameters,
+            operation_id=operation_id,
+            expected_revision=expected_revision,
+        )
+        accepted_id = submitted.get("operationId")
+        if not isinstance(accepted_id, str) or not accepted_id:
+            raise WorkspaceHostError(
+                "host_protocol_invalid",
+                "Workspace Host 操作未返回 operationId",
+            )
+        result = self.wait(accepted_id, timeout=timeout)
+        if result.get("phase") != "failed":
+            return result
+        failure = result.get("error")
+        if isinstance(failure, dict):
+            raise WorkspaceHostError(
+                str(failure.get("code") or "operation_failed"),
+                str(failure.get("message") or "Workspace Host 操作失败"),
+                details=failure.get("details"),
+            )
+        raise WorkspaceHostError("operation_failed", "Workspace Host 操作失败")
 
     def logs(self, component: str, *, max_bytes: int = 64 * 1024) -> dict[str, Any]:
         return self._request("GET", f"/v1/logs/{component}?maxBytes={max_bytes}")

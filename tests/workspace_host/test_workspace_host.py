@@ -62,6 +62,98 @@ def test_workspace_token_is_private_and_stable(workspace: Path) -> None:
         assert paths.token.stat().st_mode & 0o777 == 0o600
 
 
+def test_workspace_client_executes_and_normalizes_one_host_operation(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    client = WorkspaceHostClient(paths, "http://127.0.0.1:48100", "token")
+    calls: list[tuple[str, object]] = []
+
+    def submit(command: str, **options: object) -> dict[str, object]:
+        calls.append(("submit", (command, options)))
+        return {"operationId": "operation-1", "phase": "pending"}
+
+    def wait(operation_id: str, **options: object) -> dict[str, object]:
+        calls.append(("wait", (operation_id, options)))
+        return {
+            "operationId": operation_id,
+            "phase": "succeeded",
+            "result": {"components": {"edge": {"phase": "ready"}}},
+        }
+
+    monkeypatch.setattr(client, "submit", submit)
+    monkeypatch.setattr(client, "wait", wait)
+
+    result = client.execute(
+        "os.restart",
+        parameters={"runtimeMode": "normal"},
+        operation_id="operation-1",
+        expected_revision=7,
+        timeout=4.0,
+    )
+
+    assert result["phase"] == "succeeded"
+    assert calls == [
+        (
+            "submit",
+            (
+                "os.restart",
+                {
+                    "parameters": {"runtimeMode": "normal"},
+                    "operation_id": "operation-1",
+                    "expected_revision": 7,
+                },
+            ),
+        ),
+        ("wait", ("operation-1", {"timeout": 4.0})),
+    ]
+
+
+def test_workspace_client_raises_the_host_operation_failure(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    client = WorkspaceHostClient(paths, "http://127.0.0.1:48100", "token")
+    monkeypatch.setattr(
+        client,
+        "submit",
+        lambda *_args, **_kwargs: {"operationId": "operation-failed"},
+    )
+    monkeypatch.setattr(
+        client,
+        "wait",
+        lambda *_args, **_kwargs: {
+            "operationId": "operation-failed",
+            "phase": "failed",
+            "error": {
+                "code": "os_readiness_failed",
+                "message": "OS 未就绪",
+                "details": {"logPath": "/tmp/os.log"},
+            },
+        },
+    )
+
+    with pytest.raises(WorkspaceHostError) as caught:
+        client.execute("os.restart")
+
+    assert caught.value.code == "os_readiness_failed"
+    assert caught.value.details == {"logPath": "/tmp/os.log"}
+
+
+def test_workspace_client_status_is_stable_while_host_is_offline(
+    workspace: Path,
+) -> None:
+    result = WorkspaceHostClient.status(workspace)
+
+    assert result["schemaVersion"] == "unilab-workspace-host/v1"
+    assert result["workspacePath"] == str(workspace)
+    assert result["host"] == {"phase": "offline", "pid": None, "endpoint": None}
+    assert set(result["components"]) == {"backend", "edge", "plc", "renderer"}
+    assert result["diagnostic"]["code"] == "host_not_found"
+
+
 def test_attached_renderer_records_a_reusable_headless_adapter(workspace: Path) -> None:
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()

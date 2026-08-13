@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from unilabos.agent_tools.workflow import WorkflowAgentTools
+import sys
+from types import ModuleType
+
+from unilabos.agent_tools.workflow import WorkflowAgentTools, build_mcp_server
 
 
 class RecordingClient:
@@ -87,3 +90,121 @@ def test_agent_material_tools_delegate_to_attached_renderer(monkeypatch, tmp_pat
     assert inspected["options"]["view"] == "3d"
     assert inspected["options"]["hidden_material_ids"] == ["m-2"]
     assert captured["options"]["viewport"] == (800, 600)
+
+
+def test_agent_workspace_tools_delegate_to_the_shared_host_client(
+    monkeypatch, tmp_path
+) -> None:
+    class HostClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def snapshot(self):
+            self.calls.append(("snapshot", None))
+            return {"revision": 12, "components": {"edge": {"phase": "ready"}}}
+
+        def execute(self, command, **options):
+            self.calls.append(("execute", (command, options)))
+            return {"operationId": options["operation_id"], "phase": "succeeded"}
+
+        def logs(self, component, **options):
+            self.calls.append(("logs", (component, options)))
+            return {"component": component, "content": "ready\n"}
+
+    host = HostClient()
+    tools = WorkflowAgentTools(tmp_path)
+    monkeypatch.setattr(tools, "_workspace_client", lambda **_kwargs: host)
+    monkeypatch.setattr(
+        "unilabos.agent_tools.workflow.WorkspaceHostClient.status",
+        lambda workspace: {
+            "revision": 12,
+            "workspacePath": workspace,
+            "components": {"edge": {"phase": "ready"}},
+        },
+    )
+
+    status = tools.workspace_status()
+    restarted = tools.restart_workspace_component(
+        "os",
+        runtime_mode="normal",
+        operation_id="mcp-restart",
+        timeout=8,
+    )
+    switched = tools.switch_workspace_authority(
+        "backend",
+        backend_url="http://127.0.0.1:18080",
+        operation_id="mcp-authority",
+        timeout=6,
+    )
+    logs = tools.read_workspace_logs("edge", max_bytes=2048)
+
+    assert status["revision"] == 12
+    assert restarted["operationId"] == "mcp-restart"
+    assert switched["operationId"] == "mcp-authority"
+    assert logs["content"] == "ready\n"
+    assert host.calls == [
+        (
+            "execute",
+            (
+                "os.restart",
+                {
+                    "parameters": {"runtimeMode": "normal"},
+                    "operation_id": "mcp-restart",
+                    "timeout": 8,
+                },
+            ),
+        ),
+        (
+            "execute",
+            (
+                "authority.switch",
+                {
+                    "parameters": {
+                        "mode": "backend",
+                        "backendUrl": "http://127.0.0.1:18080",
+                    },
+                    "operation_id": "mcp-authority",
+                    "timeout": 6,
+                },
+            ),
+        ),
+        ("logs", ("edge", {"max_bytes": 2048})),
+    ]
+
+
+def test_mcp_registers_workspace_lifecycle_tools(monkeypatch, tmp_path) -> None:
+    class FastMCP:
+        def __init__(self, name):
+            self.name = name
+            self.tools = []
+
+        def tool(self):
+            def register(handler):
+                self.tools.append(handler.__name__)
+                return handler
+
+            return register
+
+    mcp = ModuleType("mcp")
+    server = ModuleType("mcp.server")
+    fastmcp = ModuleType("mcp.server.fastmcp")
+    fastmcp.FastMCP = FastMCP
+    monkeypatch.setitem(sys.modules, "mcp", mcp)
+    monkeypatch.setitem(sys.modules, "mcp.server", server)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp)
+
+    adapter = build_mcp_server(tmp_path)
+
+    assert adapter.name == "UniLab Workspace"
+    assert {
+        "workspace_status",
+        "start_workspace_component",
+        "stop_workspace_component",
+        "restart_workspace_component",
+        "read_workspace_logs",
+        "switch_workspace_authority",
+        "run_workflow",
+        "watch_task",
+        "capture_material_scene",
+        "apply_material_layout",
+    }.issubset(adapter.tools)

@@ -43,6 +43,26 @@ options:
   --complete_registry   Complete registry information
 ```
 
+## AI 工作区管理
+
+Workbench、CLI 与 Agent 共用工作区内常驻的 Workspace Host。CLI 不直接杀
+Python 进程，也不经过 Node RPC；它通过同一受管会话执行 Backend、OS/Edge 与
+PLC-Sim 的启停，并保留 PID、动态端口、generation、操作记录和日志：
+
+```bash
+unilab workspace status --workspace /path/to/workspace --json
+unilab workspace restart --workspace /path/to/workspace --component os \
+  --runtime-mode normal --operation-id agent-restart-001 --json
+unilab workspace logs --workspace /path/to/workspace --component edge --json
+unilab workspace authority backend --workspace /path/to/workspace \
+  --backend-url http://127.0.0.1:18080 --json
+```
+
+安装可选依赖 `pip install 'unilabos[mcp]'` 后，`unilab-mcp --workspace
+/path/to/workspace` 暴露相同的状态、启停、日志和 Authority 操作，以及工作流
+运行/调试、Authoring 等待、物料截图和布局 CAS 工具。MCP 只是传输适配器；CLI
+与 MCP 的业务行为、失败码和离线状态都由同一 Python SDK 定义。
+
 ## 启动流程详解
 
 Uni-Lab 的启动过程分为以下几个阶段：
