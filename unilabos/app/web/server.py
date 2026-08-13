@@ -36,7 +36,10 @@ workspace_authoring_routes_mounted = False
 # noinspection PyTypeChecker
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Reflect every accepted Origin instead of combining the wildcard value
+    # with credentialed Workbench requests, which browsers reject.
+    allow_origins=[],
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=[
