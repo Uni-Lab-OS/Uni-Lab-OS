@@ -32,6 +32,7 @@ import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from unilabos.app.scheduler.dispatch import DispatchPayload
+from unilabos.app.scheduler.execution_result import is_execution_unknown_result
 from unilabos.app.ws_client import (
     DeviceActionManager,
     JobInfo,
@@ -75,6 +76,9 @@ class JobExecutionBackend:
         self.device_manager = device_manager or DeviceActionManager()
         self._host_node_getter = host_node_getter or self._default_host_getter
         self._listeners: List[JobFinishedListener] = []
+        # 派发后结果不确定的作业继续占用 DeviceActionManager 队列；该集合只阻止
+        # 当前进程内的迟到普通终态，不冒充持久作业执行占用或栅栏。
+        self._execution_unknown_jobs: Set[str] = set()
         # 设备状态存储（DeviceStateStore；None = 不落盘）与监控总线
         self.device_state = device_state_store
         self._monitor = monitor
@@ -219,6 +223,15 @@ class JobExecutionBackend:
             # （normal / skip / operator_intervention，见 registry.action_policy）
             ret_value = return_info.get("return_value")
             suc_type = str(return_info.get("suc_type") or "normal")
+        if (
+            item.job_id in self._execution_unknown_jobs
+            and not is_execution_unknown_result(ret_value)
+        ):
+            logger.warning(
+                "[JobExecutionBackend] 忽略执行未知作业 %s 的迟到普通终态",
+                item.job_id,
+            )
+            return
         effective_success = status == "success"
         if isinstance(ret_value, Mapping) and ret_value.get("success") is False:
             effective_success = False
@@ -411,11 +424,23 @@ class JobExecutionBackend:
     def _handle_finished(
         self, job_id: str, success: bool, ret_value: Any, suc_type: str = "normal"
     ) -> None:
+        """处理设备结果并按物理确定性决定是否释放执行队列。
+
+        参数：``job_id`` 是稳定作业身份；``success`` 是旧布尔结果；
+        ``ret_value`` 是设备返回对象；``suc_type`` 是遗留异常决策分类。返回无。
+        执行结果不确定时只通知上层并保留当前作业与后继队列；重复未知结果允许
+        作为投递重放，迟到普通终态由入口拒绝，不能解除当前进程阻断。
+        """
+
         finished_job = self.device_manager.get_job_info(job_id)
-        # 出队下一个同设备 job 并启动（锁保持 busy）
-        next_job, _lock_became_free = self.device_manager.end_job(job_id)
-        if next_job is not None:
-            self._put_event(("start", next_job), context=next_job.trace_context)
+        execution_unknown = is_execution_unknown_result(ret_value)
+        if execution_unknown:
+            self._execution_unknown_jobs.add(job_id)
+        else:
+            # 只有明确终态才出队下一个同设备作业并继续启动。
+            next_job, _lock_became_free = self.device_manager.end_job(job_id)
+            if next_job is not None:
+                self._put_event(("start", next_job), context=next_job.trace_context)
 
         add_event(
             "action.finished",
@@ -425,6 +450,7 @@ class JobExecutionBackend:
                 "action.name": getattr(finished_job, "action_name", ""),
                 "action.success": success,
                 "action.success.type": suc_type,
+                "action.execution.unknown": execution_unknown,
             },
         )
 

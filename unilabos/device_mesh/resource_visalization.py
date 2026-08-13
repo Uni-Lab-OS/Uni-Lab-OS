@@ -1,18 +1,25 @@
-import json
 import os
-from pathlib import Path
 import re
+import shutil
+import tempfile
+import weakref
+from pathlib import Path
 
-import yaml
-from launch import LaunchService
-from launch import LaunchDescription
-from launch_ros.actions import Node as nd
 import xacro
-from lxml import etree
-from launch_param_builder import load_yaml
-from launch_ros.parameter_descriptions import ParameterFile
-from unilabos.registry.registry import lab_registry
+import yaml
 from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription, LaunchService
+from launch_param_builder import load_yaml
+from launch_ros.actions import Node as nd
+from launch_ros.parameter_descriptions import ParameterFile
+from lxml import etree
+
+from unilabos.device_mesh.motion_runtime_plan import node_requests_moveit
+from unilabos.device_mesh.package_moveit_model import (
+    load_package_moveit_model,
+    merge_package_moveit_parameters,
+)
+from unilabos.registry.registry import lab_registry
 
 
 def get_pattern_matches(folder, pattern):
@@ -36,8 +43,14 @@ def get_pattern_matches(folder, pattern):
     return matches
 
 class ResourceVisualization:
-    def __init__(self, device: dict, resource: dict, enable_rviz: bool = True):
-        """初始化资源可视化类
+    def __init__(
+        self,
+        device: dict,
+        resource: dict,
+        enable_rviz: bool = True,
+        required_moveit_device_ids: tuple[str, ...] = (),
+    ):
+        """初始化资源 ROS Launch 组合器。
         
         该类用于将设备和资源的3D模型可视化展示。通过解析设备和资源的配置信息,
         从注册表中获取对应的3D模型文件,并使用ROS2和RViz进行可视化。
@@ -47,6 +60,15 @@ class ResourceVisualization:
             resource (dict): 资源配置字典,包含资源的类型、位置等信息 
             registry (dict): 注册表字典,包含设备和资源类型的注册信息
             enable_rviz (bool, optional): 是否启用RViz可视化. Defaults to True.
+            required_moveit_device_ids: Graph 明确要求由本 Launch owner 启动的
+                MoveIt Device id；缺少可运行模型时关闭失败。
+
+        Returns:
+            None.
+
+        Safety:
+            ``required_moveit_device_ids`` 只声明运动基础设施，不证明设备许可或
+            硬件就绪；任何声明设备未解析为 MoveIt 模型都会拒绝启动。
         """
         self.launch_service = LaunchService()
         self.launch_description = LaunchDescription()
@@ -55,6 +77,15 @@ class ResourceVisualization:
         self.resource_type = ['deck', 'plate', 'container', 'tip_rack']
         self.mesh_path = Path(__file__).parent.absolute()
         self.enable_rviz = enable_rviz
+        self.required_moveit_device_ids = tuple(required_moveit_device_ids)
+        self.runtime_dir = Path(tempfile.mkdtemp(prefix="unilab-resource-runtime-"))
+        self._runtime_finalizer = weakref.finalize(
+            self,
+            shutil.rmtree,
+            self.runtime_dir,
+            ignore_errors=True,
+        )
+        self._launch_prepared = False
         registry = lab_registry
 
         self.srdf_str = '''<?xml version="1.0" ?>
@@ -73,7 +104,9 @@ class ResourceVisualization:
         xacro_uri = self.root.nsmap["xacro"]
 
         self.moveit_nodes = {}
+        self.legacy_moveit_nodes = {}
         self.moveit_nodes_kinematics = {}
+        self.moveit_joint_limits = {"joint_limits": {}}
         self.moveit_controllers_yaml = {
             "moveit_controller_manager": "moveit_simple_controller_manager/MoveItSimpleControllerManager",
             "moveit_simple_controller_manager": {
@@ -108,7 +141,13 @@ class ResourceVisualization:
                     elif "model" in registry.device_type_registry[device_class].keys():
                         model_config = registry.device_type_registry[device_class]['model']
                 if model_config:
-                    if model_config['type'] == 'resource':
+                    if model_config['type'] == 'package_moveit':
+                        self._add_package_moveit_model(
+                            node,
+                            model_config,
+                            enable_motion=node_requests_moveit(node),
+                        )
+                    elif model_config['type'] == 'resource':
                         self.resource_model[node['id']] = {
                             'mesh': f"{str(self.mesh_path)}/resources/{model_config['mesh']}",
                             'mesh_tf': model_config['mesh_tf']}
@@ -148,7 +187,7 @@ class ResourceVisualization:
                                 new_dev.set(key, str(value))
 
                         # 添加ros2_controller
-                        if node['class'].find('moveit.')!= -1:
+                        if node_requests_moveit(node):
                             new_include_controller = etree.SubElement(self.root, f"{{{xacro_uri}}}include")
                             new_include_controller.set("filename", f"{str(self.mesh_path)}/devices/{model_config['mesh']}/config/macro.ros2_control.xacro")
                             new_controller = etree.SubElement(self.root, f"{{{xacro_uri}}}{model_config['mesh']}_ros2_control")
@@ -161,6 +200,7 @@ class ResourceVisualization:
                             new_srdf = etree.SubElement(self.root_srdf, f"{{{xacro_uri}}}{model_config['mesh']}_srdf")
                             new_srdf.set("device_name", node["id"]+"_")
                             self.moveit_nodes[node["id"]] = model_config['mesh']
+                            self.legacy_moveit_nodes[node["id"]] = model_config['mesh']
                     else:
                         print("错误的注册表类型！")
         re = etree.tostring(self.root, encoding="unicode")
@@ -177,10 +217,19 @@ class ResourceVisualization:
 
         if self.moveit_nodes:
             self.moveit_init()
+        missing_moveit_models = sorted(
+            set(self.required_moveit_device_ids) - set(self.moveit_nodes)
+        )
+        if missing_moveit_models:
+            self.stop()
+            raise ValueError(
+                "Graph 要求 MoveIt 运动运行时，但以下 Device 没有可运行的 "
+                "URDF/SRDF/controller 模型资产: " + ", ".join(missing_moveit_models)
+            )
 
     def moveit_init(self):
 
-        for name, config in self.moveit_nodes.items():
+        for name, config in self.legacy_moveit_nodes.items():
             controller_dict = yaml.safe_load(open(f"{str(self.mesh_path)}/devices/{config}/config/ros2_controllers.yaml", "r"))
             moveit_dict = yaml.safe_load(open(f"{str(self.mesh_path)}/devices/{config}/config/moveit_controllers.yaml", "r"))
             kinematics_dict = yaml.safe_load(open(f"{str(self.mesh_path)}/devices/{config}/config/kinematics.yaml", "r"))
@@ -199,6 +248,40 @@ class ResourceVisualization:
                 self.moveit_controllers_yaml['moveit_simple_controller_manager']['controller_names'].append(f"{name}_{controller_name}")
                 moveit_dict['moveit_simple_controller_manager'][controller_name]['joints'] = [f"{name}_{joint}" for joint in moveit_dict['moveit_simple_controller_manager'][controller_name]['joints']]
                 self.moveit_controllers_yaml['moveit_simple_controller_manager'][f"{name}_{controller_name}"] = moveit_dict['moveit_simple_controller_manager'][controller_name]
+
+    def _add_package_moveit_model(
+        self,
+        node: dict,
+        model_config: dict,
+        *,
+        enable_motion: bool,
+    ) -> None:
+        """把 distribution Provider 的六轴模型并入本进程唯一 Launch 描述。
+
+        参数：``node`` 是 Graph Device；``model_config`` 是已发布 Catalog 模型
+        声明。返回：无。异常：Provider 摘要、XML 或控制器形状无效时传播。
+        安全：Provider 只能贡献型号模型和执行参数；RViz 仍由 OS 独立开关拥有。
+        """
+
+        bundle = load_package_moveit_model(model_config, node)
+        robot = etree.fromstring(bundle.urdf.encode("utf-8"))
+        for child in robot:
+            self.root.append(child)
+        if not enable_motion:
+            return
+
+        semantic = etree.fromstring(bundle.srdf.encode("utf-8"))
+        for child in semantic:
+            self.root_srdf.append(child)
+
+        merge_package_moveit_parameters(
+            bundle,
+            ros2_controllers=self.ros2_controllers_yaml,
+            moveit_controllers=self.moveit_controllers_yaml,
+            kinematics=self.moveit_nodes_kinematics,
+            joint_limits=self.moveit_joint_limits,
+        )
+        self.moveit_nodes[str(node["id"])] = "package_moveit"
 
 
     def create_launch_description(self) -> LaunchDescription:
@@ -257,11 +340,18 @@ class ResourceVisualization:
             if "planner_configs" not in ompl_config:
                 ompl_config.update(load_yaml(default_folder / "ompl_defaults.yaml"))
 
-        yaml.safe_dump(self.ros2_controllers_yaml, open(f"{str(self.mesh_path)}/ros2_controllers.yaml", "w"))
+        controllers_path = self.runtime_dir / "ros2_controllers.yaml"
+        staged_controllers_path = self.runtime_dir / "ros2_controllers.yaml.tmp"
+        staged_controllers_path.write_text(
+            yaml.safe_dump(self.ros2_controllers_yaml, sort_keys=False),
+            encoding="utf-8",
+        )
+        staged_controllers_path.replace(controllers_path)
 
         robot_description_planning = {
             "default_velocity_scaling_factor": 0.1,
             "default_acceleration_scaling_factor": 0.1,
+            "joint_limits": self.moveit_joint_limits["joint_limits"],
             "cartesian_limits": {
             "max_trans_vel": 1.0,
             "max_trans_acc": 2.25,
@@ -279,7 +369,7 @@ class ResourceVisualization:
         if self.moveit_nodes:
 
             controllers = []
-            ros2_controllers = ParameterFile(f"{str(self.mesh_path)}/ros2_controllers.yaml", allow_substs=True)
+            ros2_controllers = ParameterFile(str(controllers_path), allow_substs=True)
 
             controllers.append(
                 nd(
@@ -298,7 +388,7 @@ class ResourceVisualization:
                     nd(
                         package="controller_manager",
                         executable="spawner",
-                        arguments=[f"{controller}", "--controller-manager", f"controller_manager"],
+                        arguments=[f"{controller}", "--controller-manager", "controller_manager"],
                         output="screen",
                         env=dict(os.environ)
                     )
@@ -307,7 +397,7 @@ class ResourceVisualization:
                 nd(
                         package="controller_manager",
                         executable="spawner",
-                        arguments=["joint_state_broadcaster", "--controller-manager", f"controller_manager"],
+                        arguments=["joint_state_broadcaster", "--controller-manager", "controller_manager"],
                         output="screen",
                         env=dict(os.environ)
                 )
@@ -356,19 +446,18 @@ class ResourceVisualization:
         if self.moveit_controllers_yaml['moveit_simple_controller_manager']['controller_names']:
             moveit_params.append(self.moveit_controllers_yaml)
 
-        move_group = nd(
-            package='moveit_ros_move_group',
-            executable='move_group',
-            output='screen',
-            parameters=moveit_params,
-            env=dict(os.environ)
-        )
-
-
         # 将节点添加到launch描述中
         self.launch_description.add_action(robot_state_publisher)
         # self.launch_description.add_action(joint_state_publisher_node)
-        self.launch_description.add_action(move_group)
+        if self.moveit_nodes:
+            move_group = nd(
+                package='moveit_ros_move_group',
+                executable='move_group',
+                output='screen',
+                parameters=moveit_params,
+                env=dict(os.environ)
+            )
+            self.launch_description.add_action(move_group)
 
         # 如果启用RViz,添加RViz节点
         if self.enable_rviz:
@@ -391,14 +480,27 @@ class ResourceVisualization:
 
         return self.launch_description
 
+    def prepare(self) -> LaunchDescription:
+        """在启动设备前完整构造并校验 ROS Launch 描述。
+
+        参数：无。返回：可交给本实例 ``LaunchService`` 的唯一描述。异常：ROS、
+        MoveIt 或模型资产不完整时传播原异常。安全：准备失败不会启动任何设备或
+        ROS 子进程，调用方可据此对必需运动运行时执行关闭失败。
+        """
+
+        if not self._launch_prepared:
+            self.create_launch_description()
+            self._launch_prepared = True
+        return self.launch_description
+
     def start(self) -> None:
         """
-        启动可视化服务
+        启动资源 ROS Launch 服务；RViz 是否存在由独立开关决定。
 
         Args:
             urdf_str: URDF文件路径
         """
-        launch_description = self.create_launch_description()
+        launch_description = self.prepare()
         # print('--------------------------------')
         # print(self.moveit_controllers_yaml)
         # print('--------------------------------')
@@ -406,3 +508,16 @@ class ResourceVisualization:
         # print('--------------------------------')
         self.launch_service.include_launch_description(launch_description)
         self.launch_service.run()
+
+    def stop(self) -> None:
+        """停止本实例拥有的 LaunchService 并清理临时控制器配置。
+
+        参数：无。返回：无。异常：LaunchService 的关闭异常向上传播。安全：只
+        删除本实例由 ``tempfile`` 创建的精确目录，不触碰仓库内模型资产。
+        """
+
+        shutdown = getattr(self.launch_service, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+        if self._runtime_finalizer.alive:
+            self._runtime_finalizer()

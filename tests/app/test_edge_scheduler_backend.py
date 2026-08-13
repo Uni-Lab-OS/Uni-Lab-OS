@@ -192,6 +192,69 @@ class TestBackendAlone:
         finally:
             backend.stop()
 
+    def test_execution_unknown_keeps_device_queue_fenced_after_late_success(self):
+        """执行结果不确定时不得释放设备队列或接受迟到成功解锁。
+
+        参数：无；通过公开 ``publish_job_status`` 连续注入执行未知与迟到成功。
+        返回：无；断言第二个同设备动作始终未越过执行边界，且监听器只收到一次
+        ``execution_unknown``。异常：若未知结果被折叠为普通失败并出队，测试失败。
+        """
+
+        backend, host = _make_backend(auto_complete=False)
+        received: List[tuple] = []
+        backend.add_job_finished_listener(lambda *args: received.append(args))
+        try:
+            for job_id in ("j-unknown", "j-waiting"):
+                backend.dispatch(build_job_start_payload(
+                    job_id=job_id,
+                    task_id="t",
+                    workflow_id="wf",
+                    node_id=job_id,
+                    device_id="robot-cell-a",
+                    action_name="pick",
+                    action_type="goal",
+                    action_args={},
+                ))
+            assert backend.wait_idle()
+            assert [goal.job_id for goal in host.sent_goals] == ["j-unknown"]
+
+            unknown_result = {
+                "success": False,
+                "state": "execution_unknown",
+                "message": "设备断连，无法证明动作结果",
+            }
+            backend.publish_job_status(
+                {},
+                host.sent_goals[0],
+                "success",
+                serialize_result_info("", True, unknown_result),
+            )
+            assert backend.wait_idle()
+            assert received == [
+                ("j-unknown", False, unknown_result, "normal")
+            ]
+            assert [goal.job_id for goal in host.sent_goals] == ["j-unknown"]
+            assert backend.busy_device_action_keys() == {
+                "/devices/robot-cell-a/pick"
+            }
+
+            backend.publish_job_status(
+                {},
+                host.sent_goals[0],
+                "success",
+                serialize_result_info("", True, {"success": True}),
+            )
+            assert backend.wait_idle()
+            assert received == [
+                ("j-unknown", False, unknown_result, "normal")
+            ]
+            assert [goal.job_id for goal in host.sent_goals] == ["j-unknown"]
+            assert backend.busy_device_action_keys() == {
+                "/devices/robot-cell-a/pick"
+            }
+        finally:
+            backend.stop()
+
     def test_foreign_job_status_ignored(self):
         backend, _ = _make_backend(auto_complete=False)
         received: List[tuple] = []

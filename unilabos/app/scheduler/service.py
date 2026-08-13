@@ -48,6 +48,7 @@ from unilabos.app.scheduler.dispatch import (
     build_job_start_payload,
 )
 from unilabos.app.scheduler.estimation import DurationEstimator
+from unilabos.app.scheduler.execution_result import is_execution_unknown_result
 from unilabos.app.scheduler.inventory.domain import InsufficientStock, InventoryError
 from unilabos.app.scheduler.models import (
     DispatchedJob,
@@ -582,11 +583,13 @@ class EdgeScheduler:
         ret_value: Any = None,
         suc_type: str = "normal",
     ) -> Dict[str, Any]:
-        """作业（Job）完成回调：写回结果、清理依赖并强制重排。
+        """作业（Job）结果回调：写回明确终态或保留执行未知事实。
 
         ``suc_type`` 来自设备侧异常决策（registry.action_policy）：
         normal / skip / operator_intervention。skip 表示动作报错后人工选择
-        跳过——节点按成功推进，但其已消费物料隔离待复核。
+        跳过——节点按成功推进，但其已消费物料隔离待复核。设备显式返回
+        ``execution_unknown`` 时只持久通知，不释放在途作业、设备互斥或资源锁，
+        也不推进工作流业务终态。
         """
         with self._lock:
             job = self._inflight.get(job_id)
@@ -594,9 +597,23 @@ class EdgeScheduler:
                 logger.warning("[EdgeScheduler] unknown job finished: %s", job_id)
                 return {"dispatched": []}
 
-            # 标准完成事实必须先持久化；任一监听器失败时保留在途作业与资源锁，
-            # 允许设备对同一结果进行投递重放（DeliveryReplay）。
+            # 任何执行结果都必须先投影；投影失败时保留在途事实供投递重放。
             self._notify_job_finished(job_id, success, ret_value, suc_type)
+            if is_execution_unknown_result(ret_value):
+                logger.error(
+                    "[EdgeScheduler] 作业 %s 的物理结果不确定，保留设备与资源占用",
+                    job_id,
+                )
+                return {
+                    "workflow_id": job.workflow_id,
+                    "workflow_state": (
+                        self._workflows[job.workflow_id].state.value
+                        if job.workflow_id in self._workflows
+                        else "running"
+                    ),
+                    "execution_state": "execution_unknown",
+                    "dispatched": [],
+                }
             self._inflight.pop(job_id, None)
             self._job_resource_locks.pop(job_id, None)
 
