@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from unilabos.app.control_plane import (
     ControlPlaneRuntimeContext,
@@ -28,6 +29,7 @@ def start_embedded_scheduler_runtime(
         shutdown_edge_services,
     )
     from unilabos.config.config import HostLinkConfig
+    from unilabos.config.config import BasicConfig, EdgeControlConfig
     from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 
     arguments = context.arguments
@@ -60,19 +62,43 @@ def start_embedded_scheduler_runtime(
         "info",
     )
 
+    execution_backend = None
+    if BasicConfig.process_role == "workspace_backend":
+        from unilabos.app.edge_control.local_authority import (
+            LocalEdgeAuthorityStore,
+            LocalEdgeControlAuthority,
+        )
+
+        execution_backend = LocalEdgeControlAuthority(
+            LocalEdgeAuthorityStore(
+                Path(paths.workflow_history_db).with_name("edge_authority.db")
+            ),
+            api_key=str(EdgeControlConfig.api_key or "").strip(),
+        )
+
     _scheduler, execution_backend = setup_edge_scheduler(
         ws_client=legacy_client,
         inventory_db_path=inventory_db,
         device_state_db_path=paths.device_state_db,
         workflow_history_db_path=paths.workflow_history_db,
+        execution_backend=execution_backend,
     )
-    bridges.append(execution_backend)
+    # The combined process still needs the in-process bridge attached to its
+    # HostNode.  Workspace Backend dispatches over the durable loopback Edge
+    # protocol, so attaching that authority as a ROS bridge would recreate the
+    # lifecycle coupling this split removes.
+    if BasicConfig.process_role != "workspace_backend":
+        bridges.append(execution_backend)
     print_status(
         "本地调试 Scheduler 已启用 (DAG 调度 + 设备状态 + 工作流历史)",
         "info",
     )
 
-    host_network = setup_host_network_service()
+    host_network = (
+        setup_host_network_service()
+        if BasicConfig.process_role != "workspace_backend"
+        else None
+    )
     if host_network is not None:
         print_status(
             f"本地调试微后端已监听 Slave 连接: "

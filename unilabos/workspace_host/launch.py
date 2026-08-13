@@ -85,8 +85,15 @@ def resolve_backend_launch(
     if backend_port == hostlink_port:
         raise WorkspaceHostError("port_conflict", "Backend 与 HostLink 端口不能相同")
     environment = _runtime_environment(paths, generation)
+    edge_token = _workspace_host_token(paths)
+    edge_key = _workspace_edge_key(paths)
+    backend_address = f"http://127.0.0.1:{backend_port}"
     environment.update(
         {
+            "UNILABOS_EDGECONTROLCONFIG_API_KEY": edge_token,
+            "UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR": backend_address,
+            "UNILABOS_EDGECONTROLCONFIG_EDGE_KEY": edge_key,
+            "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": backend_address,
             "UNILABOS_HOSTLINKCONFIG_PORT": str(hostlink_port),
             "UNILABOS_WORKBENCH_RUNTIME_MODE": mode,
             "UNILABOS_WORKBENCH_GRAPH_FINGERPRINT": _sha256(graph),
@@ -127,8 +134,8 @@ def resolve_backend_launch(
         environment=environment,
         generation=generation,
         log_path=paths.logs / f"{generation}-backend.log",
-        address=f"http://127.0.0.1:{backend_port}",
-        ready_url=f"http://127.0.0.1:{backend_port}/api/v1/health",
+        address=backend_address,
+        ready_url=f"{backend_address}/api/v1/health",
         metadata={
             "graphPath": str(graph),
             "graphFingerprint": _sha256(graph),
@@ -152,9 +159,21 @@ def resolve_edge_launch(
     runtime_directory.mkdir(parents=True, exist_ok=False)
     ready_file = runtime_directory / "ready.json"
     mode = str(metadata.get("runtimeMode") or "normal")
+    backend_address = str(backend.get("address") or "").strip()
+    if not backend_address:
+        raise WorkspaceHostError("backend_not_ready", "Backend 缺少服务地址")
+    edge_state_directory = paths.runtime / "edge"
+    edge_state_directory.mkdir(parents=True, exist_ok=True)
     environment = _runtime_environment(paths, generation)
     environment.update(
         {
+            "UNILABOS_EDGECONTROLCONFIG_API_KEY": _workspace_host_token(paths),
+            "UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR": backend_address,
+            "UNILABOS_EDGECONTROLCONFIG_EDGE_KEY": _workspace_edge_key(paths),
+            "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": backend_address,
+            "UNILABOS_EDGECONTROLCONFIG_STATE_DB": str(
+                edge_state_directory / "edge_control.db"
+            ),
             "UNILABOS_WORKBENCH_RUNTIME_MODE": mode,
             "UNILABOS_WORKBENCH_PROCESS_ROLE": "edge_runtime",
             "UNILABOS_EDGE_READY_FILE": str(ready_file),
@@ -176,13 +195,10 @@ def resolve_edge_launch(
         "edge_runtime",
         "--control_plane",
         "local",
-        "--is_slave",
-        "--hostlink_addr",
-        f"127.0.0.1:{int(metadata['hostLinkPort'])}",
         "--backend",
         "ros",
         "--app_bridges",
-        "fastapi",
+        "edge_control",
         "--port",
         "0",
         "--disable_browser",
@@ -217,6 +233,7 @@ def resolve_plc_launch(paths: WorkspacePaths) -> LaunchPlan:
     project_value = _optional_text(config.get("plcSimulatorProjectPath"))
     table_value = _optional_text(config.get("plcVariableTablePath"))
     profile = _optional_text(config.get("plcHandshakeProfile")) or "szlab"
+    workflow = _optional_text(config.get("plcHandshakeWorkflow")) or "all"
     if not project_value:
         raise WorkspaceHostError("plc_configuration_missing", "未配置 PLC-Sim 项目目录")
     if not table_value:
@@ -268,6 +285,7 @@ def resolve_plc_launch(paths: WorkspacePaths) -> LaunchPlan:
             "projectPath": str(project),
             "variableTablePath": str(table),
             "handshakeProfile": profile,
+            "handshakeWorkflow": workflow,
             "guiUrl": f"http://127.0.0.1:{gui_port}",
             "opcUaUrl": f"opc.tcp://127.0.0.1:{opcua_port}",
             "opcUaPort": opcua_port,
@@ -316,6 +334,26 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _workspace_host_token(paths: WorkspacePaths) -> str:
+    try:
+        token = paths.token.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise WorkspaceHostError(
+            "host_token_invalid", "Workspace Host token 不可读"
+        ) from error
+    if not token:
+        raise WorkspaceHostError(
+            "host_token_invalid", "Workspace Host token 为空"
+        )
+    return token
+
+
+def _workspace_edge_key(paths: WorkspacePaths) -> str:
+    return "managed-local-" + hashlib.sha256(
+        str(paths.workspace).encode("utf-8")
+    ).hexdigest()[:24]
 
 
 def _optional_text(value: object) -> str | None:

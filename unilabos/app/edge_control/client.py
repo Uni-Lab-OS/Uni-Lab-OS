@@ -331,9 +331,9 @@ class EdgeControlClient(BaseCommunicationClient):
         candidates: List[Dict[str, Any]] = []
         for local_id in sorted(host_node.devices_names):
             resource = nodes.get(str(local_id), {})
-            barcode = str(resource.get("barcode") or "").strip()
-            if not barcode:
-                continue
+            barcode = normalize_resource_instance_barcode(
+                resource.get("barcode"), str(local_id)
+            )
             candidates.append(
                 {
                     "local_id": str(local_id),

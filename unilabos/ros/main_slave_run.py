@@ -125,6 +125,25 @@ def main(
     )
     thread.start()
 
+    if BasicConfig.process_role == "edge_runtime":
+        deadline = time.monotonic() + 30.0
+        control_bridges = [
+            bridge
+            for bridge in bridges
+            if callable(getattr(bridge, "is_connected", None))
+        ]
+        while control_bridges and time.monotonic() < deadline:
+            if all(bridge.is_connected() for bridge in control_bridges):
+                break
+            time.sleep(0.05)
+        if control_bridges and not all(
+            bridge.is_connected() for bridge in control_bridges
+        ):
+            raise RuntimeError(
+                "Edge Runtime failed to connect its control plane before readiness"
+            )
+        publish_edge_runtime_ready_signal()
+
     while True:
         time.sleep(1)
 
@@ -132,7 +151,10 @@ def main(
 def _attach_hostlink_runtime(host_node) -> None:
     """Attach HostNode's live resource tree to the microbackend-owned service."""
 
-    if BasicConfig.control_plane != "local":
+    if (
+        BasicConfig.control_plane != "local"
+        or BasicConfig.process_role != "combined"
+    ):
         return
     from unilabos.app.scheduler.host_network import setup_host_network_service
 
@@ -142,7 +164,10 @@ def _attach_hostlink_runtime(host_node) -> None:
 def _setup_host_network_before_ros() -> None:
     """仅本地调试模式在 ROS 初始化前启动 HostLink 微后端。"""
 
-    if BasicConfig.control_plane != "local":
+    if (
+        BasicConfig.control_plane != "local"
+        or BasicConfig.process_role != "combined"
+    ):
         return
     # HostLink 必须在 rclpy.init 前启动定向 DDS 端点；直接嵌入本地 ROS
     # 运行时的调用方不会经过 app.main 的组合根，因此在这里兜底装配。

@@ -335,6 +335,101 @@ def test_production_resource_projection_uses_backend_identity_and_parent_tree() 
     ]
 
 
+def test_managed_local_edge_uses_backend_material_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed Local Edge 也必须使用 Backend 权威物料投影。
+
+    参数说明：``monkeypatch`` 隔离全局运行角色和资源装配。返回：无；断言 Edge
+    Runtime 不会回退到已拆除的本地 Scheduler/ROS 物料查询。
+    """
+
+    material_uuid = "50000000-0000-4000-8000-000000000115"
+    material = SimpleNamespace(unilabos_uuid=material_uuid, children=[])
+    direct_rows = [_raw_resource(material_uuid)]
+    install_production_resource_nodes(
+        [
+            {
+                **direct_rows[0],
+                "id": "managed-local-sample",
+                "name": "Managed local sample",
+                "barcode": "UNILAB-GRAPH-managed-local-sample",
+                "type": "container",
+                "class": "sample",
+                "config": {},
+                "data": {},
+                "extra": {},
+            }
+        ],
+        {"UNILAB-GRAPH-managed-local-sample": material_uuid},
+    )
+    monkeypatch.setattr(base_device_node.BasicConfig, "control_plane", "local")
+    monkeypatch.setattr(base_device_node.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        lambda _rows: _tree_set(direct_rows, material),
+    )
+
+    class _ForbiddenClient:
+        def call_async(self, _request: object) -> object:
+            raise AssertionError("Edge Runtime must not query legacy ROS material service")
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node._resource_clients = {"c2s_update_resource_tree": _ForbiddenClient()}
+    node.resource_tracker = _Tracker()
+    node.lab_logger = lambda: _Logger()
+
+    assert node._convert_resources_sync(material_uuid) == [material]
+
+
+def test_managed_local_edge_async_action_uses_backend_material_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HostNode 异步动作也不得回退到 Edge 内的旧物料服务。
+
+    参数说明：``monkeypatch`` 隔离运行角色、资源装配与网络接缝。返回：无；断言
+    ``transfer_resource`` 一类异步动作直接使用已注册的 Backend 投影。
+    """
+
+    material_uuid = "50000000-0000-4000-8000-000000000116"
+    material = SimpleNamespace(unilabos_uuid=material_uuid, children=[])
+    direct_rows = [_raw_resource(material_uuid)]
+    install_production_resource_nodes(
+        [
+            {
+                **direct_rows[0],
+                "id": "managed-local-async-sample",
+                "name": "Managed local async sample",
+                "barcode": "UNILAB-GRAPH-managed-local-async-sample",
+                "type": "container",
+                "class": "sample",
+                "config": {},
+                "data": {},
+                "extra": {},
+            }
+        ],
+        {"UNILAB-GRAPH-managed-local-async-sample": material_uuid},
+    )
+    monkeypatch.setattr(base_device_node.BasicConfig, "control_plane", "local")
+    monkeypatch.setattr(base_device_node.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        lambda _rows: _tree_set(direct_rows, material),
+    )
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node.resource_tracker = _Tracker()
+
+    async def forbidden_get_resource(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Edge Runtime must not query legacy async material service")
+
+    node.get_resource = forbidden_get_resource
+
+    assert asyncio.run(node._convert_resource_async({"uuid": material_uuid})) is material
+
+
 def test_sync_conversion_without_parent_keeps_single_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

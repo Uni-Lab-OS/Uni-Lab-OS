@@ -134,6 +134,11 @@ class FakeRegistrationResources:
         ]
 
 
+class FakeRegistrationResourcesWithoutBarcode:
+    def dump(self) -> List[List[Dict[str, Any]]]:
+        return [[{"id": "robot-01", "name": "Robot 01"}]]
+
+
 class FakeRegistrationHostNode:
     def __init__(self) -> None:
         self.resources_config = FakeRegistrationResources()
@@ -243,6 +248,24 @@ def test_registration_reports_logical_actions_instead_of_transport_endpoint(
     client.store.close()
 
 
+def test_registration_uses_the_shared_graph_barcode_fallback(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.db"
+    host_node = FakeRegistrationHostNode()
+    host_node.resources_config = FakeRegistrationResourcesWithoutBarcode()
+    client = EdgeControlClient(
+        _settings(path),
+        data_plane=FakeRegistrationDataPlane(),  # type: ignore[arg-type]
+        host_node_provider=lambda: host_node,
+    )
+
+    devices = client._registration_devices()
+
+    assert devices[0]["barcode"] == "UNILAB-GRAPH-robot-01"
+    client.store.close()
+
+
 def test_store_persists_command_job_and_event_ack(tmp_path: Path) -> None:
     path = tmp_path / "edge-control.db"
     command_uuid = str(uuid.uuid4())
@@ -321,6 +344,44 @@ def test_store_persists_command_job_and_event_ack(tmp_path: Path) -> None:
     assert pending_outcome is not None
     assert pending_outcome.return_info == {"suc": True}
     reopened.close()
+
+
+def test_explicit_local_reset_preserves_identity_and_clears_protocol_work(
+    tmp_path: Path,
+) -> None:
+    """调试重建只清理协议任务，不改变持久 Edge 身份。"""
+
+    path = tmp_path / "edge-control.db"
+    store = EdgeControlStore(str(path))
+    instance_uuid = store.get_or_create_instance_uuid()
+    command_uuid = str(uuid.uuid4())
+    job_uuid = str(uuid.uuid4())
+    store.record_command(
+        {
+            "message_uuid": command_uuid,
+            "sequence": 1,
+            "type": "job.start",
+            "payload": {"job_uuid": job_uuid},
+        }
+    )
+    store.save_job_start(
+        {
+            "job_uuid": job_uuid,
+            "task_uuid": str(uuid.uuid4()),
+            "node_uuid": str(uuid.uuid4()),
+            "job_access_token": "reset-token",
+        },
+        command_uuid,
+    )
+    store.enqueue_event("command.ack", {"command_uuid": command_uuid})
+
+    store.reset_transient_state()
+
+    assert store.get_or_create_instance_uuid() == instance_uuid
+    assert store.get_job(job_uuid) is None
+    assert store.command_status(command_uuid) == ""
+    assert store.pending_events(float("inf")) == []
+    store.close()
 
 
 def test_store_migrates_existing_runtime_and_outbox_schema(tmp_path: Path) -> None:

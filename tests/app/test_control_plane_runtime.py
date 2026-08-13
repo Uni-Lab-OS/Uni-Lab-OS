@@ -44,9 +44,8 @@ def test_workbench_split_runtime_roles_are_orthogonal_to_local_authority() -> No
             [
                 "--process_role",
                 "edge_runtime",
-                "--is_slave",
                 "--app_bridges",
-                "fastapi",
+                "edge_control",
             ]
         )
     )
@@ -61,13 +60,19 @@ def test_workbench_split_runtime_roles_are_orthogonal_to_local_authority() -> No
     assert edge_plan.role is RuntimeProcessRole.EDGE_RUNTIME
     assert edge_plan.control_plane is ControlPlaneMode.LOCAL
     assert not edge_plan.starts_web_server
-    assert not edge_plan.initializes_host_devices
+    assert edge_plan.initializes_host_devices
 
 
 def test_split_runtime_rejects_role_authority_mismatches() -> None:
-    local_edge_without_slave = vars(
+    local_edge_with_slave = vars(
         parse_args().parse_args(
-            ["--process_role", "edge_runtime", "--app_bridges", "fastapi"]
+            [
+                "--process_role",
+                "edge_runtime",
+                "--is_slave",
+                "--app_bridges",
+                "edge_control",
+            ]
         )
     )
     backend_workspace = vars(
@@ -84,8 +89,8 @@ def test_split_runtime_rejects_role_authority_mismatches() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match="必须使用 --is_slave"):
-        resolve_runtime_process_plan(local_edge_without_slave)
+    with pytest.raises(ValueError, match="不能使用 --is_slave"):
+        resolve_runtime_process_plan(local_edge_with_slave)
     with pytest.raises(ValueError, match="当前只承载 local Authority"):
         resolve_runtime_process_plan(backend_workspace)
 
@@ -132,7 +137,7 @@ def test_local_control_plane_rejects_production_bridge() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match="control_plane backend"):
+    with pytest.raises(ValueError, match="仅允许 edge_runtime"):
         validate_control_plane_arguments(arguments)
 
 

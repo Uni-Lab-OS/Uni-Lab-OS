@@ -18,6 +18,7 @@ from unilabos.registry.local_template_identity import (
     synchronize_local_template_identities,
 )
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
+from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 
 _SITE_TYPES = frozenset({"well", "tipspot", "tip_spot", "tip-spot"})
 _SOURCE_KEY = "resource_graph_bootstrap_source"
@@ -288,7 +289,9 @@ def _compile_projection(
                 "template_uuid": "",
                 "parent_uuid": material_uuid_by_runtime.get(parent_runtime or ""),
                 "class": graph_class,
-                "barcode": str(node.get("barcode") or ""),
+                "barcode": normalize_resource_instance_barcode(
+                    node.get("barcode"), node_id
+                ),
                 "name": _required_text(node.get("name") or node_id, "material.name"),
                 "description": _optional_text(node.get("description")),
                 "meta_data": {

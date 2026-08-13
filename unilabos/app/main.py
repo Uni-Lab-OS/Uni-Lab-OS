@@ -1409,7 +1409,31 @@ def main():
 
     if should_attach_legacy_http_bridge(args_dict):
         args_dict["bridges"].append(http_client)
-    if BasicConfig.is_host_mode:
+    if runtime_process_plan.role.value == "edge_runtime":
+        from unilabos.app.control_plane import ControlPlaneRuntimeContext
+        from unilabos.app.edge_control.runtime import start_backend_control_runtime
+
+        edge_control_runtime = start_backend_control_runtime(
+            ControlPlaneRuntimeContext(
+                arguments=args_dict,
+                working_dir=working_dir,
+                resource_tree_set=resource_tree_set,
+                registry=lab_registry,
+                graph_source_id=str(file_path or "remote-startup.json"),
+                material_shapes=workspace_material_shapes,
+                material_model_catalog=workspace_material_models,
+            )
+        )
+        args_dict["bridges"].extend(edge_control_runtime.bridges)
+        install_host_shutdown_handlers(
+            edge_control_runtime.communication_clients,
+            runtime_shutdown=edge_control_runtime.shutdown_services,
+        )
+        print_status(
+            "Edge Runtime 使用生产形态 HTTP/WebSocket 协议连接控制面",
+            "info",
+        )
+    elif BasicConfig.is_host_mode:
         from unilabos.app.control_plane import (
             ControlPlaneRuntimeContext,
             start_control_plane_runtime,
@@ -1449,6 +1473,21 @@ def main():
         raise RuntimeError(
             "Edge Runtime backend thread terminated unexpectedly"
         )
+
+    if runtime_process_plan.role.value == "workspace_backend":
+        print_status(
+            "Workspace Backend 常驻提供 Authoring/Inventory/Scheduler；不启动 ROS 或设备驱动",
+            "info",
+        )
+        restart_requested = start_server(
+            open_browser=not BasicConfig.disable_browser,
+            port=BasicConfig.port,
+        )
+        if restart_requested:
+            print_status("[Main] Restart requested, cleaning up...", "info")
+            cleanup_for_restart()
+            os._exit(RESTART_EXIT_CODE)
+        return
 
     # web visiualize 2D
     if args_dict["visual"] != "disable":

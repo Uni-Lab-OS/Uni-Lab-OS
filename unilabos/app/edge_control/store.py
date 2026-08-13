@@ -159,6 +159,27 @@ class EdgeControlStore:
         with self._lock:
             self._connection.close()
 
+    def reset_transient_state(self) -> None:
+        """Clear recoverable protocol work while preserving the Edge identity.
+
+        Managed Local exposes this only through the explicit ``local.reset-state``
+        operation, after the Edge process has stopped.  It is intentionally not
+        part of an ordinary Edge restart: command/outcome durability must survive
+        those restarts.
+        """
+
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute("DELETE FROM edge_job_outcome_pending")
+                self._connection.execute("DELETE FROM edge_job_runtime")
+                self._connection.execute("DELETE FROM edge_event_outbox")
+                self._connection.execute("DELETE FROM edge_command")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+
     def get_or_create_instance_uuid(self, configured: str = "") -> str:
         configured = configured.strip()
         if configured:

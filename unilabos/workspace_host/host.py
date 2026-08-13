@@ -265,6 +265,7 @@ class WorkspaceHost:
         if command == "local.reset-state":
             self._stop_component("edge")
             self._stop_component("backend")
+            self._reset_local_edge_protocol_state()
             return self._start_backend(parameters)
         if command == "plc.start":
             return self._start_plc()
@@ -282,6 +283,23 @@ class WorkspaceHost:
         raise WorkspaceHostError(
             "command_unknown", f"未知 Workspace Host 命令：{command}"
         )
+
+    def _reset_local_edge_protocol_state(self) -> None:
+        """Reset transient Edge protocol facts for an explicit local rebuild.
+
+        The durable Edge instance UUID remains stable.  Ordinary ``os.restart``
+        never calls this seam, so pending commands and outcomes retain their
+        crash-recovery guarantees.
+        """
+
+        from unilabos.app.edge_control.store import EdgeControlStore
+
+        state_path = self.paths.runtime / "edge" / "edge_control.db"
+        store = EdgeControlStore(str(state_path))
+        try:
+            store.reset_transient_state()
+        finally:
+            store.close()
 
     def _start_backend(self, parameters: dict[str, object]) -> dict[str, object]:
         with self._lock:
@@ -377,6 +395,7 @@ class WorkspaceHost:
             f"{metadata['guiUrl']}/api/agent/start",
             {
                 "profile": metadata["handshakeProfile"],
+                "workflow": metadata["handshakeWorkflow"],
                 "host": "127.0.0.1",
                 "port": metadata["opcUaPort"],
                 "csv": metadata["variableTablePath"],
@@ -547,6 +566,7 @@ class WorkspaceHost:
             "plcSimulatorProjectPath",
             "plcVariableTablePath",
             "plcHandshakeProfile",
+            "plcHandshakeWorkflow",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:

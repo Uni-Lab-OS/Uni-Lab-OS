@@ -16,6 +16,16 @@ from unilabos.ros.nodes.presets.host_node import HostNode
 from unilabos.utils import logger
 
 
+def _backend_resource_tree() -> Any:
+    from unilabos.config.config import BasicConfig
+
+    if BasicConfig.process_role != "workspace_backend":
+        return None
+    from unilabos.app.scheduler.integration import get_inventory_resource_tree_set
+
+    return get_inventory_resource_tree_set()
+
+
 @dataclass
 class JobResult:
     """任务结果数据"""
@@ -122,7 +132,10 @@ def get_resources() -> Tuple[bool, Any]:
     """
     host_node = HostNode.get_instance(0)
     if host_node is None:
-        return False, "Host node not initialized"
+        resources = _backend_resource_tree()
+        if resources is None:
+            return False, "Host node not initialized"
+        return True, resources
 
     return True, host_node.resources_config
 
@@ -135,7 +148,10 @@ def devices() -> Tuple[bool, Any]:
     """
     host_node = HostNode.get_instance(0)
     if host_node is None:
-        return False, "Host node not initialized"
+        resources = _backend_resource_tree()
+        if resources is None:
+            return False, "Host node not initialized"
+        return True, resources
 
     return True, host_node.devices_config
 
@@ -355,7 +371,26 @@ def get_online_devices() -> Tuple[bool, Dict[str, Any]]:
     """
     host_node = HostNode.get_instance(0)
     if host_node is None:
-        return False, {"error": "Host node not initialized"}
+        from unilabos.config.config import BasicConfig
+
+        if BasicConfig.process_role != "workspace_backend":
+            return False, {"error": "Host node not initialized"}
+        from unilabos.app.edge_control.local_authority import (
+            LocalEdgeControlAuthority,
+        )
+        from unilabos.app.scheduler.integration import get_edge_backend
+
+        backend = get_edge_backend()
+        online_devices = (
+            backend.store.online_devices()
+            if isinstance(backend, LocalEdgeControlAuthority)
+            else {}
+        )
+        return True, {
+            "online_devices": online_devices,
+            "total_count": len(online_devices),
+            "timestamp": time.time(),
+        }
 
     try:
         from unilabos.ros.nodes.base_device_node import registered_devices

@@ -65,9 +65,9 @@ def resolve_runtime_process_plan(arguments: dict[str, Any]) -> RuntimeProcessPla
                 "由 Workbench Backend Adapter 连接正式 Backend"
             )
     elif role is RuntimeProcessRole.EDGE_RUNTIME:
-        if control_plane is ControlPlaneMode.LOCAL and not is_slave:
+        if control_plane is ControlPlaneMode.LOCAL and is_slave:
             raise ValueError(
-                "local Authority 的 edge_runtime 必须使用 --is_slave 连接 Workspace Backend"
+                "local Authority 的 edge_runtime 直接拥有设备，不能使用 --is_slave"
             )
         if control_plane is ControlPlaneMode.BACKEND and is_slave:
             raise ValueError(
@@ -75,9 +75,19 @@ def resolve_runtime_process_plan(arguments: dict[str, Any]) -> RuntimeProcessPla
             )
 
     if control_plane is ControlPlaneMode.LOCAL:
-        if "edge_control" in bridges:
+        if (
+            "edge_control" in bridges
+            and role is not RuntimeProcessRole.EDGE_RUNTIME
+        ):
             raise ValueError(
-                "edge_control 生产 bridge 必须与 --control_plane backend 一起使用"
+                "local Authority 仅允许 edge_runtime 使用 edge_control bridge"
+            )
+        if (
+            role is RuntimeProcessRole.EDGE_RUNTIME
+            and "edge_control" not in bridges
+        ):
+            raise ValueError(
+                "local Authority 的 edge_runtime 必须启用 edge_control bridge"
             )
     else:
         if is_slave:
@@ -98,7 +108,8 @@ def resolve_runtime_process_plan(arguments: dict[str, Any]) -> RuntimeProcessPla
         role=role,
         control_plane=control_plane,
         starts_web_server=role is not RuntimeProcessRole.EDGE_RUNTIME,
-        initializes_host_devices=role is RuntimeProcessRole.COMBINED,
+        initializes_host_devices=role
+        in {RuntimeProcessRole.COMBINED, RuntimeProcessRole.EDGE_RUNTIME},
     )
 
 

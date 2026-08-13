@@ -49,6 +49,7 @@ from unilabos.registry.placeholder_type import ResourceSlotRawInput
 from unilabos.ros.nodes.resource_slot_hydration import (
     hydrate_resource_slot_nodes_sync,
     hydrate_resource_slot_tree_async,
+    plan_resource_slot_parent_context,
     query_production_resource_nodes_sync,
     query_resource_nodes_sync,
     resolve_resource_slot_target,
@@ -3143,7 +3144,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 for resource_uuid in uuids_list
             ]
 
-        if BasicConfig.control_plane == "backend":
+        # A split Edge Runtime always executes against the Backend-owned material
+        # projection, including Managed Local.  ``control_plane`` describes where
+        # authority lives (local/backend); it no longer implies that the Edge may
+        # query a co-located scheduler through the legacy ROS material service.
+        if (
+            BasicConfig.control_plane == "backend"
+            or BasicConfig.process_role == "edge_runtime"
+        ):
             raw_data = query_production_resource_nodes_sync(uuids_list)
             query_nodes = query_production_resource_nodes_sync
         else:
@@ -3388,14 +3396,32 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         if unilabos_uuid:
             # ``target_uuid`` 是普通动作实际引用的目标物料稳定身份。
             target_uuid = str(unilabos_uuid)
-            resource_tree = await self.get_resource([target_uuid], with_children=True)
-            resource_tree, parent_context = await hydrate_resource_slot_tree_async(
-                target_uuid,
-                resource_tree,
-                query_tree=lambda parent_uuid: self.get_resource(
-                    [parent_uuid], with_children=True
-                ),
-            )
+            if (
+                BasicConfig.control_plane == "backend"
+                or BasicConfig.process_role == "edge_runtime"
+            ):
+                direct_nodes = query_production_resource_nodes_sync([target_uuid])
+                parent_context = plan_resource_slot_parent_context(
+                    target_uuid,
+                    direct_nodes,
+                )
+                hydrated_nodes = hydrate_resource_slot_nodes_sync(
+                    target_uuid,
+                    direct_nodes,
+                    query_nodes=query_production_resource_nodes_sync,
+                )
+                resource_tree = ResourceTreeSet.from_raw_dict_list(hydrated_nodes)
+            else:
+                resource_tree = await self.get_resource(
+                    [target_uuid], with_children=True
+                )
+                resource_tree, parent_context = await hydrate_resource_slot_tree_async(
+                    target_uuid,
+                    resource_tree,
+                    query_tree=lambda parent_uuid: self.get_resource(
+                        [parent_uuid], with_children=True
+                    ),
+                )
             plr_resources = resource_tree.to_plr_resources()
             if plr_resources:
                 plr_resource = plr_resources[0]

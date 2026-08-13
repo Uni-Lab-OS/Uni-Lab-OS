@@ -12,10 +12,16 @@ from pathlib import Path
 
 import pytest
 
+from unilabos.app.edge_control.store import EdgeControlStore
 from unilabos.workspace_host.client import WorkspaceHostClient
 from unilabos.workspace_host.discovery import WorkspaceHostLock, ensure_local_token
 from unilabos.workspace_host.host import WorkspaceHost, _handler_type
-from unilabos.workspace_host.launch import LaunchPlan
+from unilabos.workspace_host.launch import (
+    LaunchPlan,
+    resolve_backend_launch,
+    resolve_edge_launch,
+    resolve_plc_launch,
+)
 from unilabos.workspace_host.model import WorkspaceHostError, WorkspacePaths
 
 
@@ -52,6 +58,72 @@ def test_workspace_token_is_private_and_stable(workspace: Path) -> None:
     assert len(first) == 64
     if os.name != "nt":
         assert paths.token.stat().st_mode & 0o777 == 0o600
+
+
+def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    token = ensure_local_token(paths)
+    backend = resolve_backend_launch(
+        paths,
+        graph_path="deployment/graphs/graph.json",
+        backend_port=48_101,
+        hostlink_port=48_102,
+    )
+    backend_component = {
+        "address": backend.address,
+        "metadata": backend.metadata,
+    }
+    first_edge = resolve_edge_launch(paths, backend_component)
+    second_edge = resolve_edge_launch(paths, backend_component)
+
+    assert backend.environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"] == token
+    assert backend.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
+        "http://127.0.0.1:48101"
+    )
+    assert "--process_role" in backend.command
+    assert "workspace_backend" in backend.command
+    assert "edge_control" in first_edge.command
+    assert "fastapi" not in first_edge.command
+    assert "--is_slave" not in first_edge.command
+    assert "--hostlink_addr" not in first_edge.command
+    assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"] == token
+    assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
+        backend.address
+    )
+    stable_state = str(paths.runtime / "edge" / "edge_control.db")
+    assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"] == stable_state
+    assert second_edge.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"] == stable_state
+    assert first_edge.metadata["runtimeDirectory"] != second_edge.metadata[
+        "runtimeDirectory"
+    ]
+
+
+def test_plc_launch_preserves_explicit_handshake_workflow(workspace: Path) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    plc_project = workspace / "plc-sim"
+    (plc_project / "OpcUaSim" / "gui").mkdir(parents=True)
+    (plc_project / "OpcUaSim" / "gui" / "backend.py").write_text("# fixture\n")
+    variable_table = workspace / "plc.csv"
+    variable_table.write_text("变量名,数据类型\n")
+    paths.environment.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "plcSimulatorProjectPath": str(plc_project),
+                "plcVariableTablePath": str(variable_table),
+                "plcHandshakeProfile": "szlab",
+                "plcHandshakeWorkflow": "s_z_lab_单样品全流程_物料感知",
+            }
+        )
+    )
+
+    plan = resolve_plc_launch(paths)
+
+    assert plan.metadata["handshakeProfile"] == "szlab"
+    assert plan.metadata["handshakeWorkflow"] == "s_z_lab_单样品全流程_物料感知"
 
 
 def test_operation_is_recoverable_idempotent_and_audited(
@@ -156,6 +228,51 @@ def test_os_restart_and_local_reset_state_are_distinct_commands(
     audit = paths.audit.read_text(encoding="utf-8")
     assert '"command":"os.restart"' in audit
     assert '"command":"local.reset-state"' in audit
+    host.close()
+
+
+def test_local_reset_state_clears_edge_work_but_preserves_identity(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    state_path = paths.runtime / "edge" / "edge_control.db"
+    store = EdgeControlStore(str(state_path))
+    instance_uuid = store.get_or_create_instance_uuid()
+    command_uuid = "50000000-0000-4000-8000-000000000201"
+    job_uuid = "50000000-0000-4000-8000-000000000202"
+    store.record_command(
+        {
+            "message_uuid": command_uuid,
+            "sequence": 1,
+            "type": "job.start",
+            "payload": {"job_uuid": job_uuid},
+        }
+    )
+    store.save_job_start(
+        {
+            "job_uuid": job_uuid,
+            "task_uuid": "50000000-0000-4000-8000-000000000203",
+            "node_uuid": "50000000-0000-4000-8000-000000000204",
+            "job_access_token": "workspace-reset-token",
+        },
+        command_uuid,
+    )
+    store.close()
+
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    stopped: list[str] = []
+    host._stop_component = lambda name: stopped.append(name) or {}  # type: ignore[method-assign]
+    host._start_backend = lambda parameters: {"parameters": parameters}  # type: ignore[method-assign]
+
+    result = host._dispatch("local.reset-state", {"runtimeMode": "normal"})
+
+    assert result == {"parameters": {"runtimeMode": "normal"}}
+    assert stopped == ["edge", "backend"]
+    reopened = EdgeControlStore(str(state_path))
+    assert reopened.get_or_create_instance_uuid() == instance_uuid
+    assert reopened.get_job(job_uuid) is None
+    reopened.close()
     host.close()
 
 
