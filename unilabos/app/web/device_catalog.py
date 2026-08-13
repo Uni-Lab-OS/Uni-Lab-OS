@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import re
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -25,6 +26,8 @@ _JSON_TYPES = {
     "str": "string",
     "string": "string",
 }
+_DEFINITION_FQID = re.compile(r"^community\.[a-z_][a-z0-9_]*\.[A-Za-z0-9_]+$")
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def project_device_catalog(
@@ -71,6 +74,7 @@ def project_device_catalog(
             {
                 "id": device_id,
                 "materialUuid": material_uuid,
+                "definition": _definition_reference(definition, device_type_id),
                 "deviceTypeId": device_type_id,
                 "deviceKey": str(
                     online_fact.get("device_key")
@@ -86,7 +90,7 @@ def project_device_catalog(
             }
         )
     return {
-        "schemaVersion": "device-catalog/v1",
+        "schemaVersion": "device-catalog/v2",
         "source": "edge",
         "generatedAt": time.time() if generated_at is None else generated_at,
         "items": sorted(items, key=lambda item: item["id"]),
@@ -94,7 +98,12 @@ def project_device_catalog(
 
 
 def _resource_nodes(resources: Any) -> list[dict[str, Any]]:
-    """把资源树节点安全转换为普通字典。"""
+    """把资源树节点安全转换为普通字典。
+
+    参数：``resources`` 是 Host 资源树组合根。
+    返回：可被目录投影消费的节点字典副本。
+    异常：无；不符合资源节点协议的成员被忽略。
+    """
 
     nodes = getattr(resources, "all_nodes", None)
     if not isinstance(nodes, list):
@@ -112,22 +121,47 @@ def _resource_nodes(resources: Any) -> list[dict[str, Any]]:
 
 
 def _device_class(definition: Mapping[str, Any]) -> Mapping[str, Any]:
+    """读取注册表设备实现合同。
+
+    参数：``definition`` 是注册表设备定义条目。
+    返回：class 合同映射，缺失或类型错误时返回空映射。
+    异常：无。
+    """
+
     value = definition.get("class")
     return value if isinstance(value, Mapping) else {}
 
 
 def _state_schema(definition: Mapping[str, Any]) -> dict[str, Any]:
+    """投影设备 Driver 正式状态合同。
+
+    参数：``definition`` 是注册表设备定义条目。
+    返回：带来源和解析状态的前端状态 Schema。
+    异常：无；没有正式状态声明时返回空字典。
+    """
+
     values = _device_class(definition).get("status_types")
     if not isinstance(values, Mapping):
         return {}
     return {
-        str(name): {"type": _json_type(value)}
+        str(name): {
+            "type": _json_type(value),
+            "source": "driver",
+            "status": "resolved",
+        }
         for name, value in values.items()
         if str(name)
     }
 
 
 def _json_type(value: Any) -> str:
+    """把 Python 或 ROS 类型名映射为 JSON Schema 类型。
+
+    参数：``value`` 是类型对象或静态类型名。
+    返回：受支持的 JSON 类型；未知类型安全降级为 string。
+    异常：无。
+    """
+
     name = str(getattr(value, "__name__", value)).strip().lower()
     return _JSON_TYPES.get(name, "string")
 
@@ -136,6 +170,13 @@ def _actions(
     device_id: str,
     definition: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    """投影当前设备定义的公开动作合同。
+
+    参数：``device_id`` 是 Graph 实例身份；``definition`` 是注册表设备定义。
+    返回：过滤内部命令后的稳定动作合同列表。
+    异常：无；缺少正式动作映射时返回空列表。
+    """
+
     mappings = _device_class(definition).get("action_value_mappings")
     if not isinstance(mappings, Mapping):
         return []
@@ -173,7 +214,87 @@ def _actions(
 
 
 def _contract(value: Any) -> dict[str, Any]:
+    """复制一个动作输入或输出 JSON Schema。
+
+    参数：``value`` 是注册表动作合同值。
+    返回：普通字典副本；非映射返回空合同。
+    异常：无。
+    """
+
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _definition_reference(
+    registry_entry: Mapping[str, Any],
+    device_type_id: str,
+) -> dict[str, Any] | None:
+    """把注册表包证据投影为 Core #147 设备定义引用。
+
+    参数：``registry_entry`` 是 PackageCatalog 发布的设备定义条目；
+    ``device_type_id`` 是物理图（Graph）当前实例声明的定义 FQID。
+    返回：身份和摘要自洽的前端定义引用；遗留或不完整条目返回 ``None``。
+    异常：无；边界数据错误时关闭式隐藏定义，禁止猜测软件包来源。
+    """
+
+    raw_definition = registry_entry.get("package_definition")
+    raw_catalog = registry_entry.get("package_catalog")
+    if not isinstance(raw_definition, Mapping) or not isinstance(
+        raw_catalog,
+        Mapping,
+    ):
+        return None
+    fqid = str(raw_definition.get("fqid") or "")
+    namespace = str(raw_catalog.get("namespace") or "")
+    import_package = str(raw_catalog.get("import_package") or "")
+    content_hash = str(raw_definition.get("content_hash") or "")
+    content_digest = str(raw_catalog.get("content_digest") or "")
+    catalog_digest = str(raw_catalog.get("catalog_digest") or "")
+    distribution = raw_catalog.get("distribution")
+    if (
+        fqid != device_type_id
+        or not _DEFINITION_FQID.fullmatch(fqid)
+        or namespace != f"community.{import_package}"
+        or not fqid.startswith(f"{namespace}.")
+        or not _DIGEST.fullmatch(content_hash)
+        or not _DIGEST.fullmatch(content_digest)
+        or not _DIGEST.fullmatch(catalog_digest)
+        or not isinstance(distribution, Mapping)
+    ):
+        return None
+    normalized_name = str(distribution.get("normalized_name") or "")
+    if normalized_name != import_package:
+        return None
+    metadata = registry_entry.get("metadata")
+    metadata_value = metadata if isinstance(metadata, Mapping) else {}
+    category = registry_entry.get("category")
+    category_value = category if isinstance(category, (list, tuple)) else ()
+    return {
+        "fqid": fqid,
+        "version": str(raw_definition.get("version") or ""),
+        "contentHash": content_hash,
+        "sourceIdentity": str(raw_definition.get("source_identity") or ""),
+        "title": str(raw_definition.get("title") or fqid),
+        "description": str(raw_definition.get("description") or ""),
+        "category": [str(item) for item in category_value],
+        "manufacturer": str(
+            registry_entry.get("manufacturer")
+            or metadata_value.get("manufacturer")
+            or metadata_value.get("vendor")
+            or ""
+        ),
+        "packageCatalog": {
+            "schemaVersion": str(raw_catalog.get("schema_version") or ""),
+            "distribution": {
+                "name": str(distribution.get("name") or ""),
+                "normalizedName": normalized_name,
+                "version": str(distribution.get("version") or ""),
+            },
+            "importPackage": import_package,
+            "namespace": namespace,
+            "contentDigest": content_digest,
+            "catalogDigest": catalog_digest,
+        },
+    }
 
 
 __all__ = ["DeviceMaterialIdentityResolver", "project_device_catalog"]

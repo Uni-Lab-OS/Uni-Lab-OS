@@ -392,6 +392,27 @@ def test_publish_preserves_builtins_and_registers_the_complete_package(
         "community.complete_publish_lab.plate",
     }
     assert registry.device_type_registry["host_node"] == {"source": "builtin"}
+    # 包托管定义携带完整目录来源，供设备目录按 Core #147 原样投影。
+    published = registry.device_type_registry[
+        "community.complete_publish_lab.reactor"
+    ]
+    assert published["package_definition"] == {
+        "content_hash": snapshot.resolve(
+            "device",
+            "community.complete_publish_lab.reactor",
+        ).content_hash,
+        "description": "",
+        "fqid": "community.complete_publish_lab.reactor",
+        "source_identity": "complete_publish_lab.definitions:DeviceReactor",
+        "title": "reactor",
+        "version": "1.0.0",
+    }
+    assert published["package_catalog"]["namespace"] == (
+        "community.complete_publish_lab"
+    )
+    assert published["package_catalog"]["distribution"]["normalized_name"] == (
+        "complete_publish_lab"
+    )
 
 
 def test_publish_failure_leaves_both_registry_collections_unchanged(

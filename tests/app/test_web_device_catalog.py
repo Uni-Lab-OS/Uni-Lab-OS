@@ -58,6 +58,28 @@ def test_project_device_catalog_joins_resource_online_and_registry_facts() -> No
         {
             "id": "community.lab.pump",
             "displayname": "泵类型",
+            "category": ["pump"],
+            "manufacturer": "Uni-Lab",
+            "package_definition": {
+                "fqid": "community.lab.pump",
+                "version": "1.2.0",
+                "content_hash": f"sha256:{'1' * 64}",
+                "source_identity": "lab.devices.pump:Pump",
+                "title": "泵类型",
+                "description": "可编程泵",
+            },
+            "package_catalog": {
+                "schema_version": "1",
+                "distribution": {
+                    "name": "lab-devices",
+                    "normalized_name": "lab",
+                    "version": "0.4.0",
+                },
+                "import_package": "lab",
+                "namespace": "community.lab",
+                "content_digest": f"sha256:{'2' * 64}",
+                "catalog_digest": f"sha256:{'3' * 64}",
+            },
             "class": {
                 "status_types": {"pressure": "float"},
                 "action_value_mappings": {
@@ -106,19 +128,47 @@ def test_project_device_catalog_joins_resource_online_and_registry_facts() -> No
     )
 
     assert result == {
-        "schemaVersion": "device-catalog/v1",
+        "schemaVersion": "device-catalog/v2",
         "source": "edge",
         "generatedAt": 123.0,
         "items": [
             {
                 "id": "pump-1",
                 "materialUuid": "30000000-0000-4000-8000-000000000001",
+                "definition": {
+                    "fqid": "community.lab.pump",
+                    "version": "1.2.0",
+                    "contentHash": f"sha256:{'1' * 64}",
+                    "sourceIdentity": "lab.devices.pump:Pump",
+                    "title": "泵类型",
+                    "description": "可编程泵",
+                    "category": ["pump"],
+                    "manufacturer": "Uni-Lab",
+                    "packageCatalog": {
+                        "schemaVersion": "1",
+                        "distribution": {
+                            "name": "lab-devices",
+                            "normalizedName": "lab",
+                            "version": "0.4.0",
+                        },
+                        "importPackage": "lab",
+                        "namespace": "community.lab",
+                        "contentDigest": f"sha256:{'2' * 64}",
+                        "catalogDigest": f"sha256:{'3' * 64}",
+                    },
+                },
                 "deviceTypeId": "community.lab.pump",
                 "deviceKey": "/devices/pump-1/pump-1",
                 "namespace": "/devices/pump-1",
                 "name": "一号泵",
                 "online": True,
-                "stateSchema": {"pressure": {"type": "number"}},
+                "stateSchema": {
+                    "pressure": {
+                        "type": "number",
+                        "source": "driver",
+                        "status": "resolved",
+                    }
+                },
                 "actions": [
                     {
                         "id": "dose",
@@ -141,6 +191,40 @@ def test_project_device_catalog_joins_resource_online_and_registry_facts() -> No
             }
         ],
     }
+
+
+def test_project_device_catalog_fails_closed_without_package_evidence() -> None:
+    """遗留或身份不一致的注册表条目不能伪装为领域设备包定义。
+
+    参数：无。返回：无；断言设备管理信息仍可用，但 ``definition`` 明确为空。
+    异常：目录投影异常原样传播。
+    """
+
+    resources = SimpleNamespace(
+        all_nodes=[
+            SimpleNamespace(
+                res_content=_Content(
+                    {
+                        "id": "legacy-1",
+                        "name": "遗留设备",
+                        "type": "device",
+                        "class": "legacy_driver",
+                    }
+                )
+            )
+        ]
+    )
+
+    result = project_device_catalog(
+        resources=resources,
+        registry_devices=[{"id": "legacy_driver", "class": {}}],
+        online_devices={},
+        material_identity_resolver=lambda _device_id: None,
+        generated_at=1.0,
+    )
+
+    assert result["items"][0]["deviceTypeId"] == "legacy_driver"
+    assert result["items"][0]["definition"] is None
 
 
 def test_device_route_reads_stable_material_identity_from_inventory(

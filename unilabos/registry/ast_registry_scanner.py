@@ -396,7 +396,10 @@ def _parse_file(
 
                 _validate_device_ids(device_ids)
                 id_meta = device_args.get("id_meta") or {}
-                displayname = device_args.get("displayname", "")
+                displayname = (
+                    device_args.get("displayname")
+                    or device_args.get("display_name", "")
+                )
                 base_meta = {
                     "class_name": node.name,
                     "module": f"{module_path}:{node.name}",
@@ -404,6 +407,7 @@ def _parse_file(
                     "category": device_args.get("category", []),
                     "description": device_args.get("description", ""),
                     "displayname": displayname,
+                    "manufacturer": device_args.get("manufacturer", ""),
                     "icon": device_args.get("icon", ""),
                     "version": device_args.get("version", "1.0.0"),
                     "device_type": _detect_class_type(node, import_map),
@@ -422,10 +426,16 @@ def _parse_file(
                     meta = dict(base_meta)
                     meta["device_id"] = did
                     overrides = id_meta.get(did, {})
+                    if "display_name" in overrides and "displayname" not in overrides:
+                        overrides = {
+                            **overrides,
+                            "displayname": overrides["display_name"],
+                        }
                     for key in (
                         "handles",
                         "description",
                         "displayname",
+                        "manufacturer",
                         "icon",
                         "model",
                         "hardware_interface",

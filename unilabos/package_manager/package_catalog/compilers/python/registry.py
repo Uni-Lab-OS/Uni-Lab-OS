@@ -320,6 +320,7 @@ def _static_device_entry(
         },
         "description": metadata.get("description", ""),
         "displayname": metadata.get("displayname") or definition_id,
+        "manufacturer": metadata.get("manufacturer") or "",
         "handles": metadata.get("handles", []),
         "icon": metadata.get("icon", ""),
         "legacy_auto_methods": metadata.get("auto_methods", {}),

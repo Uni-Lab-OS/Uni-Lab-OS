@@ -259,6 +259,7 @@ def device(
     device_type: str = "python",
     hardware_interface: Optional[HardwareInterface] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    manufacturer: str = "",
 ):
     """
     设备类装饰器
@@ -284,6 +285,7 @@ def device(
         device_type: 设备实现类型 ("python" / "ros2")
         hardware_interface: 硬件通信接口 (HardwareInterface)
         metadata: 设备扩展元数据，如供应商、规格、容量、孔位数等
+        manufacturer: 设备制造商展示信息，不参与规范定义身份
     """
     # Resolve device ids
     if ids is not None:
@@ -312,6 +314,7 @@ def device(
         "category": category,
         "description": description,
         "displayname": resolved_display_name,
+        "manufacturer": manufacturer,
         "icon": icon,
         "version": version,
         "handles": _device_handles_to_list(handles),

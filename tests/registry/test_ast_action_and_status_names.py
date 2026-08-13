@@ -1,4 +1,5 @@
 import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 from unilabos.registry.ast_registry_scanner import (
@@ -31,6 +32,39 @@ def _extract(source: str) -> dict:
         node for node in tree.body if isinstance(node, ast.ClassDef)
     )
     return _extract_class_body(class_node, _collect_imports(tree))
+
+
+def test_device_scanner_accepts_display_name_and_manufacturer(
+    tmp_path: Path,
+) -> None:
+    """设备 AST 扫描器保留兼容显示名与制造商展示元数据。
+
+    参数：``tmp_path`` 提供不导入作者模块的隔离源码文件。返回：无；断言
+    ``display_name`` 不退化为定义 ID，制造商进入静态目录输入。异常：扫描错误
+    原样传播。
+    """
+
+    source = tmp_path / "robot.py"
+    source.write_text(
+        '''
+from unilabos.registry.decorators import device
+
+@device(
+    id="robot",
+    category=["robot"],
+    display_name="协作机器人",
+    manufacturer="SZLab",
+)
+class Robot:
+    pass
+''',
+        encoding="utf-8",
+    )
+
+    devices, _resources = _parse_file(source, tmp_path)
+
+    assert devices[0]["displayname"] == "协作机器人"
+    assert devices[0]["manufacturer"] == "SZLab"
 
 
 def test_action_decorator_records_public_action_name():

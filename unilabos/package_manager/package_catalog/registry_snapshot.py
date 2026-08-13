@@ -444,10 +444,8 @@ def _merge_registry_definitions(
     异常：软件包身份与未托管内置身份冲突时抛出 ``RegistrySnapshotError``。
     """
 
-    # ``catalog_digests`` 允许每个定义携带其来源目录的稳定证据。
-    catalog_digests = {
-        catalog.namespace: catalog.catalog_digest for catalog in catalogs
-    }
+    # ``catalogs_by_namespace`` 允许每个定义携带完整且来源中立的目录证据。
+    catalogs_by_namespace = {catalog.namespace: catalog for catalog in catalogs}
     # ``candidate`` 是尚未发布的完整注册表候选，先剔除上一代包托管成员。
     candidate = {
         key: copy.deepcopy(value)
@@ -473,9 +471,25 @@ def _merge_registry_definitions(
         entry["source_fqid"] = f"{definition.module}:{definition.symbol}"
         entry["package_definition_fqid"] = definition.fqid
         entry["content_hash"] = definition.content_hash
-        entry["package_catalog_digest"] = catalog_digests[
-            definition.fqid.rsplit(".", 1)[0]
-        ]
+        # ``catalog`` 是定义所属的权威包目录；不能由安装路径或 Graph 反推来源。
+        catalog = catalogs_by_namespace[definition.fqid.rsplit(".", 1)[0]]
+        entry["package_catalog_digest"] = catalog.catalog_digest
+        entry["package_definition"] = {
+            "content_hash": definition.content_hash,
+            "description": definition.description,
+            "fqid": definition.fqid,
+            "source_identity": f"{definition.module}:{definition.symbol}",
+            "title": definition.title,
+            "version": definition.version,
+        }
+        entry["package_catalog"] = {
+            "catalog_digest": catalog.catalog_digest,
+            "content_digest": catalog.content_digest,
+            "distribution": catalog.distribution.to_dict(),
+            "import_package": catalog.import_package,
+            "namespace": catalog.namespace,
+            "schema_version": catalog.schema_version,
+        }
         candidate[definition.fqid] = entry
     return candidate
 
