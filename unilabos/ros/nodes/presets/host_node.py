@@ -1182,6 +1182,52 @@ class HostNode(BaseROS2DeviceNode):
         )
         future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
 
+    def resolve_unknown_device_command(
+        self,
+        device_id: str,
+        device_command_id: str,
+        resolution_command_uuid: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        """通过设备驱动的运维接口原子处理一条持久 UNKNOWN 命令。"""
+
+        driver = self._device_driver(device_id)
+        resolver = getattr(driver, "resolve_unknown_command", None)
+        if not callable(resolver):
+            raise ValueError(f"设备 {device_id} 不支持 UNKNOWN 命令人工对账")
+        result = resolver(
+            device_command_id,
+            resolution_command_uuid=resolution_command_uuid,
+            reason=reason,
+        )
+        if not isinstance(result, dict):
+            raise TypeError(f"设备 {device_id} 返回了无效的 UNKNOWN 对账结果")
+        return result
+
+    def device_dispatch_block_reason(self, device_id: str) -> str:
+        """读取设备驱动声明的生产派发阻断原因；空字符串表示可派发。"""
+
+        driver = self._device_driver(device_id)
+        reader = getattr(driver, "dispatch_block_reason", None)
+        if not callable(reader):
+            return ""
+        return str(reader() or "").strip()
+
+    def device_unknown_command_ids(self, device_id: str) -> List[str]:
+        """读取设备驱动声明的结构化 UNKNOWN 命令身份。"""
+
+        reader = getattr(self._device_driver(device_id), "unknown_command_ids", None)
+        if not callable(reader):
+            return []
+        return [str(command_id).strip() for command_id in reader() if str(command_id).strip()]
+
+    def _device_driver(self, device_id: str) -> Any:
+        """隐藏 HostNode 设备包装器的内部导航并返回底层驱动实例。"""
+
+        wrapper = self.devices_instances.get(device_id)
+        target_node = getattr(wrapper, "_ros_node", None) if wrapper is not None else None
+        return getattr(target_node, "driver_instance", None)
+
     def _build_simulated_action_return(
         self, device_id: str, action_name: str, action_kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:

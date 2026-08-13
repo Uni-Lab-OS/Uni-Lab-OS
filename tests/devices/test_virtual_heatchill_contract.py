@@ -82,6 +82,7 @@ def test_native_action_failure_is_not_confused_with_json_command_boolean_data() 
 
     assert _native_driver_result_failed("heat_chill", HeatChill, False)
     assert _native_driver_result_failed("set_position", HeatChill, {"success": False})
+    assert _native_driver_result_failed("pick", UniLabJsonCommand, {"success": False, "state": "REJECTED"})
     assert not _native_driver_result_failed("heat_chill", HeatChill, {"success": True})
     assert not _native_driver_result_failed("auto-is_empty", UniLabJsonCommand, False)
     assert not _native_driver_result_failed("_execute_driver_command", HeatChill, False)

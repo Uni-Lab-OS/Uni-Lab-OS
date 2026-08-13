@@ -181,16 +181,18 @@ def _is_resource_slot_arg_type(arg_type: Any) -> bool:
 def _native_driver_result_failed(
     action_name: str, action_type: Any, value: Any
 ) -> bool:
-    """原生 ROS Action 的 bool/dict success 是业务成功位；JSON Command 可返回 bool 数据。"""
+    """动作返回对象的 success 是业务成功位；JSON Command 的裸 bool 仍可作为普通数据。"""
 
     type_name = str(getattr(action_type, "__name__", ""))
-    if action_name.startswith("_execute_driver_command") or type_name.startswith(
-        "UniLabJsonCommand"
-    ):
+    if action_name.startswith("_execute_driver_command"):
+        return False
+    if isinstance(value, dict) and value.get("success") is False:
+        return True
+    if type_name.startswith("UniLabJsonCommand"):
         return False
     if value is False:
         return True
-    return isinstance(value, dict) and value.get("success") is False
+    return False
 
 
 class RclpyAsyncMutex:

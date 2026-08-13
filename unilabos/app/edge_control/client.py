@@ -49,6 +49,26 @@ _CONTROL_ACTION_ARGUMENTS = frozenset(
 )
 
 
+def _device_dispatch_state(host_node: Any, device_id: str) -> tuple[str, List[str]]:
+    """读取设备阻断展示文案和结构化 UNKNOWN 命令身份。"""
+
+    if host_node is None or not device_id:
+        return "", []
+    block_reason_reader = getattr(host_node, "device_dispatch_block_reason", None)
+    block_reason = (
+        str(block_reason_reader(device_id) or "").strip()
+        if callable(block_reason_reader)
+        else ""
+    )
+    command_ids_reader = getattr(host_node, "device_unknown_command_ids", None)
+    command_ids = (
+        [str(command_id).strip() for command_id in command_ids_reader(device_id) if str(command_id).strip()]
+        if callable(command_ids_reader)
+        else []
+    )
+    return block_reason, command_ids
+
+
 @dataclass(frozen=True)
 class EdgeControlSettings:
     scheduler_address: str
@@ -220,6 +240,7 @@ class EdgeControlClient(BaseCommunicationClient):
                 status,
                 copy.deepcopy(feedback_data or {}),
                 copy.deepcopy(return_info),
+                str(getattr(item, "device_id", "") or ""),
             ):
                 return
             self._schedule(self._commit_pending_outcome(job_uuid))
@@ -354,11 +375,13 @@ class EdgeControlClient(BaseCommunicationClient):
             actions = project_device_action_capabilities(
                 action_mappings_by_device.get(candidate["local_id"], {})
             )
+            _, unknown_command_ids = _device_dispatch_state(host_node, candidate["local_id"])
             devices.append(
                 {
                     **candidate,
                     "material_uuid": material_uuids[candidate["barcode"]],
                     "actions": actions,
+                    "unknown_command_ids": unknown_command_ids,
                 }
             )
         return devices
@@ -464,6 +487,7 @@ class EdgeControlClient(BaseCommunicationClient):
         if message_type not in {
             "job.start",
             "job.cancel",
+            "job.resolve_unknown",
             "material.changed",
         }:
             raise ValueError(f"unsupported Edge command {message_type!r}")
@@ -480,11 +504,21 @@ class EdgeControlClient(BaseCommunicationClient):
                 "edge.command.sequence": int(envelope.get("sequence") or 0),
             },
         ):
-            self.store.record_command(envelope)
+            inserted = self.store.record_command(envelope)
+            if (
+                message_type == "job.resolve_unknown"
+                and not inserted
+                and self.store.command_status(command_uuid) == "completed"
+            ):
+                return
             if message_type == "job.start":
                 await self._accept_job_start(command_uuid, payload, command_trace)
             elif message_type == "job.cancel":
                 await self._accept_job_cancel(command_uuid, payload, command_trace)
+            elif message_type == "job.resolve_unknown":
+                await self._accept_unknown_resolution(
+                    command_uuid, payload, command_trace
+                )
             else:
                 self._accept_material_changed(command_uuid, payload, command_trace)
 
@@ -589,6 +623,68 @@ class EdgeControlClient(BaseCommunicationClient):
                 {},
                 {"message": "Job canceled before a running ROS goal was found"},
             )
+
+    async def _accept_unknown_resolution(
+        self,
+        command_uuid: str,
+        payload: Dict[str, Any],
+        command_trace: Dict[str, str],
+    ) -> None:
+        expected_fields = {
+            "job_uuid",
+            "local_device_id",
+            "device_command_id",
+            "resolution",
+            "reason",
+        }
+        if set(payload) != expected_fields:
+            raise ValueError("job.resolve_unknown payload has invalid fields")
+        job_uuid = str(uuid.UUID(str(payload["job_uuid"])))
+        local_device_id = str(payload["local_device_id"] or "").strip()
+        device_command_id = str(payload["device_command_id"] or "").strip()
+        reason = str(payload["reason"] or "").strip()
+        if (
+            not local_device_id
+            or device_command_id != f"workflow-node-job:{job_uuid}"
+            or payload["resolution"] != "canceled"
+            or not reason
+        ):
+            raise ValueError("job.resolve_unknown payload is invalid")
+        host_node = self._host_node_provider()
+        if host_node is None:
+            raise RuntimeError("HostNode is not ready")
+        result = await asyncio.to_thread(
+            host_node.resolve_unknown_device_command,
+            local_device_id,
+            device_command_id,
+            command_uuid,
+            reason,
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("resolution_committed") is not True
+            or result.get("previous_state") != "UNKNOWN"
+            or result.get("state") != "CANCELED"
+            or result.get("resolution_command_uuid") != command_uuid
+        ):
+            raise RuntimeError(
+                f"device rejected UNKNOWN resolution: {result!r}"
+            )
+        self.store.complete_unknown_resolution(
+            command_uuid,
+            {
+                "job_uuid": job_uuid,
+                "command_uuid": command_uuid,
+                "device_command_id": device_command_id,
+                "resolution": "canceled",
+                "previous_state": "UNKNOWN",
+                "current_state": "CANCELED",
+                "dispatch_block_reason": str(
+                    host_node.device_dispatch_block_reason(local_device_id) or ""
+                ).strip(),
+            },
+            _current_trace_carrier(fallback=command_trace),
+        )
 
     async def _resume_received_jobs(self) -> None:
         for job in self.store.list_jobs({"received", "fetch_retry"}):
@@ -734,9 +830,10 @@ class EdgeControlClient(BaseCommunicationClient):
         status: str,
         result_data: Dict[str, Any],
         return_info: Any,
+        device_id: str = "",
     ) -> None:
         if not self._persist_terminal_status(
-            job_uuid, status, result_data, return_info
+            job_uuid, status, result_data, return_info, device_id
         ):
             return
         await self._commit_pending_outcome(job_uuid)
@@ -747,6 +844,7 @@ class EdgeControlClient(BaseCommunicationClient):
         status: str,
         result_data: Dict[str, Any],
         return_info: Any,
+        device_id: str = "",
     ) -> bool:
         job = self.store.get_job(job_uuid)
         if job is None:
@@ -763,8 +861,15 @@ class EdgeControlClient(BaseCommunicationClient):
         error_info: List[Dict[str, Any]] = []
         if outcome != "succeeded":
             error_info.append(_error_info(return_info, outcome))
+        _, unknown_command_ids = _device_dispatch_state(
+            self._host_node_provider(), device_id
+        )
         inserted = self.store.save_pending_outcome(
-            job_uuid, outcome, normalized_return, error_info
+            job_uuid,
+            outcome,
+            normalized_return,
+            error_info,
+            unknown_command_ids,
         )
         return inserted or self.store.get_pending_outcome(job_uuid) is not None
 
@@ -788,6 +893,7 @@ class EdgeControlClient(BaseCommunicationClient):
                         pending.outcome,
                         pending.return_info,
                         pending.error_info,
+                        pending.unknown_command_ids,
                     )
                     result_uuid = str(committed.get("uuid") or "")
                     event_payload: Dict[str, Any] = {"job_uuid": job_uuid}

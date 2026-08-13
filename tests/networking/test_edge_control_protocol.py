@@ -50,6 +50,7 @@ class FakeDataPlane:
         outcome: str,
         return_info: Dict[str, Any],
         error_info: List[Dict[str, Any]],
+        unknown_command_ids: List[str] | None = None,
     ) -> Dict[str, Any]:
         self.outcomes.append(
             {
@@ -57,6 +58,7 @@ class FakeDataPlane:
                 "outcome": outcome,
                 "return_info": return_info,
                 "error_info": error_info,
+                "unknown_command_ids": unknown_command_ids or [],
             }
         )
         return {"uuid": str(uuid.uuid4())}
@@ -65,6 +67,8 @@ class FakeDataPlane:
 class FakeHostNode:
     def __init__(self) -> None:
         self.started: List[Dict[str, Any]] = []
+        self.unknown_resolutions: List[Dict[str, str]] = []
+        self.dispatch_block_reasons: Dict[str, str] = {}
 
     def send_goal(
         self,
@@ -83,6 +87,38 @@ class FakeHostNode:
                 "server_info": server_info,
             }
         )
+
+    def resolve_unknown_device_command(
+        self,
+        device_id: str,
+        device_command_id: str,
+        resolution_command_uuid: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        self.unknown_resolutions.append(
+            {
+                "device_id": device_id,
+                "device_command_id": device_command_id,
+                "resolution_command_uuid": resolution_command_uuid,
+                "reason": reason,
+            }
+        )
+        return {
+            "command_id": device_command_id,
+            "state": "CANCELED",
+            "previous_state": "UNKNOWN",
+            "resolution_committed": True,
+            "resolution_command_uuid": resolution_command_uuid,
+            "message": reason,
+        }
+
+    def device_dispatch_block_reason(self, device_id: str) -> str:
+        return self.dispatch_block_reasons.get(device_id, "")
+
+    def device_unknown_command_ids(self, device_id: str) -> List[str]:
+        reason = self.device_dispatch_block_reason(device_id)
+        prefix = "unresolved_unknown_command:"
+        return reason.removeprefix(prefix).split(",") if reason.startswith(prefix) else []
 
 
 class FakeRegistrationResources:
@@ -109,6 +145,16 @@ class FakeRegistrationHostNode:
                 "place": {"type": "UniLabJsonCommand"},
             }
         }
+
+    def device_dispatch_block_reason(self, device_id: str) -> str:
+        if device_id == "robot-01":
+            return "unresolved_unknown_command:workflow-node-job:old-job"
+        return ""
+
+    def device_unknown_command_ids(self, device_id: str) -> List[str]:
+        if device_id == "robot-01":
+            return ["workflow-node-job:00000000-0000-4000-8000-000000000001"]
+        return []
 
 
 class FakeRegistrationDataPlane:
@@ -190,6 +236,9 @@ def test_registration_reports_logical_actions_instead_of_transport_endpoint(
     assert devices[0]["actions"] == [
         {"name": "pick", "type": "UniLabJsonCommand"},
         {"name": "place", "type": "UniLabJsonCommand"},
+    ]
+    assert devices[0]["unknown_command_ids"] == [
+        "workflow-node-job:00000000-0000-4000-8000-000000000001"
     ]
     client.store.close()
 
@@ -406,6 +455,80 @@ def test_material_changed_is_acknowledged_without_dropping_connection(
     asyncio.run(scenario())
 
 
+def test_unknown_resolution_is_committed_locally_before_edge_ack(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "runtime.db"
+        store = EdgeControlStore(str(path))
+        host_node = FakeHostNode()
+        client = EdgeControlClient(
+            _settings(path), store=store, host_node_provider=lambda: host_node
+        )
+        command_uuid = str(uuid.uuid4())
+        job_uuid = str(uuid.uuid4())
+        await client._handle_envelope(
+            {
+                "protocol_version": 1,
+                "message_uuid": command_uuid,
+                "sequence": 10,
+                "type": "job.resolve_unknown",
+                "sent_at": "2026-08-02T00:00:00.000000Z",
+                "payload": {
+                    "job_uuid": job_uuid,
+                    "local_device_id": "robot-01",
+                    "device_command_id": f"workflow-node-job:{job_uuid}",
+                    "resolution": "canceled",
+                    "reason": "操作员确认 PLC 已复位且设备空闲",
+                },
+            }
+        )
+
+        assert host_node.unknown_resolutions == [
+            {
+                "device_id": "robot-01",
+                "device_command_id": f"workflow-node-job:{job_uuid}",
+                "resolution_command_uuid": command_uuid,
+                "reason": "操作员确认 PLC 已复位且设备空闲",
+            }
+        ]
+        assert store.command_status(command_uuid) == "completed"
+        events = store.pending_events(float("inf"))
+        assert [event.event_type for event in events] == [
+            "job.unknown_resolution_committed",
+            "command.ack",
+        ]
+        assert events[0].payload == {
+            "job_uuid": job_uuid,
+            "command_uuid": command_uuid,
+            "device_command_id": f"workflow-node-job:{job_uuid}",
+            "resolution": "canceled",
+            "previous_state": "UNKNOWN",
+            "current_state": "CANCELED",
+            "dispatch_block_reason": "",
+        }
+        await client._handle_envelope(
+            {
+                "protocol_version": 1,
+                "message_uuid": command_uuid,
+                "sequence": 10,
+                "type": "job.resolve_unknown",
+                "sent_at": "2026-08-02T00:00:00.000000Z",
+                "payload": {
+                    "job_uuid": job_uuid,
+                    "local_device_id": "robot-01",
+                    "device_command_id": f"workflow-node-job:{job_uuid}",
+                    "resolution": "canceled",
+                    "reason": "操作员确认 PLC 已复位且设备空闲",
+                },
+            }
+        )
+        assert len(store.pending_events(float("inf"))) == 2
+        store.close()
+
+    asyncio.run(scenario())
+
+
 def test_http_data_plane_uses_three_uuid_identity() -> None:
     job = StoredJob(
         job_uuid=str(uuid.uuid4()),
@@ -564,16 +687,22 @@ def test_job_start_fetches_http_payload_and_outcome_precedes_notification(
         assert context.trace_context["traceparent"] == traceparent
 
         client.publish_job_started(context)
+        block_reason = f"unresolved_unknown_command:workflow-node-job:{job_uuid}"
+        host_node.dispatch_block_reasons["heater-01"] = block_reason
         await client._commit_terminal_status(
             job_uuid,
-            "success",
+            "failed",
             {"actual_temperature": 37},
-            {"suc": True},
+            {"suc": False, "return_value": {"state": "UNKNOWN"}},
+            "heater-01",
         )
 
         assert len(data_plane.outcomes) == 1
         assert data_plane.outcomes[0]["job"].task_uuid == task_uuid
-        assert data_plane.outcomes[0]["outcome"] == "succeeded"
+        assert data_plane.outcomes[0]["outcome"] == "failed"
+        assert data_plane.outcomes[0]["unknown_command_ids"] == [
+            f"workflow-node-job:{job_uuid}"
+        ]
         events = store.pending_events(float("inf"))
         assert [event.event_type for event in events] == [
             "command.ack",
@@ -599,6 +728,7 @@ def test_terminal_job_token_rejection_retires_pending_outcome(
             outcome: str,
             return_info: Dict[str, Any],
             error_info: List[Dict[str, Any]],
+            unknown_command_ids: List[str] | None = None,
         ) -> Dict[str, Any]:
             self.outcomes.append({"job": job, "outcome": outcome})
             raise EdgeProtocolHTTPError(

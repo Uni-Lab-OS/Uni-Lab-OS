@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
@@ -129,6 +129,7 @@ class EdgeDataPlane:
         outcome: str,
         return_info: Dict[str, Any],
         error_info: List[Dict[str, Any]],
+        unknown_command_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         headers = _job_headers(job)
         headers["Idempotency-Key"] = f"{job.job_uuid}:outcome:v1"
@@ -144,6 +145,7 @@ class EdgeDataPlane:
                 "outcome": outcome,
                 "return_info": return_info,
                 "error_info": error_info,
+                "unknown_command_ids": unknown_command_ids or [],
             },
         )
 

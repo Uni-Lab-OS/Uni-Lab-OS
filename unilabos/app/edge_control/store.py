@@ -46,6 +46,7 @@ class StoredOutcome:
     outcome: str
     return_info: Dict[str, Any]
     error_info: List[Dict[str, Any]]
+    unknown_command_ids: List[str]
 
 
 class EdgeControlStore:
@@ -112,6 +113,7 @@ class EdgeControlStore:
                     outcome TEXT NOT NULL,
                     return_info_json TEXT NOT NULL,
                     error_info_json TEXT NOT NULL,
+                    unknown_command_ids_json TEXT NOT NULL DEFAULT '[]',
                     updated_at REAL NOT NULL
                 );
                 """
@@ -128,6 +130,11 @@ class EdgeControlStore:
             )
             self._ensure_column(
                 "edge_job_runtime", "tracestate", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                "edge_job_outcome_pending",
+                "unknown_command_ids_json",
+                "TEXT NOT NULL DEFAULT '[]'",
             )
             # Pong only answers a ping from the current WebSocket session. Older
             # versions persisted it as a durable business event, which allowed a
@@ -224,6 +231,49 @@ class EdgeControlStore:
                 (command_uuid,),
             )
             self._connection.commit()
+
+    def complete_unknown_resolution(
+        self,
+        command_uuid: str,
+        resolution_payload: Dict[str, Any],
+        trace_context: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """原子持久化 UNKNOWN 处置回执、通用 ACK 和命令完成状态。"""
+
+        trace_context = trace_context or {}
+        created_at = _utc_now()
+        events = (
+            ("job.unknown_resolution_committed", resolution_payload),
+            ("command.ack", {"command_uuid": command_uuid}),
+        )
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                for event_type, payload in events:
+                    self._connection.execute(
+                        """
+                        INSERT INTO edge_event_outbox(
+                            event_uuid, type, payload_json, created_at,
+                            traceparent, tracestate
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            event_type,
+                            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                            created_at,
+                            str(trace_context.get("traceparent") or ""),
+                            str(trace_context.get("tracestate") or ""),
+                        ),
+                    )
+                self._connection.execute(
+                    "UPDATE edge_command SET status = 'completed' WHERE command_uuid = ?",
+                    (command_uuid,),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
 
     def last_ack_command_sequence(self) -> int:
         with self._lock:
@@ -432,6 +482,7 @@ class EdgeControlStore:
         outcome: str,
         return_info: Dict[str, Any],
         error_info: List[Dict[str, Any]],
+        unknown_command_ids: Optional[List[str]] = None,
     ) -> bool:
         """原子保存待提交终态，重复设备回调以第一次终态为准。"""
 
@@ -440,14 +491,16 @@ class EdgeControlStore:
             cursor = self._connection.execute(
                 """
                 INSERT OR IGNORE INTO edge_job_outcome_pending(
-                    job_uuid, outcome, return_info_json, error_info_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    job_uuid, outcome, return_info_json, error_info_json,
+                    unknown_command_ids_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_uuid,
                     outcome,
                     json.dumps(return_info, ensure_ascii=False, separators=(",", ":")),
                     json.dumps(error_info, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(unknown_command_ids or [], ensure_ascii=False, separators=(",", ":")),
                     time.time(),
                 ),
             )
@@ -467,7 +520,8 @@ class EdgeControlStore:
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT job_uuid, outcome, return_info_json, error_info_json
+                SELECT job_uuid, outcome, return_info_json, error_info_json,
+                       unknown_command_ids_json
                 FROM edge_job_outcome_pending WHERE job_uuid = ?
                 """,
                 (job_uuid,),
@@ -478,7 +532,8 @@ class EdgeControlStore:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT job_uuid, outcome, return_info_json, error_info_json
+                SELECT job_uuid, outcome, return_info_json, error_info_json,
+                       unknown_command_ids_json
                 FROM edge_job_outcome_pending ORDER BY updated_at
                 """
             ).fetchall()
@@ -597,6 +652,7 @@ def _stored_outcome(row: sqlite3.Row) -> StoredOutcome:
         outcome=str(row["outcome"]),
         return_info=json.loads(str(row["return_info_json"])),
         error_info=json.loads(str(row["error_info_json"])),
+        unknown_command_ids=json.loads(str(row["unknown_command_ids_json"])),
     )
 
 
