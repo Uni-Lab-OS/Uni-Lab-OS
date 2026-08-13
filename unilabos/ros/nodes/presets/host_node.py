@@ -1195,12 +1195,26 @@ class HostNode(BaseROS2DeviceNode):
         resolution_command_uuid: str,
         reason: str,
     ) -> Dict[str, Any]:
-        """通过设备驱动的运维接口原子处理一条持久 UNKNOWN 命令。"""
+        """处理 Backend UNKNOWN；durable 驱动优先提交其本地命令日志。"""
 
         driver = self._device_driver(device_id)
+        if driver is None:
+            raise ValueError(f"设备 {device_id} 不存在或驱动尚未就绪，拒绝 UNKNOWN 命令人工对账")
         resolver = getattr(driver, "resolve_unknown_command", None)
         if not callable(resolver):
-            raise ValueError(f"设备 {device_id} 不支持 UNKNOWN 命令人工对账")
+            dispatch_block_reason = self.device_dispatch_block_reason(device_id)
+            unknown_command_ids = self.device_unknown_command_ids(device_id)
+            if dispatch_block_reason or unknown_command_ids:
+                raise ValueError(f"设备 {device_id} 不支持 UNKNOWN 命令人工对账")
+            return {
+                "command_id": device_command_id,
+                "state": "CANCELED",
+                "previous_state": "UNKNOWN",
+                "resolution_committed": True,
+                "resolution_command_uuid": resolution_command_uuid,
+                "message": reason,
+                "durable_journal": False,
+            }
         result = resolver(
             device_command_id,
             resolution_command_uuid=resolution_command_uuid,
