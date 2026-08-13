@@ -166,9 +166,9 @@ def _with_implicit_host_executor(
 def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     """建立注册表别名到资源模板业务 ID 的唯一映射。
 
-    参数：``snapshot`` 是单代注册表快照。返回：业务 ID、全代唯一源码身份、
-    全代唯一实现类身份与全代唯一社区包短 ID 的映射；歧义别名不会进入返回值。
-    异常：业务身份为空或业务 ID 本身冲突时抛出
+    参数：``snapshot`` 是单代注册表快照。返回：业务 ID、显式资源源码身份及全代唯一
+    设备源码身份、实现类身份与社区包短 ID 的映射；歧义便利别名不会进入返回值。
+    异常：业务身份为空，或业务 ID/显式资源源码身份相互冲突时抛出
     ``ResourceGraphBootstrapError``。
     """
 
@@ -176,30 +176,42 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     aliases: dict[str, str] = {}
     # 工厂注册和多 ID 装饰器会合法共享 ``source_fqid`` 与 Python 实现类；二者
     # 都只能在证明全代唯一后作为便利别名。
-    source_owners: dict[str, set[str]] = {}
-    class_owners: dict[str, set[str]] = {}
+    implementation_owners: dict[str, set[str]] = {}
     package_short_owners: dict[str, set[str]] = {}
     for definition in snapshot.detached_definitions():
         template_name = str(definition.get("id") or "").strip()
         class_definition = definition.get("class")
+        registry_type = definition.get("registry_type")
+        source_fqid = definition.get("source_fqid")
         if not template_name:
             raise ResourceGraphBootstrapError("资源模板业务 ID 不能为空")
-        previous = aliases.get(template_name)
-        if previous is not None and previous != template_name:
-            raise ResourceGraphBootstrapError(
-                f"资源模板别名不唯一: {template_name}"
-            )
-        aliases[template_name] = template_name
-        source_fqid = definition.get("source_fqid")
-        if isinstance(source_fqid, str) and source_fqid.strip():
-            source_owners.setdefault(source_fqid.strip(), set()).add(template_name)
+        # 业务 ID 与资源模板 ``source_fqid`` 是作者明确选择的一一身份；设备
+        # PackageCatalog 的 ``source_fqid`` 则是工厂入口或可被多 ID 装饰器复用的
+        # 实现身份，只有在本代唯一时才可作为便利别名。
+        explicit_source_fqid = source_fqid if registry_type == "resource" else None
+        for candidate in (template_name, explicit_source_fqid):
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue
+            alias = candidate.strip()
+            previous = aliases.get(alias)
+            if previous is not None and previous != template_name:
+                raise ResourceGraphBootstrapError(f"资源模板别名不唯一: {alias}")
+            aliases[alias] = template_name
+        if registry_type == "device" and isinstance(source_fqid, str):
+            source_alias = source_fqid.strip()
+            if source_alias:
+                implementation_owners.setdefault(source_alias, set()).add(
+                    template_name
+                )
         class_module = (
             class_definition.get("module")
             if isinstance(class_definition, Mapping)
             else None
         )
         if isinstance(class_module, str) and class_module.strip():
-            class_owners.setdefault(class_module.strip(), set()).add(template_name)
+            implementation_owners.setdefault(class_module.strip(), set()).add(
+                template_name
+            )
         if template_name.startswith("community."):
             package_short_owners.setdefault(
                 template_name.rsplit(".", 1)[-1], set()
@@ -207,12 +219,12 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     for short_alias, owners in package_short_owners.items():
         if len(owners) == 1 and short_alias not in aliases:
             aliases[short_alias] = next(iter(owners))
-    for convenience_owners in (source_owners, class_owners):
-        for convenience_alias, owners in convenience_owners.items():
-            # 共享源码/实现类没有唯一业务语义；保留业务 ID，丢弃便利别名。
-            if len(owners) != 1 or convenience_alias in aliases:
-                continue
-            aliases[convenience_alias] = next(iter(owners))
+    for convenience_alias, owners in implementation_owners.items():
+        # 设备工厂入口与返回类都属于实现身份，必须合并所有者再判断全代唯一；
+        # 共享或交叉碰撞没有唯一业务语义，只保留业务 ID，丢弃便利别名。
+        if len(owners) != 1 or convenience_alias in aliases:
+            continue
+        aliases[convenience_alias] = next(iter(owners))
     return aliases
 
 

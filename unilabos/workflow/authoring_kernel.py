@@ -48,7 +48,9 @@ class AuthoringCatalogSnapshot:
     fingerprint: str
     actions: tuple[AuthoringCatalogAction, ...]
     _by_business_key: Mapping[tuple[str, str], AuthoringCatalogAction]
-    _ambiguous_business_keys: frozenset[tuple[str, str]]
+    _by_source_key: Mapping[
+        tuple[str, str], tuple[AuthoringCatalogAction, ...]
+    ]
     _by_template_uuid: Mapping[str, AuthoringCatalogAction]
     _resource_template_uuid_by_symbol: Mapping[str, str]
     _resource_template_symbol_by_uuid: Mapping[str, str]
@@ -89,7 +91,9 @@ class AuthoringCatalogSnapshot:
 
         actions: list[AuthoringCatalogAction] = []
         by_business_key: dict[tuple[str, str], AuthoringCatalogAction] = {}
-        ambiguous_business_keys: set[tuple[str, str]] = set()
+        by_source_key: dict[
+            tuple[str, str], list[AuthoringCatalogAction]
+        ] = {}
         by_template_uuid: dict[str, AuthoringCatalogAction] = {}
         for node in sorted(nodes, key=lambda item: str(item["uuid"])):
             class_identity = node.get("class")
@@ -98,6 +102,10 @@ class AuthoringCatalogSnapshot:
                 raise AuthoringCatalogError("节点模板缺少设备类身份")
             if not isinstance(action_name, str) or not action_name.strip():
                 raise AuthoringCatalogError("节点模板缺少动作业务名")
+            resource_template_uuid = _required_uuid(
+                node,
+                "resource_template_uuid",
+            )
             node_uuid = str(node["uuid"])
             action = AuthoringCatalogAction(
                 template=_freeze(node),
@@ -109,13 +117,14 @@ class AuthoringCatalogSnapshot:
                     )
                 ),
             )
-            business_key = (class_identity, action_name)
-            if business_key not in ambiguous_business_keys:
-                previous = by_business_key.pop(business_key, None)
-                if previous is None:
-                    by_business_key[business_key] = action
-                else:
-                    ambiguous_business_keys.add(business_key)
+            # 设备动作的持久业务身份与 workflow_node_template 唯一索引一致：
+            # 由设备资源模板和动作名共同拥有。Python 类或设备工厂只是一种源码
+            # 入口；合法的多个设备定义可以复用同一实现类与动作合同。
+            business_key = (resource_template_uuid, action_name)
+            if business_key in by_business_key:
+                raise AuthoringCatalogError("工作流创作目录动作业务身份重复")
+            by_business_key[business_key] = action
+            by_source_key.setdefault((class_identity, action_name), []).append(action)
             by_template_uuid[node_uuid] = action
             actions.append(action)
 
@@ -167,7 +176,12 @@ class AuthoringCatalogSnapshot:
             fingerprint=fingerprint,
             actions=tuple(actions),
             _by_business_key=MappingProxyType(by_business_key),
-            _ambiguous_business_keys=frozenset(ambiguous_business_keys),
+            _by_source_key=MappingProxyType(
+                {
+                    key: tuple(value)
+                    for key, value in by_source_key.items()
+                }
+            ),
             _by_template_uuid=MappingProxyType(by_template_uuid),
             _resource_template_uuid_by_symbol=MappingProxyType(
                 resource_uuid_by_symbol
@@ -235,24 +249,40 @@ class AuthoringCatalogSnapshot:
         self,
         class_identity: str,
         action_name: str,
+        *,
+        resource_template_uuid: str | None = None,
     ) -> AuthoringCatalogAction:
-        """按设备类和动作业务名取得唯一目录动作。
+        """按设备源码类、动作名和可选设备业务身份取得唯一目录动作。
 
-        参数说明：两个字符串来自纯 AST（抽象语法树）静态解析；返回不可变动作
-        aggregate；缺失或有多个模板共享该业务键时抛出
-        ``AuthoringCatalogError``，不进行模糊匹配或任意选取。
+        参数说明：``class_identity`` 和 ``action_name`` 来自纯 AST（抽象语法树）
+        静态解析；``resource_template_uuid`` 是固定设备业务 ID 经库存权威解析出的
+        设备资源模板身份。提供该身份时按规范业务键精确查询并校验源码入口；省略
+        时只兼容设备类或工厂入口和动作名在当前目录中唯一的定义。返回不可变动作
+        aggregate；缺失或源码入口歧义时抛出 ``AuthoringCatalogError``，不猜测
+        任一设备。
         """
 
+        if resource_template_uuid is not None:
+            try:
+                action = self._by_business_key[
+                    (validate_uuid(resource_template_uuid), action_name)
+                ]
+            except (KeyError, TypeError, ValueError):
+                raise AuthoringCatalogError(
+                    "工作流创作目录缺少动作身份"
+                ) from None
+            if action.template.get("class") != class_identity:
+                raise AuthoringCatalogError("工作流创作目录动作类身份不匹配")
+            return action
         try:
-            business_key = (class_identity, action_name)
-            if business_key in self._ambiguous_business_keys:
-                raise AuthoringCatalogError("工作流创作目录动作身份不唯一")
-        except TypeError:
-            raise AuthoringCatalogError("工作流创作目录缺少动作身份") from None
-        try:
-            return self._by_business_key[business_key]
+            candidates = self._by_source_key[(class_identity, action_name)]
         except (KeyError, TypeError):
             raise AuthoringCatalogError("工作流创作目录缺少动作身份") from None
+        if len(candidates) != 1:
+            raise AuthoringCatalogError(
+                "工作流创作目录动作身份不唯一：源码身份不唯一"
+            )
+        return candidates[0]
 
     def require_template(self, template_uuid: str) -> AuthoringCatalogAction:
         """按节点模板 UUID 取得唯一目录动作。

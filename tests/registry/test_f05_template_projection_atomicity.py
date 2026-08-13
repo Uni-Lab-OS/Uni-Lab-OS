@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -10,23 +11,32 @@ from typing import Any
 import pytest
 
 from tests.registry.test_template_projection import FakeRegistry
-from unilabos.registry.template_projection import RegistryTemplateProjection
+from unilabos.registry.template_projection import (
+    RegistryTemplateProjection,
+    RegistryTemplateProjectionError,
+)
 from unilabos.workflow.authoring_kernel import AuthoringCatalogError
 from unilabos.workflow.store import WorkflowStore
 
 PRIMARY_RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000001"
 SECONDARY_RESOURCE_TEMPLATE_UUID = "10000000-0000-4000-8000-000000000003"
 
+GenerationExtension = Callable[
+    [Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+    tuple[Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+]
 
-class _DuplicateActionBusinessIdentityRegistry(FakeRegistry):
-    """发布两个资源身份不同、动作业务身份相同的设备定义。"""
+
+class _SharedImplementationActionRegistry(FakeRegistry):
+    """发布两个业务身份不同、但复用同一实现类和动作合同的设备定义。"""
 
     def obtain_registry_device_info(self) -> list[dict[str, Any]]:
-        """构造会污染工作流创作目录（Authoring Catalog）的重复动作。
+        """构造合法复用同一 Python 实现类的两个设备动作定义。
 
         参数：无。返回：两个资源模板（ResourceTemplate）身份不同，但设备类与
         动作业务名完全相同的设备注册表（Registry）定义；目录应完整发布两套
-        UUID 模板，同时把仅凭源码业务键的查询标记为歧义。
+        UUID 模板，每个定义仍由自己的资源模板业务身份拥有独立动作模板，同时
+        把仅凭源码业务键的查询标记为歧义。
         """
 
         devices = super().obtain_registry_device_info()
@@ -56,12 +66,17 @@ class _DistinctFactorySourceRegistry(FakeRegistry):
         return [primary, secondary]
 
 
-def _projection(database_path: Path) -> RegistryTemplateProjection:
+def _projection(
+    database_path: Path,
+    *,
+    generation_extension: GenerationExtension | None = None,
+) -> RegistryTemplateProjection:
     """装配覆盖两个设备资源身份的本地模板投影。
 
-    参数说明：``database_path`` 是跨失败刷新与重启复用的 SQLite 路径。返回：
-    使用确定资源模板（ResourceTemplate）UUID 的设备注册表模板投影；未知业务
-    身份返回空串，由投影边界关闭式失败。
+    参数说明：``database_path`` 是跨失败刷新与重启复用的 SQLite 路径；
+    ``generation_extension`` 是可选的同代模板扩展。返回：使用确定资源模板
+    （ResourceTemplate）UUID 的设备注册表模板投影；未知业务身份返回空串，
+    由投影边界关闭式失败。
     异常：数据库或模板投影初始化失败时传播原异常。
     """
 
@@ -84,6 +99,7 @@ def _projection(database_path: Path) -> RegistryTemplateProjection:
         WorkflowStore(database_path),
         authority_id="local",
         resource_template_identity_resolver=resolve_resource_template_identity,
+        generation_extension=generation_extension,
     )
 
 
@@ -139,19 +155,20 @@ def _persisted_projection_state(database_path: Path) -> dict[str, Any]:
     }
 
 
-def test_shared_action_identity_publishes_uuid_addressable_templates(
+def test_shared_implementation_actions_publish_per_device_business_identity(
     tmp_path: Path,
 ) -> None:
-    """共享实现的多设备动作必须完整发布且不被任意源码解析。
+    """共享实现类的动作必须按设备资源模板业务身份独立发布和解析。
 
-    参数说明：``tmp_path`` 提供隔离数据库目录。返回：无；断言共享类与动作名的
-    两个资源模板均持久发布、可按模板 UUID 区分，且源码业务键查询明确报告歧义；
-    重启后保持同一目录事实。
+    参数说明：``tmp_path`` 提供隔离数据库目录。返回：无；发布两个复用同一
+    Python 类和动作名的设备定义，断言它们能按各自资源模板 UUID 精确取得动作，
+    也可按模板 UUID 读取；仅凭源码入口的歧义查询关闭失败，持久化后重启仍保持
+    两个独立业务身份。
     """
 
     database_path = tmp_path / "workflow_history.db"
     projection = _projection(database_path)
-    snapshot = projection.refresh(_DuplicateActionBusinessIdentityRegistry())
+    snapshot = projection.refresh(_SharedImplementationActionRegistry())
     matching_actions = tuple(
         action
         for action in snapshot.actions
@@ -163,6 +180,24 @@ def test_shared_action_identity_publishes_uuid_addressable_templates(
     } == {PRIMARY_RESOURCE_TEMPLATE_UUID, SECONDARY_RESOURCE_TEMPLATE_UUID}
     for action in matching_actions:
         assert snapshot.require_template(str(action.template["uuid"])) is action
+    primary_action = snapshot.require_action(
+        "lab.devices:Pump",
+        "transfer",
+        resource_template_uuid=PRIMARY_RESOURCE_TEMPLATE_UUID,
+    )
+    secondary_action = snapshot.require_action(
+        "lab.devices:Pump",
+        "transfer",
+        resource_template_uuid=SECONDARY_RESOURCE_TEMPLATE_UUID,
+    )
+
+    assert primary_action.template["resource_template_uuid"] == (
+        PRIMARY_RESOURCE_TEMPLATE_UUID
+    )
+    assert secondary_action.template["resource_template_uuid"] == (
+        SECONDARY_RESOURCE_TEMPLATE_UUID
+    )
+    assert primary_action.template["uuid"] != secondary_action.template["uuid"]
     with pytest.raises(AuthoringCatalogError, match="动作身份不唯一"):
         snapshot.require_action("lab.devices:Pump", "transfer")
     persisted_state = _persisted_projection_state(database_path)
@@ -170,9 +205,67 @@ def test_shared_action_identity_publishes_uuid_addressable_templates(
 
     restarted = _projection(database_path)
     assert restarted.snapshot().fingerprint == snapshot.fingerprint
+    assert (
+        restarted.snapshot()
+        .require_action(
+            "lab.devices:Pump",
+            "transfer",
+            resource_template_uuid=SECONDARY_RESOURCE_TEMPLATE_UUID,
+        )
+        .template["resource_template_uuid"]
+        == SECONDARY_RESOURCE_TEMPLATE_UUID
+    )
     assert _persisted_projection_state(database_path) == persisted_state
-    with pytest.raises(AuthoringCatalogError, match="动作身份不唯一"):
-        restarted.snapshot().require_action("lab.devices:Pump", "transfer")
+    restarted.close()
+
+
+def test_late_catalog_validation_failure_rolls_back_complete_projection(
+    tmp_path: Path,
+) -> None:
+    """事务末端目录校验失败必须保留上一完整模板投影。
+
+    参数说明：``tmp_path`` 提供隔离数据库目录。返回：无；先发布合法代际，再由
+    同代扩展追加一个存储层可暂存、但目录边界拒绝的非法 UUID 节点，断言 SQLite、
+    内存快照、最近差量与重启恢复都保持上一成功代际。
+    """
+
+    reject_generation = {"enabled": False}
+
+    def extend_generation(
+        nodes: Sequence[Mapping[str, Any]],
+        _handles: Sequence[Mapping[str, Any]],
+    ) -> tuple[Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]]:
+        """按测试开关追加只会在完整目录校验阶段失败的节点。"""
+
+        if not reject_generation["enabled"]:
+            return (), ()
+        invalid_node = deepcopy(dict(nodes[0]))
+        invalid_node["uuid"] = "not-a-uuid"
+        invalid_node["resource_template_uuid"] = SECONDARY_RESOURCE_TEMPLATE_UUID
+        invalid_node["name"] = "late_validation_failure"
+        return (invalid_node,), ()
+
+    database_path = tmp_path / "workflow_history.db"
+    projection = _projection(
+        database_path,
+        generation_extension=extend_generation,
+    )
+    trusted_snapshot = projection.refresh(FakeRegistry())
+    trusted_delta = projection.last_delta()
+    trusted_state = _persisted_projection_state(database_path)
+
+    reject_generation["enabled"] = True
+    with pytest.raises(RegistryTemplateProjectionError, match="UUID"):
+        projection.refresh(FakeRegistry())
+
+    assert projection.snapshot().fingerprint == trusted_snapshot.fingerprint
+    assert projection.last_delta() == trusted_delta
+    assert _persisted_projection_state(database_path) == trusted_state
+    projection.close()
+
+    restarted = _projection(database_path)
+    assert restarted.snapshot().fingerprint == trusted_snapshot.fingerprint
+    assert _persisted_projection_state(database_path) == trusted_state
     restarted.close()
 
 

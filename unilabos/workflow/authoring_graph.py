@@ -102,6 +102,9 @@ def build_candidate_graph(
     )
     compatible_catalog_replacements: set[str] = set()
     disabled_node_uuids = set(program.disabled_node_uuids)
+    # 固定设备选择器只经库存权威解析一次；同一设备变量的多个动作必须共享同一
+    # 实际物料与设备资源模板身份，不能分别按 Python 实现类猜测动作所有者。
+    resolved_fixed_devices: dict[str, dict[str, str | None]] = {}
     for declaration in program.groups:
         try:
             group_catalog = catalog.require_action(
@@ -224,10 +227,24 @@ def build_candidate_graph(
             )
             continue
         device = devices[declaration.device_symbol]
+        resolved_device: dict[str, str | None] | None = None
+        if device.device_id is not None:
+            resolved_device = resolved_fixed_devices.get(device.symbol)
+            if resolved_device is None:
+                resolved_device = _resolve_fixed_device_reference(
+                    device,
+                    resource_reference_resolver=resource_reference_resolver,
+                )
+                resolved_fixed_devices[device.symbol] = resolved_device
         try:
             catalog_action = catalog.require_action(
                 device.class_identity,
                 declaration.action_name,
+                resource_template_uuid=(
+                    resolved_device.get("resource_template_uuid")
+                    if resolved_device is not None
+                    else None
+                ),
             )
         except AuthoringCatalogError as error:
             raise AuthoringGraphError(
@@ -241,6 +258,7 @@ def build_candidate_graph(
                 device=device,
                 catalog_action=catalog_action,
                 resource_reference_resolver=resource_reference_resolver,
+                resolved_device=resolved_device,
             ),
             parent_uuid=parent_by_node.get(declaration.node_uuid),
             source_order=source_order[declaration.node_uuid],
@@ -952,11 +970,38 @@ def _apply_authoring_structure(
     return node
 
 
+def _resolve_fixed_device_reference(
+    device: DeviceDeclaration,
+    *,
+    resource_reference_resolver: ResourceReferenceResolver | None,
+) -> dict[str, str | None]:
+    """把固定设备业务 ID 解析成实际物料和设备模板身份。
+
+    参数说明：``device`` 必须携带固定 ``device_id``；解析端口只读取库存权威。
+    返回：规范物料 UUID 与可选资源模板 UUID；解析失败统一转换为固定执行器
+    诊断，不把资源引用内部异常泄漏到创作图边界。
+    """
+
+    if device.device_id is None:
+        raise TypeError("动态设备选择器没有固定设备身份")
+    try:
+        return resolve_resource_reference(
+            device.device_id,
+            resource_reference_resolver,
+        )
+    except ResourceReferenceResolutionError as error:
+        raise AuthoringGraphError(
+            "invalid_executor_binding",
+            "固定执行器无法解析为实际设备物料身份",
+        ) from error
+
+
 def _candidate_node(
     *,
     declaration: ActionDeclaration,
     device: DeviceDeclaration,
     catalog_action: AuthoringCatalogAction,
+    resolved_device: Mapping[str, str | None] | None,
     resource_reference_resolver: ResourceReferenceResolver | None = None,
 ) -> dict[str, Any]:
     """构造一个后端写形状节点。
@@ -967,8 +1012,9 @@ def _candidate_node(
     数据库时间字段的节点字典；固定执行器（Fixed Executor）的
     实际设备物料（Material）UUID 同时进入顶层 ``material_uuid`` 和保留
     执行器绑定（ExecutorBinding）元数据；动态执行器绑定（ExecutorBinding）
-    保持空值；``resource_reference_resolver`` 把部署业务资源 ID 关闭式解析为
-    实际物料 UUID。异常：动作参数连接点或资源身份无法证明时抛出
+    保持空值；``resolved_device`` 是调用方已解析的固定设备身份，动态设备为
+    ``None``；``resource_reference_resolver`` 把动作参数中的部署业务资源 ID
+    关闭式解析为实际物料 UUID。异常：动作参数连接点或资源身份无法证明时抛出
     ``AuthoringGraphError``。
     """
 
@@ -1025,16 +1071,8 @@ def _candidate_node(
     # 时仅兼容作者直接声明规范 UUID，动态 ``device()`` 继续保持空值。
     device_material_uuid = None
     if device.device_id is not None:
-        try:
-            resolved_device = resolve_resource_reference(
-                device.device_id,
-                resource_reference_resolver,
-            )
-        except ResourceReferenceResolutionError as error:
-            raise AuthoringGraphError(
-                "invalid_executor_binding",
-                "固定执行器无法解析为实际设备物料身份",
-            ) from error
+        if resolved_device is None:
+            raise TypeError("固定设备缺少已解析的库存身份")
         # ``expected_device_template_uuid`` 是动作模板声明的设备类型；库存回执若
         # 提供模板身份，必须与它一致，不能把另一类设备绑定到该动作。
         expected_device_template_uuid = template.get("resource_template_uuid")
