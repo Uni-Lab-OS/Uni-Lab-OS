@@ -277,6 +277,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--process_role",
+        choices=["combined", "workspace_backend", "edge_runtime"],
+        default="combined",
+        help=(
+            "进程职责：combined 保持历史单进程；workspace_backend 常驻提供 "
+            "Authoring/Local Domain API；edge_runtime 只承载设备运行时。"
+        ),
+    )
+    parser.add_argument(
         "--backend",
         choices=["ros", "simple", "automancer"],
         default="ros",
@@ -661,12 +670,13 @@ def main():
     args = parser.parse_args()
     args_dict = vars(args)
 
-    from unilabos.app.control_plane import validate_control_plane_arguments
+    from unilabos.app.runtime_topology import resolve_runtime_process_plan
 
     try:
-        control_plane_mode = validate_control_plane_arguments(args_dict)
+        runtime_process_plan = resolve_runtime_process_plan(args_dict)
     except ValueError as error:
         parser.error(str(error))
+    control_plane_mode = runtime_process_plan.control_plane
 
     # doctor 子命令：组网诊断，不加载完整环境（net 甚至不 import rclpy），提前处理并退出
     if args_dict.get("command") == "doctor":
@@ -1024,6 +1034,7 @@ def main():
 
     BasicConfig.port = args_dict["port"] if args_dict["port"] else BasicConfig.port
     BasicConfig.control_plane = control_plane_mode.value
+    BasicConfig.process_role = runtime_process_plan.role.value
     BasicConfig.is_host_mode = not args_dict.get("is_slave", False)
     if BasicConfig.is_host_mode:
         if control_plane_mode.value == "local":
@@ -1399,6 +1410,17 @@ def main():
 
     args_dict["resources_mesh_config"] = {}
     args_dict["resources_edge_config"] = resource_edge_info
+    if not runtime_process_plan.starts_web_server:
+        print_status(
+            "Edge Runtime 已与 Workspace Backend 分离；当前进程不启动 HTTP/Authoring 服务",
+            "info",
+        )
+        edge_backend_thread = start_backend(**args_dict)
+        edge_backend_thread.join()
+        raise RuntimeError(
+            "Edge Runtime backend thread terminated unexpectedly"
+        )
+
     # web visiualize 2D
     if args_dict["visual"] != "disable":
         enable_rviz = args_dict["visual"] == "rviz"

@@ -11,6 +11,7 @@ import rclpy
 from unilabos_msgs.srv._serial_command import SerialCommand_Response
 
 from unilabos.app.register import register_devices_and_resources
+from unilabos.app.runtime_topology import publish_edge_runtime_ready_signal
 from unilabos.ros.nodes.presets.resource_mesh_manager import ResourceMeshManager
 from unilabos.resources.resource_tracker import (
     DeviceNodeResourceTracker,
@@ -328,6 +329,8 @@ def slave(
         executor.add_node(resource_mesh_manager)
         executor.add_node(joint_republisher)
         executor.add_node(lh_joint_pub)
+
+    publish_edge_runtime_ready_signal()
 
     # 7. 保持运行
     while True:

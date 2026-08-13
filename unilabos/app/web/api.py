@@ -11,6 +11,7 @@ import yaml
 
 from unilabos.app.web.controller import (
     devices,
+    get_resources as load_resources,
     job_add,
     job_info,
     get_online_devices,
@@ -1244,11 +1245,11 @@ def get_file_browser_data(path: str = ""):
 @api.get("/resources", summary="Resource list", response_model=Resp)
 def get_resources():
     """获取资源列表"""
-    isok, data = devices()
+    isok, data = load_resources()
     if not isok:
         return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
 
-    return Resp(data=dict(data))
+    return Resp(data=[node for tree in data.dump() for node in tree])
 
 
 @api.get("/health", summary="Process health")

@@ -414,26 +414,32 @@ class HostNode(BaseROS2DeviceNode):
         # 首次发现网络中的设备
         self._discover_devices()
 
-        # 初始化所有本机设备节点，多一次过滤，防止重复初始化
-        local_machine = BasicConfig.machine_name
-        for device_config in devices_config.root_nodes:
-            device_id = device_config.res_content.id
-            if device_config.res_content.type != "device":
-                continue
-            dev_machine = device_config.res_content.machine_name
-            if dev_machine and local_machine and dev_machine != local_machine:
-                self.lab_logger().info(
-                    f"[Host Node] Device {device_id} belongs to machine '{dev_machine}', "
-                    f"local is '{local_machine}', skipping initialization."
-                )
-                continue
-            if device_id not in self.devices_names:
-                self.initialize_device(device_id, device_config)
-            else:
-                self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
-        self.update_device_status_subscriptions()
-        # TODO: 需要验证 初始化所有控制器节点
-        if controllers_config:
+        # Workspace Backend 保留完整物理图用于 Authoring/Inventory，但设备驱动只由
+        # 独立 Edge Runtime 初始化。combined 继续保持历史单进程行为。
+        if BasicConfig.process_role != "workspace_backend":
+            local_machine = BasicConfig.machine_name
+            for device_config in devices_config.root_nodes:
+                device_id = device_config.res_content.id
+                if device_config.res_content.type != "device":
+                    continue
+                dev_machine = device_config.res_content.machine_name
+                if dev_machine and local_machine and dev_machine != local_machine:
+                    self.lab_logger().info(
+                        f"[Host Node] Device {device_id} belongs to machine '{dev_machine}', "
+                        f"local is '{local_machine}', skipping initialization."
+                    )
+                    continue
+                if device_id not in self.devices_names:
+                    self.initialize_device(device_id, device_config)
+                else:
+                    self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
+            self.update_device_status_subscriptions()
+        else:
+            self.lab_logger().info(
+                "[Host Node] Workspace Backend 已就绪，等待独立 Edge Runtime 注册设备"
+            )
+        # 控制器同样属于设备运行时；Workspace Backend 不实例化硬件控制器。
+        if controllers_config and BasicConfig.process_role != "workspace_backend":
             update_rate = controllers_config["controller_manager"]["ros__parameters"]["update_rate"]
             for controller_id, controller_config in controllers_config["controller_manager"]["ros__parameters"][
                 "controllers"

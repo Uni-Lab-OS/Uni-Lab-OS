@@ -18,6 +18,11 @@ from unilabos.app.control_plane import (
     validate_control_plane_arguments,
 )
 from unilabos.app.main import parse_args
+from unilabos.app.runtime_topology import (
+    RuntimeProcessRole,
+    publish_edge_runtime_ready_signal,
+    resolve_runtime_process_plan,
+)
 from unilabos.config.config import BasicConfig
 
 
@@ -26,6 +31,74 @@ def test_control_plane_defaults_to_local_debug() -> None:
 
     assert arguments["control_plane"] == "local"
     assert validate_control_plane_arguments(arguments) is ControlPlaneMode.LOCAL
+
+
+def test_workbench_split_runtime_roles_are_orthogonal_to_local_authority() -> None:
+    workspace_backend = vars(
+        parse_args().parse_args(
+            ["--process_role", "workspace_backend", "--app_bridges", "fastapi"]
+        )
+    )
+    edge_runtime = vars(
+        parse_args().parse_args(
+            [
+                "--process_role",
+                "edge_runtime",
+                "--is_slave",
+                "--app_bridges",
+                "fastapi",
+            ]
+        )
+    )
+
+    backend_plan = resolve_runtime_process_plan(workspace_backend)
+    edge_plan = resolve_runtime_process_plan(edge_runtime)
+
+    assert backend_plan.role is RuntimeProcessRole.WORKSPACE_BACKEND
+    assert backend_plan.control_plane is ControlPlaneMode.LOCAL
+    assert backend_plan.starts_web_server
+    assert not backend_plan.initializes_host_devices
+    assert edge_plan.role is RuntimeProcessRole.EDGE_RUNTIME
+    assert edge_plan.control_plane is ControlPlaneMode.LOCAL
+    assert not edge_plan.starts_web_server
+    assert not edge_plan.initializes_host_devices
+
+
+def test_split_runtime_rejects_role_authority_mismatches() -> None:
+    local_edge_without_slave = vars(
+        parse_args().parse_args(
+            ["--process_role", "edge_runtime", "--app_bridges", "fastapi"]
+        )
+    )
+    backend_workspace = vars(
+        parse_args().parse_args(
+            [
+                "--process_role",
+                "workspace_backend",
+                "--control_plane",
+                "backend",
+                "--app_bridges",
+                "edge_control",
+                "fastapi",
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="必须使用 --is_slave"):
+        resolve_runtime_process_plan(local_edge_without_slave)
+    with pytest.raises(ValueError, match="当前只承载 local Authority"):
+        resolve_runtime_process_plan(backend_workspace)
+
+
+def test_edge_runtime_ready_signal_is_atomic(tmp_path) -> None:
+    ready_path = tmp_path / "edge" / "ready.json"
+
+    publish_edge_runtime_ready_signal(str(ready_path))
+
+    assert ready_path.read_text(encoding="utf-8").startswith(
+        '{"schemaVersion": 1, "pid": '
+    )
+    assert list(ready_path.parent.glob("*.tmp")) == []
 
 
 def test_backend_control_plane_requires_only_production_bridge() -> None:
