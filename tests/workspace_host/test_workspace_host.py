@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -84,6 +86,33 @@ def test_attached_renderer_records_a_reusable_headless_adapter(workspace: Path) 
     host.close()
 
 
+def test_host_restart_adopts_a_live_workbench_renderer(workspace: Path) -> None:
+    renderer_server = ThreadingHTTPServer(("127.0.0.1", 0), _RendererHandler)
+    threading.Thread(target=renderer_server.serve_forever, daemon=True).start()
+    renderer_port = int(renderer_server.server_address[1])
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    token = ensure_local_token(paths)
+    first = WorkspaceHost(paths, token, readiness_timeout=0.1)
+    first._dispatch(
+        "renderer.attach",
+        {
+            "pid": os.getpid(),
+            "address": f"http://127.0.0.1:{renderer_port}",
+            "generation": "renderer-before-host-restart",
+        },
+    )
+    first.close()
+
+    restarted = WorkspaceHost(paths, token, readiness_timeout=0.1)
+    try:
+        assert restarted.snapshot()["components"]["renderer"]["phase"] == "ready"
+    finally:
+        restarted.close()
+        renderer_server.shutdown()
+        renderer_server.server_close()
+
+
 def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     workspace: Path,
 ) -> None:
@@ -122,6 +151,85 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     assert first_edge.metadata["runtimeDirectory"] != second_edge.metadata[
         "runtimeDirectory"
     ]
+
+
+def test_backend_launch_keeps_local_domain_store_across_process_generations(
+    workspace: Path,
+) -> None:
+    """Backend crash recovery must not create a fresh Local Domain database."""
+
+    paths = WorkspacePaths.resolve(workspace)
+    ensure_local_token(paths)
+
+    first = resolve_backend_launch(
+        paths,
+        graph_path="deployment/graphs/graph.json",
+        backend_port=48_121,
+        hostlink_port=48_122,
+    )
+    second = resolve_backend_launch(
+        paths,
+        graph_path="deployment/graphs/graph.json",
+        backend_port=48_123,
+        hostlink_port=48_124,
+    )
+
+    expected_state = str(paths.runtime / "backend" / "local-domain")
+    assert _argument_value(first.command, "--working_dir") == expected_state
+    assert _argument_value(second.command, "--working_dir") == expected_state
+    assert "--preserve_runtime_databases" in first.command
+    assert "--preserve_runtime_databases" in second.command
+    assert first.metadata["stateDirectory"] == expected_state
+    assert second.metadata["stateDirectory"] == expected_state
+    assert first.metadata["runtimeDirectory"] != second.metadata["runtimeDirectory"]
+
+
+def test_backend_launch_migrates_the_last_generation_into_stable_local_domain(
+    workspace: Path,
+) -> None:
+    """The first split-runtime upgrade preserves the previous Backend facts."""
+
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    ensure_local_token(paths)
+    legacy = paths.runtime / "backend" / "legacy-generation"
+    legacy.mkdir(parents=True)
+    legacy_database = legacy / "workflow_history.db"
+    connection = sqlite3.connect(legacy_database)
+    connection.execute("CREATE TABLE acceptance (value TEXT NOT NULL)")
+    connection.execute("INSERT INTO acceptance(value) VALUES ('preserved')")
+    connection.commit()
+    connection.close()
+    paths.session.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "unilab-workspace-host/v1",
+                "components": {
+                    "backend": {
+                        "metadata": {"runtimeDirectory": str(legacy)},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = resolve_backend_launch(
+        paths,
+        graph_path="deployment/graphs/graph.json",
+        backend_port=48_125,
+        hostlink_port=48_126,
+    )
+
+    migrated = paths.runtime / "backend" / "local-domain" / "workflow_history.db"
+    connection = sqlite3.connect(migrated)
+    try:
+        assert connection.execute("SELECT value FROM acceptance").fetchone() == (
+            "preserved",
+        )
+    finally:
+        connection.close()
+    assert plan.metadata["legacyStateMigratedFrom"] == str(legacy)
 
 
 def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
@@ -342,6 +450,25 @@ def test_os_restart_and_local_reset_state_are_distinct_commands(
     host.close()
 
 
+def test_backend_restart_reconnects_an_existing_edge_to_the_new_dynamic_port(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    calls: list[str] = []
+    host._components["backend"]["phase"] = "ready"
+    host._components["edge"]["phase"] = "ready"
+    host._stop_component = lambda name: calls.append(f"stop:{name}") or {}  # type: ignore[method-assign]
+    host._start_backend = lambda parameters: calls.append("start:backend") or {}  # type: ignore[method-assign]
+    host._start_edge = lambda: calls.append("start:edge") or {"ready": True}  # type: ignore[method-assign]
+
+    result = host._dispatch("backend.restart", {})
+
+    assert result == {"ready": True}
+    assert calls == ["stop:edge", "stop:backend", "start:backend", "start:edge"]
+    host.close()
+
+
 def test_local_reset_state_clears_edge_work_but_preserves_identity(
     workspace: Path,
 ) -> None:
@@ -370,6 +497,17 @@ def test_local_reset_state_clears_edge_work_but_preserves_identity(
         command_uuid,
     )
     store.close()
+    local_domain = paths.runtime / "backend" / "local-domain"
+    local_domain.mkdir(parents=True)
+    local_domain_databases = [
+        local_domain / "inventory.db",
+        local_domain / "device_state.db",
+        local_domain / "workflow_history.db",
+        local_domain / "edge_authority.db",
+    ]
+    for database in local_domain_databases:
+        database.write_bytes(b"stale")
+        database.with_name(f"{database.name}-wal").write_bytes(b"stale-wal")
 
     host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
     stopped: list[str] = []
@@ -384,6 +522,11 @@ def test_local_reset_state_clears_edge_work_but_preserves_identity(
     assert reopened.get_or_create_instance_uuid() == instance_uuid
     assert reopened.get_job(job_uuid) is None
     reopened.close()
+    assert all(not database.exists() for database in local_domain_databases)
+    assert all(
+        not database.with_name(f"{database.name}-wal").exists()
+        for database in local_domain_databases
+    )
     host.close()
 
 
@@ -430,6 +573,83 @@ def test_host_restart_adopts_a_ready_backend_without_stopping_it(
     finally:
         if _pid_running(pid):
             os.kill(pid, 9)
+        ready_server.shutdown()
+        ready_server.server_close()
+
+
+def test_backend_crash_is_supervised_into_a_new_process_generation(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready Local Backend is a supervised service, not a UI child process."""
+
+    ready_server = ThreadingHTTPServer(("127.0.0.1", 0), _ReadyHandler)
+    threading.Thread(target=ready_server.serve_forever, daemon=True).start()
+    ready_port = int(ready_server.server_address[1])
+    paths = WorkspacePaths.resolve(workspace)
+    token = ensure_local_token(paths)
+    launches = 0
+
+    def fake_backend(*_args: object, **_kwargs: object) -> LaunchPlan:
+        nonlocal launches
+        launches += 1
+        return LaunchPlan(
+            component="backend",
+            command=(sys.executable, "-c", "import time; time.sleep(120)"),
+            cwd=workspace,
+            environment=dict(os.environ),
+            generation=f"backend-generation-{launches}",
+            log_path=paths.logs / f"backend-{launches}.log",
+            address=f"http://127.0.0.1:{ready_port}",
+            ready_url=f"http://127.0.0.1:{ready_port}/api/v1/health",
+            metadata={
+                "runtimeMode": "normal",
+                "domainMode": "local",
+                "stateDirectory": str(paths.runtime / "backend" / "local-domain"),
+            },
+        )
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.host.resolve_backend_launch",
+        fake_backend,
+    )
+    host = WorkspaceHost(paths, token, readiness_timeout=2.0)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_type(host))
+    endpoint = f"http://127.0.0.1:{server.server_address[1]}"
+    host.publish_endpoint(endpoint)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    client = WorkspaceHostClient(paths, endpoint, token)
+    recovered_pid: int | None = None
+    try:
+        started = client.submit("backend.start", operation_id="crash-start")
+        client.wait(str(started["operationId"]), timeout=5)
+        before = client.snapshot()["components"]["backend"]
+        first_pid = int(before["pid"])
+        os.kill(first_pid, signal.SIGKILL)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            backend = client.snapshot()["components"]["backend"]
+            if backend["phase"] == "ready" and backend["pid"] != first_pid:
+                recovered_pid = int(backend["pid"])
+                assert backend["generation"] == "backend-generation-2"
+                assert backend["metadata"]["stateDirectory"] == str(
+                    paths.runtime / "backend" / "local-domain"
+                )
+                break
+            time.sleep(0.05)
+        assert recovered_pid is not None
+        assert "backend.recovery.succeeded" in paths.audit.read_text(encoding="utf-8")
+    finally:
+        try:
+            stopped = client.submit("backend.stop", operation_id="crash-cleanup")
+            client.wait(str(stopped["operationId"]), timeout=5)
+        except WorkspaceHostError:
+            if recovered_pid and _pid_running(recovered_pid):
+                os.kill(recovered_pid, signal.SIGKILL)
+        server.shutdown()
+        server.server_close()
+        host.close()
         ready_server.shutdown()
         ready_server.server_close()
 
@@ -519,6 +739,22 @@ class _ReadyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _RendererHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path == "/":
+            body = b"workbench"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
 
     def log_message(self, _format: str, *_args: object) -> None:
         return

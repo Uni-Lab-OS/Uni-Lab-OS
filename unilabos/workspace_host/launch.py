@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import sys
 import uuid
 from dataclasses import dataclass
@@ -82,6 +83,15 @@ def resolve_backend_launch(
     generation = str(uuid.uuid4())
     runtime_directory = paths.runtime / "backend" / generation
     runtime_directory.mkdir(parents=True, exist_ok=False)
+    state_directory = paths.runtime / "backend" / (
+        "local-domain" if domain_mode == "local" else "authoring"
+    )
+    state_directory.mkdir(parents=True, exist_ok=True)
+    legacy_state = (
+        _migrate_legacy_backend_state(paths, state_directory)
+        if domain_mode == "local"
+        else None
+    )
     validated_graph = runtime_directory / "selected-graph.json"
     shutil.copyfile(graph, validated_graph)
     os.chmod(validated_graph, 0o600)
@@ -116,7 +126,12 @@ def resolve_backend_launch(
         "--config",
         str(local_config),
         "--working_dir",
-        str(runtime_directory),
+        str(state_directory),
+        *(
+            ("--preserve_runtime_databases",)
+            if domain_mode == "local"
+            else ()
+        ),
         "--process_role",
         "workspace_backend",
         "--control_plane",
@@ -151,6 +166,12 @@ def resolve_backend_launch(
             "backendUrl": _optional_text(config.get("backendUrl")),
             "hostLinkPort": hostlink_port,
             "runtimeDirectory": str(runtime_directory),
+            "stateDirectory": str(state_directory),
+            **(
+                {"legacyStateMigratedFrom": legacy_state}
+                if legacy_state
+                else {}
+            ),
             "validatedGraphPath": str(validated_graph),
             "localConfigPath": str(local_config),
         },
@@ -389,6 +410,59 @@ def _workspace_host_token(paths: WorkspacePaths) -> str:
             "host_token_invalid", "Workspace Host token 为空"
         )
     return token
+
+
+def _migrate_legacy_backend_state(
+    paths: WorkspacePaths,
+    state_directory: Path,
+) -> str | None:
+    """Move closed generation-local SQLite facts into the stable Local Domain."""
+
+    try:
+        session = json.loads(paths.session.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    components = session.get("components") if isinstance(session, dict) else None
+    backend = components.get("backend") if isinstance(components, dict) else None
+    metadata = backend.get("metadata") if isinstance(backend, dict) else None
+    value = metadata.get("runtimeDirectory") if isinstance(metadata, dict) else None
+    if not isinstance(value, str) or not value:
+        return None
+    legacy_directory = Path(value).expanduser().resolve()
+    backend_root = (paths.runtime / "backend").resolve()
+    try:
+        legacy_directory.relative_to(backend_root)
+    except ValueError:
+        return None
+    if legacy_directory == state_directory.resolve():
+        return None
+    migrated = False
+    for database_name in (
+        "inventory.db",
+        "device_state.db",
+        "workflow_history.db",
+        "edge_authority.db",
+    ):
+        source = legacy_directory / database_name
+        destination = state_directory / database_name
+        if destination.exists() or not source.is_file():
+            continue
+        try:
+            source_connection = sqlite3.connect(source)
+            destination_connection = sqlite3.connect(destination)
+            try:
+                source_connection.backup(destination_connection)
+            finally:
+                destination_connection.close()
+                source_connection.close()
+            os.chmod(destination, 0o600)
+        except (OSError, sqlite3.Error) as error:
+            raise WorkspaceHostError(
+                "backend_state_migration_failed",
+                f"迁移旧 Local Domain 数据失败：{source}：{error}",
+            ) from error
+        migrated = True
+    return str(legacy_directory) if migrated else None
 
 
 def _workspace_edge_key(paths: WorkspacePaths) -> str:

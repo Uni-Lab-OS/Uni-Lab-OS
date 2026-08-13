@@ -45,6 +45,7 @@ from .model import (
 _STOP_TIMEOUT_SECONDS = 10.0
 _READINESS_TIMEOUT_SECONDS = 90.0
 _MAX_BODY_BYTES = 1024 * 1024
+_SUPERVISED_COMPONENTS = frozenset({"backend", "edge", "plc"})
 
 
 class WorkspaceHost:
@@ -61,6 +62,7 @@ class WorkspaceHost:
         self.token = token
         self.readiness_timeout = readiness_timeout
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
         self._operation_queue: queue.Queue[str | None] = queue.Queue()
         self._operation_worker = threading.Thread(
             target=self._run_operations,
@@ -68,6 +70,8 @@ class WorkspaceHost:
             daemon=True,
         )
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._recovery_pending: dict[str, float] = {}
+        self._recovery_attempts: dict[str, int] = {}
         self._revision = 0
         self._cursor = 0
         self._endpoint = ""
@@ -223,10 +227,11 @@ class WorkspaceHost:
             atomic_write_json(operation_path, operation)
             self._audit_locked("operation.started", operation)
         try:
-            result = self._dispatch(
-                str(operation["command"]),
-                dict(operation.get("parameters") or {}),
-            )
+            with self._lifecycle_lock:
+                result = self._dispatch(
+                    str(operation["command"]),
+                    dict(operation.get("parameters") or {}),
+                )
         except WorkspaceHostError as error:
             phase = "failed"
             result = None
@@ -257,8 +262,13 @@ class WorkspaceHost:
         if command == "backend.stop":
             return self._stop_component("backend")
         if command == "backend.restart":
+            with self._lock:
+                edge_was_ready = self._components["edge"].get("phase") == "ready"
+            if edge_was_ready:
+                self._stop_component("edge")
             self._stop_component("backend")
-            return self._start_backend(parameters)
+            backend = self._start_backend(parameters)
+            return self._start_edge() if edge_was_ready else backend
         if command == "os.start":
             return self._start_edge()
         if command == "os.stop":
@@ -270,6 +280,7 @@ class WorkspaceHost:
             self._stop_component("edge")
             self._stop_component("backend")
             self._reset_local_edge_protocol_state()
+            self._reset_local_domain_state()
             return self._start_backend(parameters)
         if command == "plc.start":
             return self._start_plc()
@@ -593,6 +604,31 @@ class WorkspaceHost:
             store.reset_transient_state()
         finally:
             store.close()
+
+    def _reset_local_domain_state(self) -> None:
+        """Delete only the audited Local Domain databases and their journals."""
+
+        state_directory = self.paths.runtime / "backend" / "local-domain"
+        removed: list[str] = []
+        for database_name in (
+            "inventory.db",
+            "device_state.db",
+            "workflow_history.db",
+            "edge_authority.db",
+        ):
+            for filename in (
+                database_name,
+                f"{database_name}-wal",
+                f"{database_name}-shm",
+            ):
+                path = state_directory / filename
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                removed.append(filename)
+        with self._lock:
+            self._publish_locked("local.domain-state.reset", {"removed": removed})
 
     def _start_backend(self, parameters: dict[str, object]) -> dict[str, object]:
         with self._lock:
@@ -1336,6 +1372,61 @@ class WorkspaceHost:
         while not self._closed.wait(0.25):
             with self._lock:
                 self._refresh_processes_locked()
+                now = time.monotonic()
+                recover = [
+                    name
+                    for name, due_at in self._recovery_pending.items()
+                    if due_at <= now
+                    and self._components[name].get("phase") == "failed"
+                ]
+                for name in recover:
+                    self._recovery_pending.pop(name, None)
+            for name in sorted(recover, key=_recovery_order):
+                self._recover_component(name)
+
+    def _recover_component(self, name: str) -> None:
+        """Restart one unexpectedly exited managed component with bounded backoff."""
+
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._components[name].get("phase") != "failed":
+                    self._recovery_attempts.pop(name, None)
+                    return
+                edge_was_ready = self._components["edge"].get("phase") == "ready"
+                self._publish_locked(
+                    f"{name}.recovery.started",
+                    {"attempt": self._recovery_attempts.get(name, 0) + 1},
+                )
+            try:
+                if name == "backend":
+                    self._start_backend({})
+                    if edge_was_ready:
+                        self._stop_component("edge")
+                        self._start_edge()
+                elif name == "edge":
+                    self._start_edge()
+                elif name == "plc":
+                    self._start_plc()
+                else:
+                    return
+            except BaseException as error:  # noqa: BLE001 - supervision boundary.
+                with self._lock:
+                    attempts = self._recovery_attempts.get(name, 0) + 1
+                    self._recovery_attempts[name] = attempts
+                    delay = min(30.0, float(2 ** min(attempts - 1, 5)))
+                    component = self._components[name]
+                    component["phase"] = "failed"
+                    component["diagnostic"] = f"自动恢复失败：{error}"
+                    self._recovery_pending[name] = time.monotonic() + delay
+                    self._publish_locked(
+                        f"{name}.recovery.failed",
+                        {"attempt": attempts, "retryAfterSeconds": delay},
+                    )
+                return
+            with self._lock:
+                self._recovery_attempts.pop(name, None)
+                self._recovery_pending.pop(name, None)
+                self._publish_locked(f"{name}.recovery.succeeded", {})
 
     def _refresh_processes_locked(self) -> None:
         for name, process in tuple(self._processes.items()):
@@ -1344,6 +1435,7 @@ class WorkspaceHost:
                 continue
             self._processes.pop(name, None)
             component = self._components[name]
+            previous_phase = component.get("phase")
             if component["phase"] == "stopping":
                 continue
             component["phase"] = "failed"
@@ -1352,6 +1444,8 @@ class WorkspaceHost:
                 f"{name}.exited",
                 {"pid": process.pid, "exitCode": return_code},
             )
+            if name in _SUPERVISED_COMPONENTS and previous_phase == "ready":
+                self._recovery_pending.setdefault(name, time.monotonic())
         for name, component in self._components.items():
             if name in self._processes:
                 continue
@@ -1366,6 +1460,8 @@ class WorkspaceHost:
             component["phase"] = "failed"
             component["diagnostic"] = "已接管的进程不再存在"
             self._publish_locked(f"{name}.exited", {"pid": pid, "adopted": True})
+            if name in _SUPERVISED_COMPONENTS:
+                self._recovery_pending.setdefault(name, time.monotonic())
 
     def _initial_configuration(self) -> dict[str, object]:
         try:
@@ -1430,7 +1526,11 @@ class WorkspaceHost:
         address = component.get("address")
         if not isinstance(address, str) or not address:
             return name == "renderer"
-        path = "/api/v1/health" if name == "backend" else "/api/state"
+        path = (
+            "/api/v1/health"
+            if name == "backend"
+            else "/" if name == "renderer" else "/api/state"
+        )
         try:
             with urlopen(f"{address}{path}", timeout=0.5) as response:
                 response.read()
@@ -1611,6 +1711,12 @@ def _pid_exists(pid: int) -> bool:
         except (OSError, subprocess.TimeoutExpired):
             pass
     return True
+
+
+def _recovery_order(name: str) -> int:
+    """Recover authorities before their device and simulator dependants."""
+
+    return {"backend": 0, "plc": 1, "edge": 2}.get(name, 99)
 
 
 def _terminate_process_tree(pid: int, process: subprocess.Popen[bytes] | None) -> None:
