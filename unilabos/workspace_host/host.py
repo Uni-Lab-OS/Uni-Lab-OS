@@ -777,8 +777,18 @@ class WorkspaceHost:
                     "generation": generation,
                     "logPath": None,
                     "diagnostic": None,
-                    "capabilities": ["workbench-ui", "theia-rpc"],
-                    "metadata": {},
+                    "capabilities": [
+                        "workbench-ui",
+                        "theia-rpc",
+                        "material-scene-inspect",
+                        "material-scene-capture",
+                    ],
+                    "metadata": {
+                        "automationBaseUrl": (
+                            f"{address.rstrip('/')}/__unilab_renderer/v1"
+                        ),
+                        "automationContract": "unilab-material-renderer/v1",
+                    },
                 }
             )
             self._publish_locked("renderer.attached", {"pid": pid, "address": address})

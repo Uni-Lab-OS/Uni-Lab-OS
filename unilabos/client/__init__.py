@@ -33,6 +33,12 @@ from .domain import (
     DomainClientError,
     DomainSource,
 )
+from .material_renderer import (
+    MATERIAL_RENDERER_CLIENT_SCHEMA,
+    MATERIAL_RENDERER_CONTRACT,
+    MaterialRendererClient,
+    MaterialRendererClientError,
+)
 
 __all__ = [
     "Envelope",
@@ -59,4 +65,8 @@ __all__ = [
     "DomainBackendClient",
     "DomainClientError",
     "DomainSource",
+    "MATERIAL_RENDERER_CLIENT_SCHEMA",
+    "MATERIAL_RENDERER_CONTRACT",
+    "MaterialRendererClient",
+    "MaterialRendererClientError",
 ]

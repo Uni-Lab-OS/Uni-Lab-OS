@@ -425,8 +425,16 @@ def test_renderer_registration_is_host_owned_and_detachable(workspace: Path) -> 
         "generation": str(os.getpid()),
         "logPath": None,
         "diagnostic": None,
-        "capabilities": ["workbench-ui", "theia-rpc"],
-        "metadata": {},
+        "capabilities": [
+            "workbench-ui",
+            "theia-rpc",
+            "material-scene-inspect",
+            "material-scene-capture",
+        ],
+        "metadata": {
+            "automationBaseUrl": "http://127.0.0.1:3100/__unilab_renderer/v1",
+            "automationContract": "unilab-material-renderer/v1",
+        },
     }
     detached = host._dispatch("renderer.detach", {"pid": os.getpid()})
     assert detached["components"]["renderer"]["phase"] == "idle"

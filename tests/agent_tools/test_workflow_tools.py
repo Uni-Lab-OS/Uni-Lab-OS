@@ -57,3 +57,33 @@ def test_agent_tools_delegate_to_shared_domain_client(monkeypatch, tmp_path) -> 
             ("workflow-1", {"after_revision": 7, "timeout": 2}),
         ),
     ]
+
+
+def test_agent_material_tools_delegate_to_attached_renderer(monkeypatch, tmp_path) -> None:
+    class Renderer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def inspect_scene(self, **options):
+            return {"kind": "inspect", "options": options}
+
+        def capture_scene(self, output, **options):
+            return {"kind": "capture", "output": output, "options": options}
+
+    monkeypatch.setattr(
+        "unilabos.agent_tools.workflow.MaterialRendererClient.discover",
+        lambda *_args, **_kwargs: Renderer(),
+    )
+    tools = WorkflowAgentTools(tmp_path)
+
+    inspected = tools.inspect_material_scene(view="3d", hidden_material_ids=["m-2"])
+    captured = tools.capture_material_scene(
+        str(tmp_path / "scene.png"), view="2.5d", viewport_width=800, viewport_height=600
+    )
+
+    assert inspected["options"]["view"] == "3d"
+    assert inspected["options"]["hidden_material_ids"] == ["m-2"]
+    assert captured["options"]["viewport"] == (800, 600)

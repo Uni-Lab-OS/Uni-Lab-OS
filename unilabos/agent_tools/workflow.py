@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from unilabos.client.domain import DomainBackendClient
+from unilabos.client.material_renderer import MaterialRendererClient
 
 
 class WorkflowAgentTools:
@@ -150,6 +151,63 @@ class WorkflowAgentTools:
                 timeout=timeout,
             )
 
+    def inspect_material_scene(
+        self,
+        *,
+        view: str | None = None,
+        show_sites: bool | None = None,
+        show_material_transfers: bool | None = None,
+        selected_material_ids: Sequence[str] = (),
+        hidden_material_ids: Sequence[str] = (),
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """检查当前已打开的真实物料 renderer，不读取 DOM 或另建场景。"""
+
+        with MaterialRendererClient.discover(
+            self.workspace, timeout=timeout
+        ) as client:
+            return client.inspect_scene(
+                view=view,
+                show_sites=show_sites,
+                show_material_transfers=show_material_transfers,
+                selected_material_ids=selected_material_ids,
+                hidden_material_ids=hidden_material_ids,
+                timeout=timeout,
+            )
+
+    def capture_material_scene(
+        self,
+        output: str,
+        *,
+        view: str | None = None,
+        camera_preset: str = "default",
+        viewport_width: int = 1440,
+        viewport_height: int = 960,
+        pixel_ratio: float = 1.0,
+        show_sites: bool | None = None,
+        show_material_transfers: bool | None = None,
+        selected_material_ids: Sequence[str] = (),
+        hidden_material_ids: Sequence[str] = (),
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """截图当前已附着物料 renderer，并把 PNG 原子写入指定路径。"""
+
+        with MaterialRendererClient.discover(
+            self.workspace, timeout=timeout
+        ) as client:
+            return client.capture_scene(
+                output,
+                view=view,
+                camera_preset=camera_preset,
+                viewport=(viewport_width, viewport_height),
+                pixel_ratio=pixel_ratio,
+                show_sites=show_sites,
+                show_material_transfers=show_material_transfers,
+                selected_material_ids=selected_material_ids,
+                hidden_material_ids=hidden_material_ids,
+                timeout=timeout,
+            )
+
 
 def build_mcp_server(
     workspace: str | Path,
@@ -176,6 +234,8 @@ def build_mcp_server(
     server.tool()(tools.watch_task)
     server.tool()(tools.command_task)
     server.tool()(tools.wait_authoring)
+    server.tool()(tools.inspect_material_scene)
+    server.tool()(tools.capture_material_scene)
     return server
 
 
