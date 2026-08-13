@@ -235,6 +235,9 @@ def _action_definition(raw_action: Any) -> dict[str, Any]:
     node_type = str(action.get("node_type") or "").strip()
     if node_type:
         definition["node_type"] = node_type
+    executor_kind = str(action.get("executor_kind") or "").strip()
+    if executor_kind:
+        definition["executor_kind"] = executor_kind
     return definition
 
 

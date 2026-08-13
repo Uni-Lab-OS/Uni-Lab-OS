@@ -33,6 +33,7 @@ from unilabos.registry.decorators import (
     is_not_action,
     is_always_free,
     get_topic_config,
+    ExecutorKind,
     NodeType,
     normalize_enum_value,
 )
@@ -72,6 +73,21 @@ from unilabos.utils.import_manager import get_enhanced_class_info
 from unilabos.utils.type_check import NoAliasDumper
 from msgcenterpy.instances.json_schema_instance import JSONSchemaMessageInstance
 from msgcenterpy.instances.ros2_instance import ROS2MessageInstance
+
+
+def _apply_action_execution_metadata(entry: Dict[str, Any], action_args: Dict[str, Any]) -> None:
+    """把创作节点类型与受控执行器提示规范化到动作注册条目。"""
+
+    node_type = normalize_enum_value(action_args.get("node_type"), NodeType)
+    if node_type:
+        entry["node_type"] = node_type
+    executor_kind = normalize_enum_value(action_args.get("executor_kind"), ExecutorKind)
+    if executor_kind:
+        allowed_executor_kinds = {kind.value for kind in ExecutorKind}
+        if executor_kind not in allowed_executor_kinds:
+            raise ValueError(f"不支持的 executor_kind: {executor_kind}")
+        entry["executor_kind"] = executor_kind
+
 
 _module_hash_cache: Dict[str, Optional[str]] = {}
 _DEFAULT_ACTION_DURATION_SECONDS = 60.0
@@ -1107,9 +1123,7 @@ class Registry:
             entry["feedback_interval"] = _fb_iv
             if (action_args or {}).get("error_policy"):
                 entry["error_policy"] = action_args["error_policy"]
-            nt = normalize_enum_value((action_args or {}).get("node_type"), NodeType)
-            if nt:
-                entry["node_type"] = nt
+            _apply_action_execution_metadata(entry, action_args or {})
             return action_name, entry
 
         # 1) auto- actions
@@ -1269,9 +1283,7 @@ class Registry:
             action_entry["feedback_interval"] = _fb_iv
             if action_args.get("error_policy"):
                 action_entry["error_policy"] = action_args["error_policy"]
-            nt = normalize_enum_value(action_args.get("node_type"), NodeType)
-            if nt:
-                action_entry["node_type"] = nt
+            _apply_action_execution_metadata(action_entry, action_args)
             goal_schema_for_docs = action_entry.get("schema", {}).get("properties", {}).get("goal", {})
             self._apply_docstring_param_metadata(
                 goal_schema_for_docs,

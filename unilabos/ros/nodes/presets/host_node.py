@@ -43,6 +43,7 @@ from unilabos.registry.decorators import (
     ActionInputHandle,
     ActionOutputHandle,
     DataSource,
+    ExecutorKind,
     NodeType,
     action,
     device,
@@ -2604,7 +2605,8 @@ class HostNode(BaseROS2DeviceNode):
     @action(
         description="转移物料（系统派发）：把已物理就位的物料在系统中改挂到目标设备的目标孔位（人工/机械臂工作流的统一末步）",
         always_free=True,
-        node_type=NodeType.MATERIAL_TRANSFER,
+        node_type=NodeType.ILAB,
+        executor_kind=ExecutorKind.MATERIAL_TRANSFER,
         placeholder_keys={
             "target_device": PLACEHOLDER_DEVICES,
             "mount_resource": PLACEHOLDER_NODES,
