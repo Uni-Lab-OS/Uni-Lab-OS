@@ -199,7 +199,7 @@ class DomainBackendClient:
         return self._request(
             "GET",
             "workflows",
-            params={"page": page, "page_size": page_size, "name": name},
+            params={"page": page, "page_size": page_size, "keyword": name},
         )
 
     def inspect_workflow(self, workflow_uuid: str) -> dict[str, Any]:
@@ -629,7 +629,7 @@ class DomainBackendClient:
                             event_type = value
                         elif field == "data":
                             data_lines.append(value)
-            except (httpx.HTTPError, httpx.StreamError) as error:
+            except (httpx.HTTPError, httpx.StreamError):
                 if time.monotonic() > deadline:
                     return
                 time.sleep(0.1)

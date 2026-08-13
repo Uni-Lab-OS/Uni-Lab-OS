@@ -167,15 +167,15 @@ def create_backend_resource_router(
 
     @router.get("/resource-templates")
     def list_resource_templates(
-        limit: int = Query(default=0),
-        cursor_uuid: Optional[UUID] = Query(default=None),
+        page: int = Query(default=0),
+        page_size: int = Query(default=0),
         keyword: str = Query(default=""),
         resource_type: str = Query(default=""),
     ) -> JSONResponse:
         return _call(
             service.list_resource_templates,
-            limit=limit,
-            cursor_uuid=str(cursor_uuid) if cursor_uuid else None,
+            page=page,
+            page_size=page_size,
             keyword=keyword,
             resource_type=resource_type,
         )

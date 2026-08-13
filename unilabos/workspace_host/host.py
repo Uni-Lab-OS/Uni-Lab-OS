@@ -822,10 +822,13 @@ class WorkspaceHost:
                     ("/api/v1/workflow-node-templates", _successful_envelope),
                     (
                         "/api/v1/workflow-node-templates"
-                        "?limit=100&node_type=material_source",
+                        "?page=1&page_size=100&node_type=material_source",
                         _material_source_catalog_ready,
                     ),
-                    ("/api/v1/resource-templates?limit=1", _nonempty_catalog_ready),
+                    (
+                        "/api/v1/resource-templates?page=1&page_size=1",
+                        _nonempty_catalog_ready,
+                    ),
                 ]
             )
         for path, accepts in probes:

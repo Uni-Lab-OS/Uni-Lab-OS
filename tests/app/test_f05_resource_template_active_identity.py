@@ -105,10 +105,10 @@ def test_active_template_wins_over_same_name_soft_deleted_history(
         inventory_store.close()
 
 
-def test_resource_template_catalog_preserves_package_source_identity(
+def test_resource_template_detail_preserves_package_source_identity(
     tmp_path: Path,
 ) -> None:
-    """Template list/detail publish the catalog-signed package source URI."""
+    """Template detail keeps source identity outside the Backend list summary."""
 
     inventory_store = InventoryStore(str(tmp_path / "inventory.db"))
     try:
@@ -120,13 +120,13 @@ def test_resource_template_catalog_preserves_package_source_identity(
         )
 
         summary = service.list_resource_templates(
-            limit=20,
-            cursor_uuid=None,
+            page=1,
+            page_size=20,
             keyword="",
             resource_type="",
         )["items"][0]
         detail = service.get_resource_template(template_uuid)
-        assert summary["source_uri"] == "package://catalog_lab/definitions.py"
+        assert "source_uri" not in summary
         assert detail["meta_data"]["unilab"]["source_uri"] == (
             "package://catalog_lab/definitions.py"
         )

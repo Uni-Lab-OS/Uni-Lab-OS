@@ -393,10 +393,21 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     def list_workflows(
         page: int = Query(default=1),
         page_size: int = Query(default=20),
-        name: str = Query(default=""),
+        keyword: str = Query(default=""),
     ) -> JSONResponse:
+        result = service.list_workflows(
+            page=page,
+            page_size=page_size,
+            name=keyword,
+        )
         return _success(
-            service.list_workflows(page=page, page_size=page_size, name=name)
+            {
+                "items": result["items"],
+                "has_more": result["page"] * result["page_size"]
+                < result["total"],
+                "page": result["page"],
+                "page_size": result["page_size"],
+            }
         )
 
     @router.get("/workflows/{workflow_uuid}")

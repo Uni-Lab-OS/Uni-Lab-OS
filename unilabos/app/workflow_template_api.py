@@ -17,8 +17,9 @@ from unilabos.workflow.authoring_kernel import (
 )
 from unilabos.workflow.models import validate_uuid
 
-_DEFAULT_LIMIT = 20
-_MAX_LIMIT = 100
+_DEFAULT_PAGE = 1
+_DEFAULT_PAGE_SIZE = 20
+_MAX_PAGE_SIZE = 100
 _DEFAULT_VISIBLE_NODE_TYPES = frozenset(
     {"ILab", "device_action", "py_script", "tool_call", "manual_confirm"}
 )
@@ -52,30 +53,20 @@ class WorkflowTemplateQueryService:
     def __init__(
         self,
         snapshot_provider: TemplateSnapshotProvider,
-        *,
-        authority_id: str = "local",
-        authority_kind: str = "local",
     ) -> None:
         """绑定模板快照提供者。
 
-        参数说明：``snapshot_provider`` 通常是设备注册表模板投影；
-        ``authority_id`` 和 ``authority_kind`` 标识目录权威（Authority）。每次
-        请求只取一次快照，避免一条响应混合两个发布代际。
+        参数说明：``snapshot_provider`` 通常是设备注册表模板投影；每次请求只取
+        一次快照，避免一条响应混合两个发布代际。
         """
 
-        if not authority_id.strip() or authority_kind not in {"local", "backend"}:
-            raise ValueError("模板目录权威身份非法")
         self._snapshot_provider = snapshot_provider
-        self._authority = {
-            "authority_id": authority_id.strip(),
-            "kind": authority_kind,
-        }
 
     def list_node_templates(
         self,
         *,
-        limit: int,
-        cursor_uuid: str | None,
+        page: int,
+        page_size: int,
         keyword: str,
         resource_template_uuid: str | None,
         action_type: str,
@@ -83,32 +74,19 @@ class WorkflowTemplateQueryService:
     ) -> dict[str, Any]:
         """按后端（Backend）当前查询合同返回节点模板摘要页。
 
-        参数说明：``limit`` 被规范到 1..100；``cursor_uuid`` 是上一页末项；其余
-        字段分别筛选名称、资源模板 UUID、动作类型和节点类型。返回游标页对象。
+        参数说明：``page`` 和 ``page_size`` 被规范为 Backend 页码合同；其余字段
+        分别筛选名称、资源模板 UUID、动作类型和节点类型。返回 has-more 页对象。
         """
 
-        normalized_limit = _DEFAULT_LIMIT if limit < 1 else min(limit, _MAX_LIMIT)
+        normalized_page = _DEFAULT_PAGE if page < 1 else page
+        normalized_page_size = (
+            _DEFAULT_PAGE_SIZE
+            if page_size < 1
+            else min(page_size, _MAX_PAGE_SIZE)
+        )
         snapshot = self._snapshot_provider.snapshot()
         # ``ordered_actions`` 使用 Backend 的创建时间降序、UUID 降序规则。
         ordered_actions = sorted(snapshot.actions, key=_action_order, reverse=True)
-        cursor_order: tuple[str, str] | None = None
-        if cursor_uuid is not None:
-            cursor_identity = _validated_uuid(cursor_uuid, "cursor_uuid")
-            cursor_action = next(
-                (
-                    action
-                    for action in ordered_actions
-                    if str(action.template["uuid"]) == cursor_identity
-                ),
-                None,
-            )
-            if cursor_action is None:
-                raise WorkflowTemplateQueryError(
-                    1000,
-                    "cursor_uuid does not reference an existing workflow node template",
-                )
-            cursor_order = _action_order(cursor_action)
-
         normalized_resource_uuid = (
             _validated_uuid(resource_template_uuid, "resource_template_uuid")
             if resource_template_uuid is not None
@@ -120,8 +98,6 @@ class WorkflowTemplateQueryService:
         matches: list[AuthoringCatalogAction] = []
         for action in ordered_actions:
             template = action.template
-            if cursor_order is not None and _action_order(action) >= cursor_order:
-                continue
             if normalized_resource_uuid is not None and str(
                 template.get("resource_template_uuid")
             ) != normalized_resource_uuid:
@@ -142,16 +118,13 @@ class WorkflowTemplateQueryService:
                 continue
             matches.append(action)
 
-        page = matches[:normalized_limit]
-        has_more = len(matches) > normalized_limit
+        offset = (normalized_page - 1) * normalized_page_size
+        page_items = matches[offset : offset + normalized_page_size]
         return {
-            "authority": dict(self._authority),
-            "catalog_fingerprint": snapshot.fingerprint,
-            "items": [_summary(action) for action in page],
-            "has_more": has_more,
-            "next_cursor_uuid": (
-                str(page[-1].template["uuid"]) if has_more and page else None
-            ),
+            "items": [_summary(action) for action in page_items],
+            "has_more": len(matches) > offset + normalized_page_size,
+            "page": normalized_page,
+            "page_size": normalized_page_size,
         }
 
     def get_node_template(self, template_uuid: str) -> dict[str, Any]:
@@ -178,8 +151,6 @@ class WorkflowTemplateQueryService:
             )
         return _omit_none(
             {
-                "authority": dict(self._authority),
-                "catalog_fingerprint": snapshot.fingerprint,
                 "template": action.detached_template(),
                 "handles": action.detached_handles(),
             }
@@ -312,8 +283,8 @@ def create_workflow_template_router(
 
     @router.get("/workflow-node-templates")
     def list_node_templates(
-        limit: int = Query(default=0),
-        cursor_uuid: Annotated[UUID | None, Query()] = None,
+        page: int = Query(default=0),
+        page_size: int = Query(default=0),
         keyword: str = Query(default=""),
         resource_template_uuid: Annotated[UUID | None, Query()] = None,
         action_type: str = Query(default="", alias="type"),
@@ -321,14 +292,14 @@ def create_workflow_template_router(
     ) -> JSONResponse:
         """按 Backend 查询参数返回工作流节点模板摘要页。
 
-        参数说明：``limit`` 和 ``cursor_uuid`` 控制 UUID 游标；``keyword``、资源
+        参数说明：``page`` 和 ``page_size`` 控制页码；``keyword``、资源
         模板 UUID、动作类型和节点类型执行服务端筛选。返回统一 JSON 外壳。
         """
 
         return _call(
             service.list_node_templates,
-            limit=limit,
-            cursor_uuid=str(cursor_uuid) if cursor_uuid else None,
+            page=page,
+            page_size=page_size,
             keyword=keyword,
             resource_template_uuid=(
                 str(resource_template_uuid) if resource_template_uuid else None

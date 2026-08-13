@@ -831,7 +831,7 @@ class _ReadyHandler(BaseHTTPRequestHandler):
                     ]
                 },
             }
-        elif self.path == "/api/v1/resource-templates?limit=1":
+        elif self.path == "/api/v1/resource-templates?page=1&page_size=1":
             payload = {"code": 0, "data": {"items": [{"uuid": "resource"}]}}
         elif self.path == "/api/v1/workspace/package-mounts":
             payload = {

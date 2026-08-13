@@ -217,30 +217,30 @@ class BackendResourceService:
     def list_resource_templates(
         self,
         *,
-        limit: int,
-        cursor_uuid: Optional[str],
+        page: int,
+        page_size: int,
         keyword: str,
         resource_type: str,
     ) -> Dict[str, Any]:
-        limit = 20 if limit <= 0 else min(limit, 100)
-        where = ["deleted_at IS NULL"]
-        values: List[Any] = []
-        if cursor_uuid:
-            where.append("uuid > ?")
-            values.append(cursor_uuid)
+        page = 1 if page <= 0 else page
+        page_size = 20 if page_size <= 0 else min(page_size, 100)
+        where = ["deleted_at IS NULL", "resource_type <> ?"]
+        values: List[Any] = ["framework"]
         if keyword:
-            where.append("(name LIKE ? OR display_name LIKE ?)")
-            values.extend((f"%{keyword}%", f"%{keyword}%"))
+            where.append("(LOWER(name) LIKE ? OR LOWER(display_name) LIKE ?)")
+            keyword_pattern = f"%{keyword.strip().lower()}%"
+            values.extend((keyword_pattern, keyword_pattern))
         if resource_type:
             where.append("resource_type = ?")
-            values.append(resource_type)
+            values.append(resource_type.strip())
+        offset = (page - 1) * page_size
         rows = self.store.query_all(
-            "SELECT uuid,name,display_name,resource_type,tags,meta_data "
+            "SELECT uuid,name,display_name,resource_type,icon,tags "
             f"FROM resource_template WHERE {' AND '.join(where)} "
-            "ORDER BY uuid LIMIT ?",
-            (*values, limit + 1),
+            "ORDER BY create_time DESC,uuid DESC LIMIT ? OFFSET ?",
+            (*values, page_size + 1, offset),
         )
-        page = rows[:limit]
+        page_rows = rows[:page_size]
         return {
             "items": [
                 {
@@ -249,14 +249,13 @@ class BackendResourceService:
                     "display_name": row["display_name"],
                     "resource_type": row["resource_type"],
                     "tags": _json(row["tags"], []),
-                    "source_uri": _json(row["meta_data"], {})
-                    .get("unilab", {})
-                    .get("source_uri"),
+                    **({"icon": row["icon"]} if row["icon"] is not None else {}),
                 }
-                for row in page
+                for row in page_rows
             ],
-            "has_more": len(rows) > limit,
-            "next_cursor_uuid": page[-1]["uuid"] if len(rows) > limit else None,
+            "has_more": len(rows) > page_size,
+            "page": page,
+            "page_size": page_size,
         }
 
     def get_resource_template(self, template_uuid: str) -> Dict[str, Any]:

@@ -110,6 +110,34 @@ def test_workflow_invalid_uuid_uses_backend_business_error(tmp_path):
     store.close()
 
 
+def test_workflow_list_uses_backend_page_more_contract(tmp_path):
+    """Local 工作流目录必须使用 Go Backend 的 page/page_size/has_more 合同。"""
+
+    client, store = _client(tmp_path)
+    for name in ("alpha", "beta"):
+        response = client.post(
+            "/api/v1/workflows",
+            json={"name": name, "tags": [], "meta_data": {}},
+        )
+        assert response.status_code == 201
+
+    first = client.get(
+        "/api/v1/workflows",
+        params={"page": 1, "page_size": 1, "keyword": "a"},
+    ).json()["data"]
+    second = client.get(
+        "/api/v1/workflows",
+        params={"page": 2, "page_size": 1, "keyword": "a"},
+    ).json()["data"]
+
+    assert set(first) == {"items", "has_more", "page", "page_size"}
+    assert first["page"] == 1
+    assert first["page_size"] == 1
+    assert first["has_more"] is True
+    assert second["has_more"] is False
+    store.close()
+
+
 def test_shared_workflow_routes_replace_execution_shaped_workflow_alias(tmp_path):
     router = create_scheduler_router(
         lambda: None,
@@ -143,22 +171,13 @@ def test_local_workflow_app_mounts_template_query_from_same_runtime(tmp_path) ->
         )
     )
 
-    # ``response`` 是空目录仍携带权威身份和目录指纹的成功游标页。
+    # ``response`` 是空目录仍遵循 Backend 页码合同的成功响应。
     response = client.get("/api/v1/workflow-node-templates")
     assert response.status_code == 200
     # ``data`` 是模板目录响应的数据主体。
     data = response.json()["data"]
-    assert data["authority"] == {"authority_id": "local", "kind": "local"}
-    assert data["catalog_fingerprint"].startswith("sha256:")
-    assert {
-        "code": response.json()["code"],
-        "data": {
-            key: value
-            for key, value in data.items()
-            if key not in {"authority", "catalog_fingerprint"}
-        },
-    } == {
+    assert {"code": response.json()["code"], "data": data} == {
         "code": 0,
-        "data": {"items": [], "has_more": False, "next_cursor_uuid": None},
+        "data": {"items": [], "has_more": False, "page": 1, "page_size": 20},
     }
     store.close()

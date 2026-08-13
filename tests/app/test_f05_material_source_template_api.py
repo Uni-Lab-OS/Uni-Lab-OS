@@ -22,8 +22,8 @@ def test_template_query_requires_explicit_material_source_node_type(
     service = WorkflowTemplateQueryService(projection)
     # ``explicit_page`` 是作者主动请求的非动作框架节点投影。
     explicit_page = service.list_node_templates(
-        limit=20,
-        cursor_uuid=None,
+        page=1,
+        page_size=20,
         keyword="",
         resource_template_uuid=None,
         action_type="",
@@ -31,8 +31,8 @@ def test_template_query_requires_explicit_material_source_node_type(
     )
     # ``default_page`` 保留现有动作面板的默认可见类型集，不暗中混入供料边界。
     default_page = service.list_node_templates(
-        limit=20,
-        cursor_uuid=None,
+        page=1,
+        page_size=20,
         keyword="",
         resource_template_uuid=None,
         action_type="",

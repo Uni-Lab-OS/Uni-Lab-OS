@@ -181,6 +181,33 @@ def test_material_routes_use_backend_envelope_and_soft_delete(tmp_path):
     store.close()
 
 
+def test_resource_template_list_uses_backend_page_more_contract(tmp_path) -> None:
+    """Local 资源模板目录必须使用 Go Backend 的页码摘要合同。"""
+
+    client, store = _client(tmp_path)
+    template_uuid = _sync_template(client)
+
+    data = client.get(
+        "/api/v1/resource-templates",
+        params={"page": 1, "page_size": 1, "keyword": "pump"},
+    ).json()["data"]
+
+    assert set(data) == {"items", "has_more", "page", "page_size"}
+    assert data["has_more"] is False
+    assert data["page"] == 1
+    assert data["page_size"] == 1
+    assert data["items"] == [
+        {
+            "uuid": template_uuid,
+            "name": "device.pump",
+            "display_name": "Pump",
+            "resource_type": "device",
+            "tags": [],
+        }
+    ]
+    store.close()
+
+
 def test_created_material_is_immediately_reservable_by_stable_uuid(tmp_path):
     """HTTP 创建的固定物料应立即进入同一库存权威的预留路径。
 
