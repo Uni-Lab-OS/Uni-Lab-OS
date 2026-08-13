@@ -12,6 +12,12 @@ from typing import Any, Mapping, Sequence
 
 from unilabos.client.domain import DomainBackendClient
 from unilabos.client.material_renderer import MaterialRendererClient
+from unilabos.client.material_layout import MaterialLayoutClient
+from unilabos.client.material_template import MaterialTemplateClient
+from unilabos.client.material_visual_regression import (
+    approve_material_baseline,
+    compare_material_capture,
+)
 
 
 class WorkflowAgentTools:
@@ -159,12 +165,14 @@ class WorkflowAgentTools:
         show_material_transfers: bool | None = None,
         selected_material_ids: Sequence[str] = (),
         hidden_material_ids: Sequence[str] = (),
+        layout_overrides: Sequence[Mapping[str, object]] = (),
         timeout: float = 30.0,
+        headless: bool = False,
     ) -> dict[str, Any]:
         """检查当前已打开的真实物料 renderer，不读取 DOM 或另建场景。"""
 
         with MaterialRendererClient.discover(
-            self.workspace, timeout=timeout
+            self.workspace, headless=headless, timeout=timeout
         ) as client:
             return client.inspect_scene(
                 view=view,
@@ -172,6 +180,7 @@ class WorkflowAgentTools:
                 show_material_transfers=show_material_transfers,
                 selected_material_ids=selected_material_ids,
                 hidden_material_ids=hidden_material_ids,
+                layout_overrides=layout_overrides,
                 timeout=timeout,
             )
 
@@ -188,12 +197,14 @@ class WorkflowAgentTools:
         show_material_transfers: bool | None = None,
         selected_material_ids: Sequence[str] = (),
         hidden_material_ids: Sequence[str] = (),
+        layout_overrides: Sequence[Mapping[str, object]] = (),
         timeout: float = 30.0,
+        headless: bool = False,
     ) -> dict[str, Any]:
         """截图当前已附着物料 renderer，并把 PNG 原子写入指定路径。"""
 
         with MaterialRendererClient.discover(
-            self.workspace, timeout=timeout
+            self.workspace, headless=headless, timeout=timeout
         ) as client:
             return client.capture_scene(
                 output,
@@ -205,8 +216,88 @@ class WorkflowAgentTools:
                 show_material_transfers=show_material_transfers,
                 selected_material_ids=selected_material_ids,
                 hidden_material_ids=hidden_material_ids,
+                layout_overrides=layout_overrides,
                 timeout=timeout,
             )
+
+    def inspect_material_layout(self, *, timeout: float = 120.0) -> dict[str, Any]:
+        """Return source graph layout facts and its CAS revision."""
+
+        return MaterialLayoutClient.discover(
+            self.workspace, timeout=timeout
+        ).inspect()
+
+    def preview_material_layout(
+        self,
+        change_set: Mapping[str, object],
+        *,
+        expected_revision: str,
+        timeout: float = 120.0,
+        output: str | None = None,
+        headless: bool = False,
+    ) -> dict[str, Any]:
+        """Compile a non-mutating layout candidate and disposable preview artifact."""
+
+        result = MaterialLayoutClient.discover(
+            self.workspace, timeout=timeout
+        ).preview(change_set, expected_revision=expected_revision)
+        if output:
+            view = result.get("changeSet", {}).get("view", {})
+            layout_overrides = result.get("changeSet", {}).get("nodes", [])
+            with MaterialRendererClient.discover(
+                self.workspace, headless=headless, timeout=timeout
+            ) as renderer:
+                capture = renderer.capture_scene(
+                    output,
+                    view=str(view.get("mode") or "2.5d"),
+                    camera_preset=str(view.get("cameraPreset") or "default"),
+                    viewport=(
+                        int(view.get("viewport", {}).get("width") or 1440),
+                        int(view.get("viewport", {}).get("height") or 960),
+                    ),
+                    layout_overrides=layout_overrides,
+                    timeout=timeout,
+                )
+            result = {**result, "previewImage": capture.get("data")}
+        return result
+
+    def apply_material_layout(
+        self,
+        preview_id: str,
+        *,
+        expected_revision: str,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """CAS-apply exactly one previously compiled layout preview."""
+
+        return MaterialLayoutClient.discover(
+            self.workspace, timeout=timeout
+        ).apply(preview_id, expected_revision=expected_revision)
+
+    def compare_material_scene(
+        self,
+        candidate: str,
+        baseline: str,
+        *,
+        threshold: float,
+    ) -> dict[str, Any]:
+        """Compare captured pixels and stable structural facts."""
+
+        return compare_material_capture(candidate, baseline, threshold=threshold)
+
+    def approve_material_scene_baseline(
+        self, candidate: str, baseline: str
+    ) -> dict[str, Any]:
+        """Explicitly approve and replace one visual baseline."""
+
+        return approve_material_baseline(candidate, baseline)
+
+    def validate_material_templates(
+        self, *, timeout: float = 120.0
+    ) -> dict[str, Any]:
+        """Statically compile templates in an isolated process without publishing."""
+
+        return MaterialTemplateClient(self.workspace, timeout=timeout).validate()
 
 
 def build_mcp_server(
@@ -236,6 +327,12 @@ def build_mcp_server(
     server.tool()(tools.wait_authoring)
     server.tool()(tools.inspect_material_scene)
     server.tool()(tools.capture_material_scene)
+    server.tool()(tools.inspect_material_layout)
+    server.tool()(tools.preview_material_layout)
+    server.tool()(tools.apply_material_layout)
+    server.tool()(tools.compare_material_scene)
+    server.tool()(tools.approve_material_scene_baseline)
+    server.tool()(tools.validate_material_templates)
     return server
 
 

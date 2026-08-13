@@ -10,9 +10,11 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
 import traceback
+import uuid
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +29,7 @@ from .launch import (
     resolve_backend_launch,
     resolve_edge_launch,
     resolve_plc_launch,
+    available_loopback_port,
 )
 from .model import (
     COMPONENT_NAMES,
@@ -283,9 +286,296 @@ class WorkspaceHost:
             return self._attach_renderer(parameters)
         if command == "renderer.detach":
             return self._detach_renderer(parameters)
+        if command == "renderer.headless.ensure":
+            return self._ensure_headless_renderer()
+        if command == "renderer.headless.stop":
+            return self._stop_headless_renderer()
+        if command == "material.layout.inspect":
+            return self._material_layout().inspect()
+        if command == "material.layout.preview":
+            return self._material_layout().preview(
+                parameters.get("changeSet"),
+                expected_revision=_required_text(parameters, "expectedRevision"),
+            )
+        if command == "material.layout.apply":
+            return self._apply_material_layout(parameters)
+        if command == "material.template.validate":
+            return self._validate_material_templates()
         raise WorkspaceHostError(
             "command_unknown", f"未知 Workspace Host 命令：{command}"
         )
+
+    def _material_layout(self):
+        """Resolve the selected source graph without coupling it to Edge state."""
+
+        from .material_layout import MaterialLayoutWorkspace
+
+        with self._lock:
+            backend = dict(self._components["backend"])
+            configuration = dict(self._configuration)
+        metadata = backend.get("metadata")
+        graph_path = (
+            _optional_text(metadata.get("graphPath"))
+            if isinstance(metadata, dict)
+            else None
+        )
+        graph_path = graph_path or _optional_text(configuration.get("graphPath"))
+        graph_path = graph_path or "deployment/graphs/szlab-local-debug.json"
+        return MaterialLayoutWorkspace(self.paths, graph_path)
+
+    def _validate_material_templates(self) -> dict[str, object]:
+        """Compile the full workspace catalog in an isolated, disposable process."""
+
+        generation = str(uuid.uuid4())
+        runtime = self.paths.runtime / "template-validation" / generation
+        runtime.mkdir(parents=True, exist_ok=False)
+        result_path = runtime / "result.json"
+        log_path = self.paths.logs / f"{generation}-template-validation.log"
+        command = [
+            sys.executable,
+            "-m",
+            "unilabos.workspace_host.material_template_worker",
+            "--workspace",
+            str(self.paths.workspace),
+            "--output",
+            str(result_path),
+        ]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        environment = dict(os.environ)
+        source_root = str(Path(__file__).resolve().parents[2])
+        existing_python_path = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            os.pathsep.join((source_root, existing_python_path))
+            if existing_python_path
+            else source_root
+        )
+        try:
+            with log_path.open("ab", buffering=0) as stream:
+                completed = subprocess.run(
+                    command,
+                    cwd=self.paths.workspace,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    timeout=max(self.readiness_timeout, 120.0),
+                    check=False,
+                )
+        except subprocess.TimeoutExpired as error:
+            raise WorkspaceHostError(
+                "template_validation_timeout",
+                f"模板隔离编译超时；日志：{log_path}",
+            ) from error
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise WorkspaceHostError(
+                "template_validation_failed",
+                f"模板隔离编译未返回有效结果；日志：{log_path}",
+                details={"exitCode": completed.returncode},
+            ) from error
+        if not isinstance(result, dict):
+            raise WorkspaceHostError(
+                "template_validation_failed", "模板隔离编译结果必须是 object"
+            )
+        return {
+            **result,
+            "generation": generation,
+            "isolatedProcess": True,
+            "exitCode": completed.returncode,
+            "logPath": str(log_path),
+            "resultPath": str(result_path),
+            "lastValidScenePreserved": True,
+        }
+
+    def _apply_material_layout(
+        self, parameters: dict[str, object]
+    ) -> dict[str, object]:
+        """Apply one proven source preview and refresh the local projection."""
+
+        with self._lock:
+            domain_mode = str(self._configuration.get("domainMode") or "local")
+            backend = dict(self._components["backend"])
+        if domain_mode != "local":
+            raise WorkspaceHostError(
+                "layout_authority_mismatch",
+                "backend Authority 下不能把工作区设备布局隐式写入远端；请切回 local",
+            )
+        result = self._material_layout().apply(
+            _required_text(parameters, "previewId"),
+            expected_revision=_required_text(parameters, "expectedRevision"),
+        )
+        live_projection = self._publish_material_layout(backend, result)
+        renderer_refresh = self._refresh_attached_material_renderer()
+        with self._lock:
+            metadata = self._components["backend"].setdefault("metadata", {})
+            if isinstance(metadata, dict):
+                metadata["graphFingerprint"] = str(result["revision"]).removeprefix(
+                    "sha256:"
+                )
+                metadata["materialLayoutRevision"] = result["revision"]
+            self._publish_locked(
+                "material.layout.applied",
+                {
+                    "previewId": result["previewId"],
+                    "revision": result["revision"],
+                    "changedSourceNodeIds": result["changedSourceNodeIds"],
+                },
+            )
+        return {
+            **result,
+            "authoringRevision": self._revision,
+            "liveProjection": live_projection,
+            "rendererRefresh": renderer_refresh,
+        }
+
+    def _publish_material_layout(
+        self,
+        backend: dict[str, object],
+        result: dict[str, object],
+    ) -> dict[str, object]:
+        """Update the running local Backend through its Backend-shaped API."""
+
+        address = _optional_text(backend.get("address"))
+        if backend.get("phase") != "ready" or not address:
+            return {"status": "backend-not-ready", "updated": 0}
+        payload = self._json_request(f"{address}/api/v1/materials/graph")
+        graph_data = payload.get("data") if isinstance(payload, dict) else None
+        nodes = graph_data.get("nodes") if isinstance(graph_data, dict) else None
+        if not isinstance(nodes, list):
+            raise WorkspaceHostError(
+                "layout_projection_failed", "Local Backend 未返回物料图节点"
+            )
+        by_source_id: dict[str, dict[str, object]] = {}
+        for raw in nodes:
+            if not isinstance(raw, dict):
+                continue
+            material = raw.get("material")
+            metadata = material.get("meta_data") if isinstance(material, dict) else None
+            source_id = (
+                _optional_text(metadata.get("source_node_id"))
+                if isinstance(metadata, dict)
+                else None
+            )
+            if source_id:
+                by_source_id[source_id] = raw
+        change_set = result.get("changeSet")
+        changes = change_set.get("nodes") if isinstance(change_set, dict) else None
+        if not isinstance(changes, list):
+            raise WorkspaceHostError("layout_projection_failed", "布局变更投影无效")
+        updated = 0
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            source_id = str(change.get("sourceNodeId") or "")
+            raw = by_source_id.get(source_id)
+            material = raw.get("material") if isinstance(raw, dict) else None
+            relative_position = (
+                dict(raw.get("relative_position") or {})
+                if isinstance(raw, dict)
+                else {}
+            )
+            if not isinstance(material, dict) or not relative_position:
+                raise WorkspaceHostError(
+                    "layout_projection_failed",
+                    f"Local Backend 无法解析布局节点：{source_id}",
+                )
+            if isinstance(change.get("positionMm"), list):
+                for key, value in zip(
+                    ("position_x", "position_y", "position_z"),
+                    change["positionMm"],
+                    strict=True,
+                ):
+                    relative_position[key] = value
+            if isinstance(change.get("rotationDegXYZ"), list):
+                for key, value in zip(
+                    ("rotation_x", "rotation_y", "rotation_z"),
+                    change["rotationDegXYZ"],
+                    strict=True,
+                ):
+                    relative_position[key] = value
+            config = dict(material.get("config") or {})
+            if isinstance(change.get("assetRef"), dict):
+                rendering = dict(config.get("rendering") or {})
+                rendering["model"] = dict(change["assetRef"])
+                config["rendering"] = rendering
+            body = {
+                "resource_template_uuid": material.get("resource_template_uuid"),
+                "parent_uuid": material.get("parent_uuid"),
+                "barcode": material.get("barcode") or "",
+                "name": material.get("name") or source_id,
+                "description": material.get("description"),
+                "meta_data": material.get("meta_data") or {},
+                "config": config,
+                "relative_position": relative_position,
+            }
+            material_id = _required_text(material, "uuid")
+            self._json_request(
+                f"{address}/api/v1/materials/{material_id}",
+                method="PUT",
+                body=body,
+            )
+            updated += 1
+        return {"status": "updated", "updated": updated, "backendUrl": address}
+
+    def _refresh_attached_material_renderer(self) -> dict[str, object]:
+        with self._lock:
+            renderer = dict(self._components["renderer"])
+        metadata = renderer.get("metadata")
+        base_url = (
+            _optional_text(metadata.get("automationBaseUrl"))
+            if isinstance(metadata, dict)
+            else None
+        )
+        if renderer.get("phase") != "ready" or not base_url:
+            return {"status": "detached"}
+        try:
+            response = self._json_request(
+                f"{base_url.rstrip('/')}/material/reload",
+                method="POST",
+                body={},
+                authorization=True,
+            )
+        except WorkspaceHostError as error:
+            return {"status": "failed", "error": error.as_dict()}
+        return {"status": "refreshed", "response": response.get("result")}
+
+    def _json_request(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        body: object = None,
+        authorization: bool = False,
+    ) -> dict[str, object]:
+        headers = {"Accept": "application/json"}
+        data = None
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if authorization:
+            headers["Authorization"] = f"Bearer {self.token}"
+        try:
+            with urlopen(
+                Request(url, data=data, method=method, headers=headers),
+                timeout=self.readiness_timeout,
+            ) as response:
+                payload = json.loads(response.read())
+        except (OSError, ValueError, URLError) as error:
+            raise WorkspaceHostError(
+                "layout_projection_failed", f"布局实时投影请求失败：{error}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise WorkspaceHostError(
+                "layout_projection_failed", "布局实时投影响应不是 JSON object"
+            )
+        if payload.get("code", 0) != 0 or payload.get("ok") is False:
+            raise WorkspaceHostError(
+                "layout_projection_failed",
+                "布局实时投影被目标拒绝",
+                details=payload.get("error"),
+            )
+        return payload
 
     def _reset_local_edge_protocol_state(self) -> None:
         """Reset transient Edge protocol facts for an explicit local rebuild.
@@ -769,6 +1059,21 @@ class WorkspaceHost:
             raise WorkspaceHostError("renderer_invalid", f"Renderer 进程不存在：{pid}")
         with self._lock:
             generation = str(parameters.get("generation") or pid)
+            previous_metadata = self._components["renderer"].get("metadata")
+            previous_metadata = (
+                dict(previous_metadata) if isinstance(previous_metadata, dict) else {}
+            )
+            workbench_project = _optional_text(parameters.get("workbenchProjectPath"))
+            node_executable = _optional_text(parameters.get("nodeExecutable"))
+            if workbench_project:
+                self._configuration["workbenchProjectPath"] = workbench_project
+            if node_executable:
+                self._configuration["workbenchNodeExecutable"] = node_executable
+            if workbench_project or node_executable:
+                atomic_write_json(
+                    self.paths.environment,
+                    {"schemaVersion": 1, **self._configuration},
+                )
             self._components["renderer"].update(
                 {
                     "phase": "ready",
@@ -782,17 +1087,200 @@ class WorkspaceHost:
                         "theia-rpc",
                         "material-scene-inspect",
                         "material-scene-capture",
+                        "material-scene-reload",
                     ],
                     "metadata": {
+                        **previous_metadata,
                         "automationBaseUrl": (
                             f"{address.rstrip('/')}/__unilab_renderer/v1"
                         ),
                         "automationContract": "unilab-material-renderer/v1",
+                        **(
+                            {"workbenchProjectPath": workbench_project}
+                            if workbench_project
+                            else {}
+                        ),
+                        **(
+                            {"nodeExecutable": node_executable}
+                            if node_executable
+                            else {}
+                        ),
                     },
                 }
             )
             self._publish_locked("renderer.attached", {"pid": pid, "address": address})
             return self._snapshot_locked()
+
+    def _ensure_headless_renderer(self) -> dict[str, object]:
+        """Launch the normal Workbench + Chromium adapter when no UI is attached."""
+
+        with self._lock:
+            renderer = dict(self._components["renderer"])
+        if renderer.get("phase") == "ready" and self._material_renderer_usable(
+            renderer
+        ):
+            return {"status": "ready", "adapter": "attached", "renderer": renderer}
+        metadata = renderer.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        with self._lock:
+            configuration = dict(self._configuration)
+        project = _optional_text(metadata.get("workbenchProjectPath")) or _optional_text(
+            configuration.get("workbenchProjectPath")
+        )
+        node_executable = _optional_text(metadata.get("nodeExecutable")) or _optional_text(
+            configuration.get("workbenchNodeExecutable")
+        )
+        if not project or not node_executable:
+            raise WorkspaceHostError(
+                "headless_renderer_not_configured",
+                "尚未发现已安装 Workbench renderer；请先启动一次 UniLab Workbench",
+            )
+        project_path = Path(project).resolve()
+        script = project_path / "scripts" / "headless-renderer.mjs"
+        backend = project_path / "lib" / "backend" / "main.js"
+        if not script.is_file() or not backend.is_file() or not Path(node_executable).is_file():
+            raise WorkspaceHostError(
+                "headless_renderer_not_configured",
+                f"Workbench headless renderer 未构建：{project_path}",
+            )
+        generation = str(uuid.uuid4())
+        runtime = self.paths.runtime / "renderer" / generation
+        runtime.mkdir(parents=True, exist_ok=False)
+        ready_file = runtime / "ready.json"
+        port = available_loopback_port()
+        log_path = self.paths.logs / f"{generation}-renderer.log"
+        command = [
+            node_executable,
+            str(script),
+            "--workspace",
+            str(self.paths.workspace),
+            "--port",
+            str(port),
+            "--ready-file",
+            str(ready_file),
+        ]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        environment = dict(os.environ)
+        environment["UNILAB_RENDERER_MANAGED_HEADLESS"] = "1"
+        with log_path.open("ab", buffering=0) as stream:
+            process = subprocess.Popen(
+                command,
+                cwd=project_path,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                start_new_session=os.name != "nt",
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
+            )
+        deadline = time.monotonic() + max(self.readiness_timeout, 120.0)
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise WorkspaceHostError(
+                    "headless_renderer_start_failed",
+                    f"Headless renderer 在就绪前退出；日志：{log_path}",
+                )
+            if ready_file.is_file():
+                try:
+                    ready = read_json(ready_file)
+                except WorkspaceHostError:
+                    time.sleep(0.25)
+                    continue
+                address = _optional_text(ready.get("address"))
+                if not address or not address.startswith("http://127.0.0.1:"):
+                    _terminate_process_tree(process.pid, process)
+                    raise WorkspaceHostError(
+                        "headless_renderer_start_failed",
+                        "Headless renderer 返回了无效 loopback 地址",
+                    )
+                current = idle_component("renderer")
+                current.update(
+                    {
+                        "phase": "ready",
+                        "pid": process.pid,
+                        "address": address,
+                        "generation": generation,
+                        "logPath": str(log_path),
+                        "diagnostic": None,
+                        "capabilities": [
+                            "workbench-ui",
+                            "theia-rpc",
+                            "material-scene-inspect",
+                            "material-scene-capture",
+                            "material-scene-reload",
+                        ],
+                        "metadata": {
+                            "automationBaseUrl": (
+                                f"{address.rstrip('/')}/__unilab_renderer/v1"
+                            ),
+                            "automationContract": "unilab-material-renderer/v1",
+                            "workbenchProjectPath": str(project_path),
+                            "nodeExecutable": node_executable,
+                            "adapter": "headless",
+                            "headlessLauncherPid": process.pid,
+                            "headlessLogPath": str(log_path),
+                        },
+                    }
+                )
+                with self._lock:
+                    self._components["renderer"] = current
+                    self._publish_locked(
+                        "renderer.headless.ready",
+                        {"generation": generation, "launcherPid": process.pid},
+                    )
+                return {
+                    "status": "ready",
+                    "adapter": "headless",
+                    "generation": generation,
+                    "launcherPid": process.pid,
+                    "renderer": current,
+                }
+            time.sleep(0.25)
+        _terminate_process_tree(process.pid, process)
+        raise WorkspaceHostError(
+            "headless_renderer_readiness_failed",
+            f"等待 Headless renderer 就绪超时；日志：{log_path}",
+        )
+
+    def _material_renderer_usable(self, renderer: dict[str, object]) -> bool:
+        metadata = renderer.get("metadata")
+        base_url = (
+            _optional_text(metadata.get("automationBaseUrl"))
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not base_url:
+            return False
+        try:
+            self._json_request(
+                f"{base_url.rstrip('/')}/material/scene?view=2.5d",
+                authorization=True,
+            )
+        except WorkspaceHostError:
+            return False
+        return True
+
+    def _stop_headless_renderer(self) -> dict[str, object]:
+        with self._lock:
+            renderer = dict(self._components["renderer"])
+        metadata = renderer.get("metadata")
+        launcher_pid = (
+            metadata.get("headlessLauncherPid")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not isinstance(launcher_pid, int) or launcher_pid < 1:
+            return {"status": "not-running"}
+        _terminate_process_tree(launcher_pid, None)
+        with self._lock:
+            preserved = dict(metadata) if isinstance(metadata, dict) else {}
+            preserved.pop("headlessLauncherPid", None)
+            self._components["renderer"].update(idle_component("renderer"))
+            self._components["renderer"]["metadata"] = preserved
+            self._publish_locked("renderer.headless.stopped", {"pid": launcher_pid})
+        return {"status": "stopped", "launcherPid": launcher_pid}
 
     def _detach_renderer(self, parameters: dict[str, object]) -> dict[str, object]:
         requested_pid = parameters.get("pid")
@@ -1108,6 +1596,20 @@ def _pid_exists(pid: int) -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
+    if os.name != "nt":
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=1,
+            )
+            if completed.returncode == 0 and completed.stdout.lstrip().startswith(b"Z"):
+                return False
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     return True
 
 
@@ -1137,7 +1639,10 @@ def _terminate_process_tree(pid: int, process: subprocess.Popen[bytes] | None) -
         return
     try:
         os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        if not _pid_exists(pid):
+            return
+        raise
         return
     deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -1152,7 +1657,10 @@ def _terminate_process_tree(pid: int, process: subprocess.Popen[bytes] | None) -
     ):
         try:
             os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            if not _pid_exists(pid):
+                return
+            raise
             return
     if process is not None:
         try:

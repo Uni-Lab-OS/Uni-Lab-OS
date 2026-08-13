@@ -1,4 +1,5 @@
 import base64
+import json
 from pathlib import Path
 
 import httpx
@@ -84,6 +85,10 @@ def test_capture_writes_valid_png_and_removes_base64_from_result(tmp_path: Path)
     assert output.read_bytes() == png
     assert result["data"]["image"]["path"] == str(output)
     assert result["data"]["image"]["bytes"] == len(png)
+    metadata_path = Path(result["data"]["image"]["metadataPath"])
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["layoutRevision"] == "revision-1"
+    assert metadata["image"]["sha256"] == result["data"]["image"]["sha256"]
     assert "base64" not in result["data"]["image"]
 
 
@@ -102,3 +107,49 @@ def test_fails_closed_when_renderer_is_not_attached(
     with pytest.raises(MaterialRendererClientError) as caught:
         MaterialRendererClient.discover(tmp_path)
     assert caught.value.code == "material_renderer_not_attached"
+
+
+def test_headless_discovery_is_owned_by_workspace_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Host:
+        token = "secret"
+        ready = False
+        submitted = ""
+
+        def snapshot(self):
+            renderer = {"phase": "idle"}
+            if self.ready:
+                renderer = {
+                    "phase": "ready",
+                    "generation": "headless-1",
+                    "capabilities": [
+                        "material-scene-inspect",
+                        "material-scene-capture",
+                    ],
+                    "metadata": {
+                        "automationBaseUrl": "http://127.0.0.1:3199/__unilab_renderer/v1",
+                        "automationContract": "unilab-material-renderer/v1",
+                    },
+                }
+            return {"workspacePath": str(tmp_path), "components": {"renderer": renderer}}
+
+        def submit(self, command, *, operation_id):
+            self.submitted = command
+            return {"operationId": operation_id}
+
+        def wait(self, _operation_id, *, timeout):
+            assert timeout >= 120
+            self.ready = True
+            return {"phase": "succeeded"}
+
+    host = Host()
+    monkeypatch.setattr(
+        "unilabos.client.material_renderer.ensure_workspace_host", lambda _path: host
+    )
+
+    client = MaterialRendererClient.discover(tmp_path, headless=True)
+
+    assert host.submitted == "renderer.headless.ensure"
+    assert client.renderer_generation == "headless-1"
+    client.close()

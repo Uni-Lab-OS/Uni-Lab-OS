@@ -60,6 +60,30 @@ def test_workspace_token_is_private_and_stable(workspace: Path) -> None:
         assert paths.token.stat().st_mode & 0o777 == 0o600
 
 
+def test_attached_renderer_records_a_reusable_headless_adapter(workspace: Path) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    snapshot = host._dispatch(
+        "renderer.attach",
+        {
+            "pid": os.getpid(),
+            "address": "http://127.0.0.1:3100",
+            "generation": "renderer-1",
+            "workbenchProjectPath": "/opt/unilab/workbench",
+            "nodeExecutable": "/opt/unilab/node",
+        },
+    )
+
+    renderer = snapshot["components"]["renderer"]
+    assert "material-scene-reload" in renderer["capabilities"]
+    assert renderer["metadata"]["workbenchProjectPath"] == "/opt/unilab/workbench"
+    host._material_renderer_usable = lambda _renderer: True  # type: ignore[method-assign]
+    ensured = host._dispatch("renderer.headless.ensure", {})
+    assert ensured["adapter"] == "attached"
+    host.close()
+
+
 def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     workspace: Path,
 ) -> None:
@@ -430,6 +454,7 @@ def test_renderer_registration_is_host_owned_and_detachable(workspace: Path) -> 
             "theia-rpc",
             "material-scene-inspect",
             "material-scene-capture",
+            "material-scene-reload",
         ],
         "metadata": {
             "automationBaseUrl": "http://127.0.0.1:3100/__unilab_renderer/v1",

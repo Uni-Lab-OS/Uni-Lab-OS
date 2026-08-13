@@ -39,6 +39,8 @@ from .material_renderer import (
     MaterialRendererClient,
     MaterialRendererClientError,
 )
+from .material_layout import MaterialLayoutClient
+from .material_template import MaterialTemplateClient
 
 __all__ = [
     "Envelope",
@@ -69,4 +71,6 @@ __all__ = [
     "MATERIAL_RENDERER_CONTRACT",
     "MaterialRendererClient",
     "MaterialRendererClientError",
+    "MaterialLayoutClient",
+    "MaterialTemplateClient",
 ]

@@ -5,6 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import json
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -66,11 +69,34 @@ class MaterialRendererClient:
         cls,
         workspace: str | Path,
         *,
+        headless: bool = False,
         timeout: float = 30.0,
     ) -> "MaterialRendererClient":
         try:
             host = ensure_workspace_host(workspace)
             snapshot = host.snapshot()
+            components = snapshot.get("components")
+            renderer = components.get("renderer") if isinstance(components, Mapping) else None
+            if headless:
+                submitted = host.submit(
+                    "renderer.headless.ensure",
+                    operation_id=str(uuid.uuid4()),
+                )
+                operation = host.wait(
+                    str(submitted["operationId"]), timeout=max(timeout, 120.0)
+                )
+                if operation.get("phase") == "failed":
+                    failure = operation.get("error")
+                    if isinstance(failure, Mapping):
+                        raise WorkspaceHostError(
+                            str(failure.get("code") or "headless_renderer_failed"),
+                            str(failure.get("message") or "Headless renderer 启动失败"),
+                            details=failure.get("details"),
+                        )
+                    raise WorkspaceHostError(
+                        "headless_renderer_failed", "Headless renderer 启动失败"
+                    )
+                snapshot = host.snapshot()
         except WorkspaceHostError as error:
             raise MaterialRendererClientError(
                 error.code, str(error), details=error.details
@@ -137,6 +163,7 @@ class MaterialRendererClient:
         show_material_transfers: bool | None = None,
         selected_material_ids: Sequence[str] = (),
         hidden_material_ids: Sequence[str] = (),
+        layout_overrides: Sequence[Mapping[str, object]] = (),
         timeout: float | None = None,
     ) -> dict[str, Any]:
         options = _renderer_options(
@@ -145,10 +172,15 @@ class MaterialRendererClient:
             show_material_transfers=show_material_transfers,
             selected_material_ids=selected_material_ids,
             hidden_material_ids=hidden_material_ids,
+            layout_overrides=layout_overrides,
             timeout=timeout,
         )
         query = {
-            key: ",".join(value) if isinstance(value, list) else value
+            key: (
+                json.dumps(value, ensure_ascii=False)
+                if key == "layoutOverrides"
+                else ",".join(value) if isinstance(value, list) else value
+            )
             for key, value in options.items()
         }
         response = self._request("GET", "material/scene", params=query)
@@ -163,6 +195,7 @@ class MaterialRendererClient:
         show_material_transfers: bool | None = None,
         selected_material_ids: Sequence[str] = (),
         hidden_material_ids: Sequence[str] = (),
+        layout_overrides: Sequence[Mapping[str, object]] = (),
         camera_preset: str | None = None,
         viewport: tuple[int, int] | None = None,
         pixel_ratio: float = 1.0,
@@ -174,6 +207,7 @@ class MaterialRendererClient:
             show_material_transfers=show_material_transfers,
             selected_material_ids=selected_material_ids,
             hidden_material_ids=hidden_material_ids,
+            layout_overrides=layout_overrides,
             timeout=timeout,
         )
         if camera_preset is not None:
@@ -221,12 +255,61 @@ class MaterialRendererClient:
                 "sha256": hashlib.sha256(png).hexdigest(),
             }
         )
+        artifact = {
+            "schemaVersion": "unilab-material-capture-artifact/v1",
+            "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "workspacePath": self.workspace_path,
+            "rendererGeneration": self.renderer_generation,
+            "rendererVersion": capture.get("rendererVersion"),
+            "sourceIdentity": (
+                capture.get("scene", {}).get("sourceIdentity")
+                if isinstance(capture.get("scene"), Mapping)
+                else None
+            ),
+            "layoutRevision": (
+                capture.get("scene", {}).get("layoutRevision")
+                if isinstance(capture.get("scene"), Mapping)
+                else None
+            ),
+            "templateRevision": (
+                capture.get("scene", {}).get("templateRevision")
+                if isinstance(capture.get("scene"), Mapping)
+                else None
+            ),
+            "viewport": {
+                "width": sanitized_image.get("width"),
+                "height": sanitized_image.get("height"),
+                "pixelRatio": pixel_ratio,
+            },
+            "scene": capture.get("scene"),
+            "image": sanitized_image,
+        }
+        metadata_path = output_path.with_suffix(f"{output_path.suffix}.json")
+        metadata_temporary = metadata_path.with_name(
+            f"{metadata_path.name}.{os.getpid()}.tmp"
+        )
+        metadata_temporary.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(metadata_temporary, metadata_path)
+        sanitized_image["metadataPath"] = str(metadata_path)
         return self._result(
             {
                 **dict(capture),
                 "image": sanitized_image,
             }
         )
+
+    def reload_scene(self, *, timeout: float | None = None) -> dict[str, Any]:
+        """Ask the attached viewport to discard its graph cache and refetch."""
+
+        response = self._request(
+            "POST",
+            "material/reload",
+            json={"timeoutMs": round(timeout * 1000)} if timeout else {},
+        )
+        return self._result(response.get("result"))
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
@@ -274,6 +357,7 @@ def _renderer_options(
     show_material_transfers: bool | None,
     selected_material_ids: Sequence[str],
     hidden_material_ids: Sequence[str],
+    layout_overrides: Sequence[Mapping[str, object]],
     timeout: float | None,
 ) -> dict[str, object]:
     result: dict[str, object] = {}
@@ -287,6 +371,8 @@ def _renderer_options(
         result["selectedMaterialIds"] = list(selected_material_ids)
     if hidden_material_ids:
         result["hiddenMaterialIds"] = list(hidden_material_ids)
+    if layout_overrides:
+        result["layoutOverrides"] = [dict(item) for item in layout_overrides]
     if timeout is not None:
         result["timeoutMs"] = round(timeout * 1000)
     return result
