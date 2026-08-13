@@ -1433,6 +1433,17 @@ def main():
             "Edge Runtime 使用生产形态 HTTP/WebSocket 协议连接控制面",
             "info",
         )
+    elif (
+        runtime_process_plan.role.value == "workspace_backend"
+        and runtime_process_plan.control_plane.value == "backend"
+    ):
+        # Local Backend remains the stable Workspace Authoring service while
+        # Canvas/Runtime facts live in the Go Backend.  It must not create a
+        # second Scheduler/Inventory authority or connect as a device Edge.
+        print_status(
+            "Workspace Backend 使用 Backend Authority；仅保留 Authoring Projection",
+            "info",
+        )
     elif BasicConfig.is_host_mode:
         from unilabos.app.control_plane import (
             ControlPlaneRuntimeContext,

@@ -43,6 +43,13 @@ def register_workspace_subcommands(subparsers: Any) -> None:
     operation.add_argument("operation_id")
     operation.add_argument("--workspace", dest="workspace_cli_path", default=None)
     operation.add_argument("--json", action="store_true", dest="workspace_json")
+    authority = actions.add_parser("authority")
+    authority.add_argument("mode", choices=["local", "backend"])
+    authority.add_argument("--backend-url", default=None)
+    authority.add_argument("--workspace", dest="workspace_cli_path", default=None)
+    authority.add_argument("--operation-id", default=None)
+    authority.add_argument("--wait", type=float, default=120.0)
+    authority.add_argument("--json", action="store_true", dest="workspace_json")
 
 
 def dispatch_workspace_command(args: dict[str, Any]) -> bool:
@@ -62,6 +69,29 @@ def dispatch_workspace_command(args: dict[str, Any]) -> bool:
         elif action == "operation":
             client = WorkspaceHostClient.discover(workspace)
             result = client.operation(str(args["operation_id"]))
+        elif action == "authority":
+            client = ensure_workspace_host(workspace)
+            submitted = client.submit(
+                "authority.switch",
+                parameters={
+                    "mode": args.get("mode"),
+                    "backendUrl": args.get("backend_url"),
+                },
+                operation_id=args.get("operation_id") or str(uuid.uuid4()),
+            )
+            result = client.wait(
+                str(submitted["operationId"]),
+                timeout=float(args.get("wait") or 120.0),
+            )
+            if result.get("phase") == "failed":
+                failure = result.get("error")
+                if isinstance(failure, dict):
+                    raise WorkspaceHostError(
+                        str(failure.get("code") or "operation_failed"),
+                        str(failure.get("message") or "Workspace Host 操作失败"),
+                        details=failure.get("details"),
+                    )
+                raise WorkspaceHostError("operation_failed", "Workspace Host 操作失败")
         else:
             client = ensure_workspace_host(workspace)
             parameters = {

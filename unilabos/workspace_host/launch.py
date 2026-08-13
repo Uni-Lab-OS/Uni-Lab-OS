@@ -74,6 +74,11 @@ def resolve_backend_launch(
         mode = "dry-run"
     if mode not in {"normal", "dry-run"}:
         raise WorkspaceHostError("runtime_mode_invalid", f"无效启动模式：{mode}")
+    domain_mode = _optional_text(config.get("domainMode")) or "local"
+    if domain_mode not in {"local", "backend"}:
+        raise WorkspaceHostError(
+            "domain_mode_invalid", f"无效 Domain Authority：{domain_mode}"
+        )
     generation = str(uuid.uuid4())
     runtime_directory = paths.runtime / "backend" / generation
     runtime_directory.mkdir(parents=True, exist_ok=False)
@@ -114,6 +119,8 @@ def resolve_backend_launch(
         str(runtime_directory),
         "--process_role",
         "workspace_backend",
+        "--control_plane",
+        domain_mode,
         "--backend",
         "ros",
         "--app_bridges",
@@ -140,6 +147,8 @@ def resolve_backend_launch(
             "graphPath": str(graph),
             "graphFingerprint": _sha256(graph),
             "runtimeMode": mode,
+            "domainMode": domain_mode,
+            "backendUrl": _optional_text(config.get("backendUrl")),
             "hostLinkPort": hostlink_port,
             "runtimeDirectory": str(runtime_directory),
             "validatedGraphPath": str(validated_graph),
@@ -159,21 +168,50 @@ def resolve_edge_launch(
     runtime_directory.mkdir(parents=True, exist_ok=False)
     ready_file = runtime_directory / "ready.json"
     mode = str(metadata.get("runtimeMode") or "normal")
-    backend_address = str(backend.get("address") or "").strip()
-    if not backend_address:
+    local_backend_address = str(backend.get("address") or "").strip()
+    if not local_backend_address:
         raise WorkspaceHostError("backend_not_ready", "Backend 缺少服务地址")
+    domain_mode = str(metadata.get("domainMode") or "local")
+    if domain_mode not in {"local", "backend"}:
+        raise WorkspaceHostError(
+            "domain_mode_invalid", f"无效 Domain Authority：{domain_mode}"
+        )
+    authority_address = (
+        str(metadata.get("backendUrl") or "").rstrip("/")
+        if domain_mode == "backend"
+        else local_backend_address
+    )
+    if not authority_address:
+        raise WorkspaceHostError(
+            "backend_url_missing", "Backend Authority 未配置服务地址"
+        )
+    authority_token = (
+        os.environ.get("UNILAB_BACKEND_API_KEY") or _workspace_host_token(paths)
+        if domain_mode == "backend"
+        else _workspace_host_token(paths)
+    )
     edge_state_directory = paths.runtime / "edge"
     edge_state_directory.mkdir(parents=True, exist_ok=True)
+    # Command sequence numbers and pending outcomes are scoped to the
+    # scheduler authority that issued them.  Reusing Local Authority state
+    # against Backend Authority makes a legitimate local acknowledgement look
+    # like an impossible future acknowledgement to Backend.  Keep the existing
+    # local filename for upgrade/crash recovery and isolate every remote
+    # authority by a stable origin digest.
+    state_db = edge_state_directory / "edge_control.db"
+    if domain_mode == "backend":
+        authority_digest = hashlib.sha256(authority_address.encode("utf-8")).hexdigest()[
+            :16
+        ]
+        state_db = edge_state_directory / f"edge_control-backend-{authority_digest}.db"
     environment = _runtime_environment(paths, generation)
     environment.update(
         {
-            "UNILABOS_EDGECONTROLCONFIG_API_KEY": _workspace_host_token(paths),
-            "UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR": backend_address,
+            "UNILABOS_EDGECONTROLCONFIG_API_KEY": authority_token,
+            "UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR": authority_address,
             "UNILABOS_EDGECONTROLCONFIG_EDGE_KEY": _workspace_edge_key(paths),
-            "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": backend_address,
-            "UNILABOS_EDGECONTROLCONFIG_STATE_DB": str(
-                edge_state_directory / "edge_control.db"
-            ),
+            "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": authority_address,
+            "UNILABOS_EDGECONTROLCONFIG_STATE_DB": str(state_db),
             "UNILABOS_WORKBENCH_RUNTIME_MODE": mode,
             "UNILABOS_WORKBENCH_PROCESS_ROLE": "edge_runtime",
             "UNILABOS_EDGE_READY_FILE": str(ready_file),
@@ -194,7 +232,7 @@ def resolve_edge_launch(
         "--process_role",
         "edge_runtime",
         "--control_plane",
-        "local",
+        domain_mode,
         "--backend",
         "ros",
         "--app_bridges",
@@ -220,6 +258,9 @@ def resolve_edge_launch(
         metadata={
             "graphPath": metadata["graphPath"],
             "runtimeMode": mode,
+            "domainMode": domain_mode,
+            "authorityAddress": authority_address,
+            "protocolStatePath": str(state_db),
             "runtimeDirectory": str(runtime_directory),
             "readyFilePath": str(ready_file),
         },

@@ -14,6 +14,7 @@ from unilabos.app.control_plane import (
     ControlPlaneMode,
     ControlPlaneRuntimeContext,
     should_mount_embedded_scheduler_routes,
+    should_mount_workspace_authoring_routes,
     start_control_plane_runtime,
     validate_control_plane_arguments,
 )
@@ -63,7 +64,7 @@ def test_workbench_split_runtime_roles_are_orthogonal_to_local_authority() -> No
     assert edge_plan.initializes_host_devices
 
 
-def test_split_runtime_rejects_role_authority_mismatches() -> None:
+def test_split_runtime_accepts_backend_workspace_authoring_without_edge() -> None:
     local_edge_with_slave = vars(
         parse_args().parse_args(
             [
@@ -83,7 +84,6 @@ def test_split_runtime_rejects_role_authority_mismatches() -> None:
                 "--control_plane",
                 "backend",
                 "--app_bridges",
-                "edge_control",
                 "fastapi",
             ]
         )
@@ -91,8 +91,11 @@ def test_split_runtime_rejects_role_authority_mismatches() -> None:
 
     with pytest.raises(ValueError, match="不能使用 --is_slave"):
         resolve_runtime_process_plan(local_edge_with_slave)
-    with pytest.raises(ValueError, match="当前只承载 local Authority"):
-        resolve_runtime_process_plan(backend_workspace)
+    plan = resolve_runtime_process_plan(backend_workspace)
+    assert plan.role is RuntimeProcessRole.WORKSPACE_BACKEND
+    assert plan.control_plane is ControlPlaneMode.BACKEND
+    assert plan.starts_web_server
+    assert not plan.initializes_host_devices
 
 
 def test_edge_runtime_ready_signal_is_atomic(tmp_path) -> None:
@@ -124,6 +127,23 @@ def test_backend_control_plane_requires_only_production_bridge() -> None:
     arguments["app_bridges"] = ["fastapi"]
     with pytest.raises(ValueError, match="edge_control"):
         validate_control_plane_arguments(arguments)
+
+    workspace_arguments = vars(
+        parse_args().parse_args(
+            [
+                "--process_role",
+                "workspace_backend",
+                "--control_plane",
+                "backend",
+                "--app_bridges",
+                "fastapi",
+            ]
+        )
+    )
+    assert (
+        validate_control_plane_arguments(workspace_arguments)
+        is ControlPlaneMode.BACKEND
+    )
 
     arguments["app_bridges"] = ["edge_control", "websocket", "fastapi"]
     with pytest.raises(ValueError, match="websocket"):
@@ -225,6 +245,21 @@ def test_fastapi_mounts_embedded_routes_only_for_local_control_plane(
     monkeypatch.setattr(BasicConfig, "control_plane", control_plane)
 
     assert should_mount_embedded_scheduler_routes() is expected
+
+
+@pytest.mark.parametrize(
+    ("process_role", "expected"),
+    [("combined", True), ("workspace_backend", True), ("edge_runtime", False)],
+)
+def test_workspace_authoring_routes_follow_process_role_not_authority(
+    process_role: str,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(BasicConfig, "process_role", process_role)
+    monkeypatch.setattr(BasicConfig, "control_plane", "backend")
+
+    assert should_mount_workspace_authoring_routes() is expected
 
 
 def test_backend_fastapi_does_not_import_or_mount_embedded_scheduler(

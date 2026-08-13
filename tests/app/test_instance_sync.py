@@ -155,11 +155,12 @@ def test_instance_sync_creates_device_and_instrument_through_material_api():
 
     report = synchronizer.sync_graph(graph)
 
-    assert report.created_count == 2
+    assert report.created_count == 3
     assert report.existing_count == 0
     assert report.material_uuids == {
-        "pump_01": "material-uuid-1",
-        "tube_01": "material-uuid-2",
+        "host_node": "material-uuid-1",
+        "pump_01": "material-uuid-2",
+        "tube_01": "material-uuid-3",
     }
     get_calls = [call for call in session.calls if call[0] == "GET"]
     assert [call[1] for call in get_calls] == [
@@ -169,10 +170,11 @@ def test_instance_sync_creates_device_and_instrument_through_material_api():
     assert get_calls[1][2]["params"]["with_children"] == "true"
     post_calls = [call for call in session.calls if call[0] == "POST"]
     assert [call[2]["json"]["barcode"] for call in post_calls] == [
+        "UNILAB-GRAPH-host_node",
         "DEV-PUMP-01",
         "INS-TUBE-01",
     ]
-    assert post_calls[0][2]["json"] == {
+    assert post_calls[1][2]["json"] == {
         "resource_template_uuid": "pump-template-uuid",
         "barcode": "DEV-PUMP-01",
         "name": "模拟注射泵",
@@ -183,6 +185,7 @@ def test_instance_sync_creates_device_and_instrument_through_material_api():
             "initial_state": {"status": "Idle"},
         },
     }
+    assert post_calls[2][2]["json"]["parent_uuid"] == "material-uuid-1"
     assert all(
         call[2]["headers"]["Authorization"] == "Bearer operator-secret"
         for call in session.calls

@@ -100,6 +100,93 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     ]
 
 
+def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    ensure_local_token(paths)
+    paths.environment.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "graphPath": "deployment/graphs/graph.json",
+                "runtimeMode": "normal",
+                "domainMode": "backend",
+                "backendUrl": "https://backend.example.test",
+            }
+        )
+    )
+
+    backend = resolve_backend_launch(
+        paths,
+        backend_port=48_111,
+        hostlink_port=48_112,
+    )
+    edge = resolve_edge_launch(
+        paths,
+        {"address": backend.address, "metadata": backend.metadata},
+    )
+
+    assert _argument_value(backend.command, "--control_plane") == "backend"
+    assert "fastapi" in backend.command
+    assert "edge_control" not in backend.command
+    assert backend.metadata["domainMode"] == "backend"
+    assert _argument_value(edge.command, "--control_plane") == "backend"
+    assert edge.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
+        "https://backend.example.test"
+    )
+    assert edge.environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"]
+    assert edge.metadata["authorityAddress"] == "https://backend.example.test"
+    backend_state = edge.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"]
+    assert backend_state.startswith(
+        str(paths.runtime / "edge" / "edge_control-backend-")
+    )
+    assert backend_state.endswith(".db")
+    assert backend_state != str(paths.runtime / "edge" / "edge_control.db")
+
+    repeated = resolve_edge_launch(
+        paths,
+        {"address": backend.address, "metadata": backend.metadata},
+    )
+    assert repeated.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"] == backend_state
+
+
+def test_authority_switch_preflights_before_restart_and_persists_mode(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    calls: list[str] = []
+    host._preflight_backend_authority = lambda url: calls.append(f"preflight:{url}")  # type: ignore[method-assign]
+    host._bootstrap_backend_authority = lambda url: calls.append(f"bootstrap:{url}")  # type: ignore[method-assign]
+    host._stop_component = lambda name: calls.append(f"stop:{name}") or {}  # type: ignore[method-assign]
+    host._start_backend = lambda parameters: calls.append("start:backend") or {}  # type: ignore[method-assign]
+    host._start_edge = lambda: calls.append("start:edge") or {}  # type: ignore[method-assign]
+    host._components["backend"]["phase"] = "ready"
+    host._components["edge"]["phase"] = "ready"
+
+    snapshot = host._dispatch(
+        "authority.switch",
+        {"mode": "backend", "backendUrl": "http://127.0.0.1:8080/"},
+    )
+
+    assert calls == [
+        "preflight:http://127.0.0.1:8080",
+        "bootstrap:http://127.0.0.1:8080",
+        "stop:edge",
+        "stop:backend",
+        "start:backend",
+        "start:edge",
+    ]
+    assert snapshot["configuration"]["domainMode"] == "backend"
+    assert snapshot["configuration"]["backendUrl"] == "http://127.0.0.1:8080"
+    persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
+    assert persisted["domainMode"] == "backend"
+    host.close()
+
+
 def test_plc_launch_preserves_explicit_handshake_workflow(workspace: Path) -> None:
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()
@@ -362,6 +449,10 @@ def _pid_running(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _argument_value(command: tuple[str, ...], name: str) -> str:
+    return command[command.index(name) + 1]
 
 
 class _ReadyHandler(BaseHTTPRequestHandler):

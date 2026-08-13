@@ -93,9 +93,13 @@ def setup_server() -> FastAPI:
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
     global local_edge_control_routes_mounted, workspace_authoring_routes_mounted
-    from unilabos.app.control_plane import should_mount_embedded_scheduler_routes
+    from unilabos.app.control_plane import (
+        should_mount_embedded_scheduler_routes,
+        should_mount_workspace_authoring_routes,
+    )
 
     embedded_scheduler_enabled = should_mount_embedded_scheduler_routes()
+    workspace_authoring_enabled = should_mount_workspace_authoring_routes()
 
     # 创建页面路由
     if pages is None:
@@ -105,7 +109,7 @@ def setup_server() -> FastAPI:
     setup_api_routes(app)
 
     if (
-        embedded_scheduler_enabled
+        workspace_authoring_enabled
         and not workspace_authoring_routes_mounted
         and BasicConfig.workspace_package_mount_projection is not None
     ):

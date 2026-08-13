@@ -18,6 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .discovery import WorkspaceHostLock, ensure_local_token
@@ -276,6 +277,8 @@ class WorkspaceHost:
             return self._start_plc()
         if command == "configuration.update":
             return self._update_configuration(parameters)
+        if command == "authority.switch":
+            return self._switch_authority(parameters)
         if command == "renderer.attach":
             return self._attach_renderer(parameters)
         if command == "renderer.detach":
@@ -321,11 +324,12 @@ class WorkspaceHost:
             metadata = self._components["backend"].setdefault("metadata", {})
             assert isinstance(metadata, dict)
             metadata["packageMounts"] = package_mounts
-            self._components["backend"]["capabilities"] = [
-                "authoring",
-                "inventory",
-                "workflow-run",
-            ]
+            domain_mode = str(plan.metadata.get("domainMode") or "local")
+            self._components["backend"]["capabilities"] = (
+                ["authoring"]
+                if domain_mode == "backend"
+                else ["authoring", "inventory", "workflow-run"]
+            )
             self._publish_locked("backend.ready", {"generation": plan.generation})
             return self._snapshot_locked()
 
@@ -484,16 +488,20 @@ class WorkspaceHost:
     def _wait_backend_ready(self, plan: LaunchPlan) -> dict[str, object]:
         if not plan.address:
             raise WorkspaceHostError("backend_start_failed", "Backend 地址缺失")
-        probes = (
-            ("/api/v1/health", _health_ready),
-            ("/api/v1/devices", _successful_envelope),
-            ("/api/v1/workflow-node-templates", _successful_envelope),
-            (
-                "/api/v1/workflow-node-templates?limit=100&node_type=material_source",
-                _material_source_catalog_ready,
-            ),
-            ("/api/v1/resource-templates?limit=1", _nonempty_catalog_ready),
-        )
+        probes = [("/api/v1/health", _health_ready)]
+        if plan.metadata.get("domainMode") != "backend":
+            probes.extend(
+                [
+                    ("/api/v1/devices", _successful_envelope),
+                    ("/api/v1/workflow-node-templates", _successful_envelope),
+                    (
+                        "/api/v1/workflow-node-templates"
+                        "?limit=100&node_type=material_source",
+                        _material_source_catalog_ready,
+                    ),
+                    ("/api/v1/resource-templates?limit=1", _nonempty_catalog_ready),
+                ]
+            )
         for path, accepts in probes:
             self._wait_backend_payload(plan, path, accepts)
         payload = self._wait_backend_payload(
@@ -567,6 +575,8 @@ class WorkspaceHost:
             "plcVariableTablePath",
             "plcHandshakeProfile",
             "plcHandshakeWorkflow",
+            "domainMode",
+            "backendUrl",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
@@ -580,6 +590,171 @@ class WorkspaceHost:
             atomic_write_json(self.paths.environment, payload)
             self._publish_locked("configuration.updated", parameters)
             return self._snapshot_locked()
+
+    def _switch_authority(self, parameters: dict[str, object]) -> dict[str, object]:
+        """Atomically move Canvas/Runtime and Edge to one Domain Authority."""
+
+        mode = _optional_text(parameters.get("mode"))
+        if mode not in {"local", "backend"}:
+            raise WorkspaceHostError(
+                "domain_mode_invalid", "Authority mode 必须是 local 或 backend"
+            )
+        backend_url = _optional_text(parameters.get("backendUrl"))
+        with self._lock:
+            previous = dict(self._configuration)
+            current_mode = str(previous.get("domainMode") or "local")
+            current_url = _optional_text(previous.get("backendUrl"))
+            backend_ready = self._components["backend"]["phase"] == "ready"
+            edge_ready = self._components["edge"]["phase"] == "ready"
+        if mode == "backend":
+            backend_url = self._normalize_backend_url(backend_url)
+            self._preflight_backend_authority(backend_url)
+        else:
+            backend_url = None
+        if current_mode == mode and current_url == backend_url:
+            return self.snapshot()
+        if current_mode == "backend" and mode == "backend":
+            raise WorkspaceHostError(
+                "authority_transition_invalid",
+                "更换 Backend Authority 前必须先切回 local，以确定唯一同步源",
+            )
+
+        # Local -> Backend 切换先用用户此刻正在查看的 Local Backend
+        # Projection 初始化目标。模板或实例失败时尚未停止任何
+        # 本地进程，所以当前 Authority 与画布保持完整。
+        if current_mode == "local" and mode == "backend":
+            temporary_backend = not backend_ready
+            if temporary_backend:
+                self._start_backend({})
+            try:
+                self._bootstrap_backend_authority(backend_url)
+            finally:
+                if temporary_backend:
+                    self._stop_component("backend")
+
+        updated = dict(previous)
+        updated["domainMode"] = mode
+        updated["backendUrl"] = backend_url
+        try:
+            if edge_ready:
+                self._stop_component("edge")
+            if backend_ready:
+                self._stop_component("backend")
+            self._replace_configuration(updated, "authority.switching")
+            if backend_ready:
+                self._start_backend({})
+            if edge_ready:
+                self._start_edge()
+        except BaseException as error:  # noqa: BLE001 - rollback is the boundary.
+            rollback_failures: list[str] = []
+            try:
+                self._stop_component("edge")
+                self._stop_component("backend")
+                self._replace_configuration(previous, "authority.rollback")
+                if backend_ready:
+                    self._start_backend({})
+                if edge_ready:
+                    self._start_edge()
+            except BaseException as rollback_error:  # noqa: BLE001
+                rollback_failures.append(str(rollback_error))
+            detail = f"Authority 切换失败：{error}"
+            if rollback_failures:
+                detail += f"；回滚失败：{'；'.join(rollback_failures)}"
+            raise WorkspaceHostError("authority_switch_failed", detail) from error
+        with self._lock:
+            self._publish_locked(
+                "authority.switched",
+                {"mode": mode, "backendUrl": backend_url},
+            )
+            return self._snapshot_locked()
+
+    def _bootstrap_backend_authority(self, backend_url: str) -> None:
+        """Initialize a target from the current Local Backend projection."""
+
+        from .authority_sync import BackendAuthorityBootstrapper
+
+        with self._lock:
+            component = dict(self._components["backend"])
+        source_address = _optional_text(component.get("address"))
+        metadata = component.get("metadata")
+        graph_path = (
+            _optional_text(metadata.get("graphPath"))
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not source_address or not graph_path:
+            raise WorkspaceHostError(
+                "backend_authority_bootstrap_failed",
+                "Local Backend 缺少模板投影地址或当前设备图",
+            )
+        credential = os.environ.get("UNILAB_BACKEND_API_KEY") or self.token
+        with self._lock:
+            self._publish_locked(
+                "authority.bootstrap.started", {"backendUrl": backend_url}
+            )
+        report = BackendAuthorityBootstrapper(
+            source_address,
+            backend_url,
+            credential,
+            timeout=self.readiness_timeout,
+        ).bootstrap(Path(graph_path))
+        with self._lock:
+            self._publish_locked(
+                "authority.bootstrap.succeeded",
+                {
+                    "backendUrl": backend_url,
+                    "templateCount": report.template_count,
+                    "createdMaterialCount": report.created_material_count,
+                    "existingMaterialCount": report.existing_material_count,
+                },
+            )
+
+    def _replace_configuration(
+        self, configuration: dict[str, object], event: str
+    ) -> None:
+        with self._lock:
+            self._configuration = dict(configuration)
+            atomic_write_json(
+                self.paths.environment,
+                {"schemaVersion": 1, **self._configuration},
+            )
+            self._publish_locked(event, {"domainMode": configuration.get("domainMode")})
+
+    @staticmethod
+    def _normalize_backend_url(value: str | None) -> str:
+        if value is None:
+            raise WorkspaceHostError(
+                "backend_url_missing", "切换到 Backend Authority 必须提供 backendUrl"
+            )
+        normalized = value.rstrip("/")
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise WorkspaceHostError(
+                "backend_url_invalid", "backendUrl 必须是 HTTP(S) 服务地址"
+            )
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise WorkspaceHostError(
+                "backend_url_invalid", "backendUrl 不能包含凭据、查询参数或片段"
+            )
+        return normalized
+
+    def _preflight_backend_authority(self, backend_url: str) -> None:
+        for path in ("/api/v1/health", "/api/v1/workflows?page=1&page_size=1"):
+            try:
+                with urlopen(f"{backend_url}{path}", timeout=3.0) as response:
+                    response.read()
+                if not 200 <= response.status < 300:
+                    raise WorkspaceHostError(
+                        "backend_authority_unavailable",
+                        f"Backend Authority 预检失败：{path} HTTP {response.status}",
+                    )
+            except WorkspaceHostError:
+                raise
+            except (OSError, URLError) as error:
+                raise WorkspaceHostError(
+                    "backend_authority_unavailable",
+                    f"Backend Authority 预检失败：{path}：{error}",
+                ) from error
 
     def _attach_renderer(self, parameters: dict[str, object]) -> dict[str, object]:
         pid = parameters.get("pid")
@@ -698,10 +873,25 @@ class WorkspaceHost:
         try:
             payload = json.loads(self.paths.environment.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return {"graphPath": None, "runtimeMode": "normal"}
+            return {
+                "graphPath": None,
+                "runtimeMode": "normal",
+                "domainMode": "local",
+                "backendUrl": None,
+            }
         if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
-            return {"graphPath": None, "runtimeMode": "normal"}
-        return {key: value for key, value in payload.items() if key != "schemaVersion"}
+            return {
+                "graphPath": None,
+                "runtimeMode": "normal",
+                "domainMode": "local",
+                "backendUrl": None,
+            }
+        configuration = {
+            key: value for key, value in payload.items() if key != "schemaVersion"
+        }
+        configuration.setdefault("domainMode", "local")
+        configuration.setdefault("backendUrl", None)
+        return configuration
 
     def _restore_interrupted_components(self) -> None:
         try:

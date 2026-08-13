@@ -53,6 +53,15 @@ def should_mount_embedded_scheduler_routes() -> bool:
     )
 
 
+def should_mount_workspace_authoring_routes() -> bool:
+    """工作区 Backend 在两种 Authority 下都保留 Authoring Interface。"""
+
+    return BasicConfig.process_role in {
+        RuntimeProcessRole.COMBINED.value,
+        RuntimeProcessRole.WORKSPACE_BACKEND.value,
+    }
+
+
 def start_control_plane_runtime(
     context: ControlPlaneRuntimeContext,
 ) -> ControlPlaneRuntimeHandle:
@@ -76,6 +85,7 @@ __all__ = [
     "ControlPlaneRuntimeContext",
     "ControlPlaneRuntimeHandle",
     "should_mount_embedded_scheduler_routes",
+    "should_mount_workspace_authoring_routes",
     "start_control_plane_runtime",
     "validate_control_plane_arguments",
 ]

@@ -59,11 +59,6 @@ def resolve_runtime_process_plan(arguments: dict[str, Any]) -> RuntimeProcessPla
     if role is RuntimeProcessRole.WORKSPACE_BACKEND:
         if is_slave:
             raise ValueError("workspace_backend 进程不能使用 --is_slave")
-        if control_plane is not ControlPlaneMode.LOCAL:
-            raise ValueError(
-                "workspace_backend 当前只承载 local Authority；backend Authority "
-                "由 Workbench Backend Adapter 连接正式 Backend"
-            )
     elif role is RuntimeProcessRole.EDGE_RUNTIME:
         if control_plane is ControlPlaneMode.LOCAL and is_slave:
             raise ValueError(
@@ -97,8 +92,19 @@ def resolve_runtime_process_plan(arguments: dict[str, Any]) -> RuntimeProcessPla
                 "--control_plane backend 不使用 --preserve_runtime_databases；"
                 "协议恢复状态由 edge_control.db 独立持久化"
             )
-        if "edge_control" not in bridges:
+        if (
+            role is not RuntimeProcessRole.WORKSPACE_BACKEND
+            and "edge_control" not in bridges
+        ):
             raise ValueError("--control_plane backend 必须启用 edge_control bridge")
+        if (
+            role is RuntimeProcessRole.WORKSPACE_BACKEND
+            and "edge_control" in bridges
+        ):
+            raise ValueError(
+                "backend Authority 的 workspace_backend 只保留 Authoring，"
+                "不能启用 edge_control bridge"
+            )
         if "websocket" in bridges:
             raise ValueError(
                 "--control_plane backend 不能同时启用遗留 websocket bridge"
