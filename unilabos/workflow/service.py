@@ -612,7 +612,8 @@ class WorkflowService:
             if (
                 task.get("run_mode") != "step"
                 or task.get("control_status") != "paused"
-                or task.get("status") in {
+                or task.get("status")
+                in {
                     "succeeded",
                     "success",
                     "failed",
@@ -1261,6 +1262,18 @@ class WorkflowService:
                 applied_graph=applied_graph,
                 draft_python_source=source["python_source"],
             )
+            record = self._store.get_authoring_record(workflow_uuid)
+            applied_source = record.get("applied_source")
+            if (
+                candidate is not None
+                and candidate["changeset"]["kind"] == "source_only"
+                and applied_source is not None
+                and applied_source["workflow_revision"] == workflow["revision"]
+                and applied_source["source_hash"] == source["draft_hash"]
+            ):
+                # 恢复到已应用的精确作者字节且重新编译证明图未变时，没有待
+                # Apply 的新事实；清空旧无效草稿派生状态即可回到 applied。
+                candidate = None
             event_data = {
                 "workflow_uuid": workflow_uuid,
                 "cause": "draft_saved",
@@ -1338,9 +1351,7 @@ class WorkflowService:
             source = self._read_source(registration)
             record = self._store.get_authoring_record(workflow_uuid)
             current_catalog_fingerprint = (
-                self._catalog_fingerprint()
-                if self.compiler is not None
-                else None
+                self._catalog_fingerprint() if self.compiler is not None else None
             )
             catalog_changed = (
                 current_catalog_fingerprint is not None
@@ -2181,6 +2192,16 @@ class WorkflowService:
         ) as error:
             if isinstance(error, WorkflowError) and error.code != "candidate_invalid":
                 raise
+            logger.exception(
+                "工作流候选签发失败 workflow_uuid=%s revision=%s draft_hash=%s "
+                "error=%s",
+                compilation.graph.get("workflow", {}).get("uuid")
+                if isinstance(compilation.graph, dict)
+                else None,
+                workflow_revision,
+                draft_hash,
+                error,
+            )
             self._set_candidate_invalid_diagnostic(compilation)
             return None
         bundle = {

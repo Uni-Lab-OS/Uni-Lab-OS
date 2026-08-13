@@ -134,11 +134,15 @@ def _semantic_entities(
     result: dict[str, str] = {}
     for value in values:
         identity = str(value["uuid"])
-        semantic = deepcopy({
-            key: child
-            for key, child in value.items()
-            if key not in {"create_time", "update_time", "workflow_uuid"}
-        })
+        semantic = deepcopy(
+            {
+                key: child
+                for key, child in value.items()
+                # ``status`` 仅是旧本地 Store 的内部兼容列；Backend 公共节点 DTO
+                # 已不再读写它，作者源码也不能表达它，因此不能形成图变更。
+                if key not in {"create_time", "update_time", "workflow_uuid", "status"}
+            }
+        )
         if collection_name == "handle_templates":
             # Backend ``omitempty`` 会省略结构性 ready handle 的三个空字段；目录
             # 重投影则显式返回 ``None``，两种 wire 形状没有作者语义差异。
@@ -151,9 +155,7 @@ def _semantic_entities(
             metadata = semantic.get("meta_data")
             unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
             source = (
-                unilab.get("workflow_source")
-                if isinstance(unilab, Mapping)
-                else None
+                unilab.get("workflow_source") if isinstance(unilab, Mapping) else None
             )
             if isinstance(source, dict):
                 source.pop("package_catalog_digest", None)

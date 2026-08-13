@@ -184,6 +184,47 @@ def test_same_content_cas_compiles_external_draft_without_rewriting_source(
     assert source_path.read_text(encoding="utf-8") == python_source
 
 
+def test_invalid_draft_restored_to_applied_source_is_idempotently_applied(
+    authoring_service: tuple[WorkflowService, Path],
+) -> None:
+    """改坏后恢复精确已应用源码不得留下空 Candidate 或错误诊断。
+
+    参数：``authoring_service`` 提供真实 SQLite 与规范来源。返回：无；证明
+    合法编译、相同修订与相同来源哈希共同把状态恢复为 ``applied``。
+    """
+
+    service, _source_path = authoring_service
+    initial = service.save_draft(
+        WORKFLOW_UUID,
+        python_source=_source(),
+        expected_draft_hash=None,
+        expected_workflow_revision=1,
+    )
+    applied = service.apply_authoring(
+        WORKFLOW_UUID,
+        candidate_hash=initial["candidate"]["candidate_hash"],
+    )["authoring"]
+    applied_source = applied["draft"]["python_source"]
+    invalid = service.save_draft(
+        WORKFLOW_UUID,
+        python_source=f"{applied_source}\ndef broken(:\n",
+        expected_draft_hash=applied["draft"]["draft_hash"],
+        expected_workflow_revision=applied["workflow_revision"],
+    )
+    assert invalid["state"] == "draft_invalid"
+
+    restored = service.save_draft(
+        WORKFLOW_UUID,
+        python_source=applied_source,
+        expected_draft_hash=invalid["draft"]["draft_hash"],
+        expected_workflow_revision=invalid["workflow_revision"],
+    )
+
+    assert restored["state"] == "applied"
+    assert restored["candidate"] is None
+    assert restored["draft"]["diagnostics"] == []
+
+
 @pytest.mark.parametrize("request_variant", ["legacy_three_tokens", "candidate_bundle"])
 def test_authoring_apply_http_rejects_client_supplied_candidate_facts(
     authoring_service: tuple[WorkflowService, Path],
