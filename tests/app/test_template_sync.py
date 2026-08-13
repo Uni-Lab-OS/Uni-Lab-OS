@@ -370,6 +370,95 @@ def test_template_sync_command_builds_complete_registry_without_starting_edge() 
     ]
 
 
+def test_template_sync_command_projects_graph_sites_as_template_definitions(
+    tmp_path: Path,
+) -> None:
+    """部署图固定库位必须进入资源模板 available_sites，实例占用状态不得上传。
+
+    参数说明：``tmp_path`` 保存最小部署图；返回：无。测试解压 Backend 请求，
+    核验几何字段规范化且 ``occupied_by`` 不会污染模板定义。
+    """
+
+    # ``graph_path`` 模拟部署图中同一资源模板的一台实际设备子仓。
+    graph_path = tmp_path / "devices.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "tube_mount",
+                        "class": "community.example.tube_15ml",
+                        "config": {
+                            "sites": [
+                                {
+                                    "label": "S01",
+                                    "position": {"x": 1, "y": 2, "z": 3},
+                                    "size": {"width": 4, "height": 5, "depth": 6},
+                                    "rotation": {"x": 7, "y": 8, "z": 9},
+                                    "content_type": ["tube_15ml"],
+                                    "visible": True,
+                                    "occupied_by": "tube_01",
+                                    "geometry_confidence": "surveyed",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    parsed = vars(
+        parse_args().parse_args(
+            [
+                "--graph",
+                str(graph_path),
+                "--addr",
+                "http://backend:8080/api/v1",
+                "template-sync",
+            ]
+        )
+    )
+    session = FakeSession()
+
+    run_template_sync_command(
+        parsed,
+        backend_address=parsed["addr"],
+        environment={DEVELOPER_TOKEN_ENV: "developer-secret"},
+        registry_builder=lambda **_kwargs: FakeRegistry(),
+        session=session,
+    )
+
+    assert len(session.calls) == 2
+    payload = json.loads(gzip.decompress(session.calls[-1][1]["data"]))
+    tube_template = next(
+        resource
+        for resource in payload["resources"]
+        if resource["id"] == "tube_15ml"
+    )
+    assert tube_template["available_sites"] == [
+        {
+            "schema_version": 1,
+            "index": 0,
+            "label": "S01",
+            "visible": True,
+            "position_x": 1.0,
+            "position_y": 2.0,
+            "position_z": 3.0,
+            "rotation_x": 7.0,
+            "rotation_y": 8.0,
+            "rotation_z": 9.0,
+            "width": 4.0,
+            "length": 5.0,
+            "depth": 6.0,
+            "content_type": [],
+            "allowed_resource_template_uuids": ["resource-template-uuid"],
+            "parent_link": "",
+            "meta_data": {"geometry_confidence": "surveyed"},
+        }
+    ]
+
+
 def test_legacy_startup_registration_is_read_only() -> None:
     """旧启动注册入口必须拒绝隐式写入后端（Backend）。
 
