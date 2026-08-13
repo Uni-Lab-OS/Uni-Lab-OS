@@ -81,6 +81,7 @@ class NodeType(str, Enum):
 
     ILAB = "ILab"
     MANUAL_CONFIRM = "manual_confirm"
+    MATERIAL_TRANSFER = "material_transfer"
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +398,7 @@ def action(
         description: 动作描述
         auto_prefix: 若为 True，动作名使用 auto-{method_name} 形式（与无 @action 时一致）
         parent: 若为 True，当方法参数为空 (*args, **kwargs) 时，通过 MRO 从父类获取真实方法参数
-        node_type: 动作的节点类型 (NodeType.ILAB / NodeType.MANUAL_CONFIRM)。
+        node_type: 动作的节点类型。
                    不填写时不写入注册表。
         error_policy: 按异常类名匹配审批选项的策略。结构见
                       unilabos.registry.action_policy.ErrorPolicy。

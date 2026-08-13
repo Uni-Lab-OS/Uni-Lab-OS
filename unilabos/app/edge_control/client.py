@@ -329,15 +329,20 @@ class EdgeControlClient(BaseCommunicationClient):
                 if resource_id:
                     nodes[resource_id] = resource
         candidates: List[Dict[str, Any]] = []
+        system_device_id = str(getattr(host_node, "device_id", "host_node"))
         for local_id in sorted(host_node.devices_names):
             resource = nodes.get(str(local_id), {})
-            barcode = str(resource.get("barcode") or "").strip()
-            if not barcode:
+            if not resource and str(local_id) != system_device_id:
                 continue
+            barcode = normalize_resource_instance_barcode(
+                resource.get("barcode"), str(local_id)
+            )
             candidates.append(
                 {
                     "local_id": str(local_id),
-                    "name": str(resource.get("name") or local_id),
+                    "name": str(resource.get("name") or (
+                        "Host Node" if str(local_id) == system_device_id else local_id
+                    )),
                     "barcode": barcode,
                 }
             )
@@ -350,6 +355,7 @@ class EdgeControlClient(BaseCommunicationClient):
             )
             for resource in nodes.values()
         }
+        all_barcodes.update(candidate["barcode"] for candidate in candidates)
         material_uuids = self.data_plane.material_uuids_by_barcode(
             all_barcodes
         )

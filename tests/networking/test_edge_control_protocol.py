@@ -157,6 +157,25 @@ class FakeRegistrationHostNode:
         return []
 
 
+class FakeRegistrationHostNodeWithSystemDevice(FakeRegistrationHostNode):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resources_config = type(
+            "Resources",
+            (),
+            {
+                "dump": lambda _self: [[
+                    {"id": "robot-01", "name": "Robot 01", "barcode": "ROBOT-01"},
+                ]]
+            },
+        )()
+        self.device_id = "host_node"
+        self.devices_names["host_node"] = "/devices/host_node"
+        self._action_value_mappings["host_node"] = {
+            "transfer_resource": {"type": "UniLabJsonCommandAsync"},
+        }
+
+
 class FakeRegistrationDataPlane:
     def material_uuids_by_barcode(
         self, barcodes: Iterable[str]
@@ -239,6 +258,25 @@ def test_registration_reports_logical_actions_instead_of_transport_endpoint(
     ]
     assert devices[0]["unknown_command_ids"] == [
         "workflow-node-job:00000000-0000-4000-8000-000000000001"
+    ]
+    client.store.close()
+
+
+def test_registration_includes_host_node_as_default_system_device(
+    tmp_path: Path,
+) -> None:
+    client = EdgeControlClient(
+        _settings(tmp_path / "runtime.db"),
+        data_plane=FakeRegistrationDataPlane(),  # type: ignore[arg-type]
+        host_node_provider=FakeRegistrationHostNodeWithSystemDevice,
+    )
+
+    devices = client._registration_devices()
+
+    assert [device["local_id"] for device in devices] == ["host_node", "robot-01"]
+    assert devices[0]["barcode"] == "UNILAB-GRAPH-host_node"
+    assert devices[0]["actions"] == [
+        {"name": "transfer_resource", "type": "UniLabJsonCommandAsync"},
     ]
     client.store.close()
 

@@ -686,7 +686,7 @@ class RegistryTemplateProjection:
             "result": dict(action.get("result") or {}),
             "schema": goal_parameter_schema(schema),
             "type": action.get("type") or "UniLabJsonCommand",
-            "node_type": "ILab",
+            "node_type": action.get("node_type") or "ILab",
             "meta_data": {
                 "unilab": {
                     "contract_kind": "typed",

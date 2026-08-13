@@ -765,6 +765,7 @@ def executor_kind(node_type: str) -> str:
         "tool_call",
         "manual_confirm",
         "material_source",
+        "material_transfer",
         "Transfer",
         "workflow",
     }
