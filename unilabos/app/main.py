@@ -792,15 +792,16 @@ def main():
     # 同时持有包目录（PackageCatalog）、注册表快照（Registry
     # Snapshot）、有限激活与工作流源码（Workflow Source）计划。
     from unilabos.package_manager import (
+        AuthoringWorkerError,
         PackageCompileError,
         PackageDependencyError,
         WorkspaceGenerationChangedError,
-        prepare_stable_workspace_product_generation,
+        prepare_stable_workspace_product_generation_in_worker,
     )
 
     try:
         prepared_workspace_generation = (
-            prepare_stable_workspace_product_generation(args_dict)
+            prepare_stable_workspace_product_generation_in_worker(args_dict)
             if should_prepare_workspace_product_runtime(args_dict)
             else None
         )
@@ -812,6 +813,7 @@ def main():
     except (
         PackageCompileError,
         PackageDependencyError,
+        AuthoringWorkerError,
         TypeError,
         ValueError,
         WorkspaceGenerationChangedError,
@@ -820,7 +822,9 @@ def main():
     if workspace_registry_runtime is not None:
         print_status(
             "已编译工作区（Workspace）注册表运行时: "
-            f"{workspace_registry_runtime.catalog.import_package}",
+            f"{workspace_registry_runtime.catalog.import_package} "
+            f"(Authoring Worker PID "
+            f"{prepared_workspace_generation.authoring_worker_pid})",
             "info",
         )
 

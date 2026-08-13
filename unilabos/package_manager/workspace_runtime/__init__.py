@@ -10,6 +10,7 @@ from .authoring_mounts import (
     WorkspacePackageMountProjection,
     compile_workspace_package_mount_projection,
 )
+from .authoring_worker import AuthoringWorkerError, AuthoringWorkerResult
 from .discovery import (
     WorkspaceSource,
     WorkspaceStartupPlan,
@@ -37,6 +38,7 @@ from .lifecycle import (
     get_workspace_product_lifecycle,
     install_workspace_product_lifecycle,
     prepare_stable_workspace_product_generation,
+    prepare_stable_workspace_product_generation_in_worker,
 )
 from .monitor import (
     StableWorkspaceFileMonitor,
@@ -46,6 +48,8 @@ from .monitor import (
 
 __all__ = [
     "PreparedWorkspaceProductGeneration",
+    "AuthoringWorkerError",
+    "AuthoringWorkerResult",
     "StableWorkspaceFileMonitor",
     "StableWorkspaceGenerationMonitor",
     "WorkspaceGenerationChangedError",
@@ -71,6 +75,7 @@ __all__ = [
     "get_workspace_product_lifecycle",
     "install_workspace_product_lifecycle",
     "prepare_stable_workspace_product_generation",
+    "prepare_stable_workspace_product_generation_in_worker",
     "prepare_workspace_registry_runtime",
     "prepare_workspace_startup",
     "project_catalog_startup_plan",
