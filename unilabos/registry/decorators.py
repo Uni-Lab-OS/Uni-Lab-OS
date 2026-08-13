@@ -86,6 +86,12 @@ class NodeType(str, Enum):
     MATERIAL_TRANSFER = "material_transfer"
 
 
+class ExecutorKind(str, Enum):
+    """动作的受控运行时执行器类型。"""
+
+    MATERIAL_TRANSFER = "material_transfer"
+
+
 # ---------------------------------------------------------------------------
 # Device / Resource Handle (设备/资源级别端口, 序列化时包含 io_type)
 # ---------------------------------------------------------------------------
@@ -394,6 +400,7 @@ def action(
     auto_prefix: bool = False,
     parent: bool = False,
     node_type: Optional["NodeType"] = None,
+    executor_kind: Optional["ExecutorKind"] = None,
     feedback_interval: Optional[float] = None,
     action_name: Optional[str] = None,
     displayname: str = "",
@@ -434,6 +441,8 @@ def action(
         parent: 若为 True，当方法参数为空 (*args, **kwargs) 时，通过 MRO 从父类获取真实方法参数
         node_type: 动作的节点类型。
                    不填写时不写入注册表。
+        executor_kind: 动作的运行时执行器类型。该字段与画布节点类型解耦；
+                       不填写时由节点类型决定执行器。
         error_policy: 按异常类名匹配审批选项的策略。结构见
                       unilabos.registry.action_policy.ErrorPolicy。
         estimate_duration_fixed: 预计时长兜底值（秒），默认 60 秒；None 表示不提供兜底
@@ -500,6 +509,12 @@ def action(
             meta["feedback_interval"] = feedback_interval
         if node_type is not None:
             meta["node_type"] = node_type.value if isinstance(node_type, NodeType) else str(node_type)
+        if executor_kind is not None:
+            normalized_executor_kind = normalize_enum_value(executor_kind, ExecutorKind)
+            allowed_executor_kinds = {kind.value for kind in ExecutorKind}
+            if normalized_executor_kind not in allowed_executor_kinds:
+                raise ValueError(f"不支持的 executor_kind: {executor_kind}")
+            meta["executor_kind"] = normalized_executor_kind
         normalized_error_policy = None
         if error_policy:
             from unilabos.registry.action_policy import normalize_error_policy
@@ -711,7 +726,7 @@ def clear_registry():
 def normalize_enum_value(raw: Any, enum_cls) -> Optional[str]:
     """将 AST 提取的枚举成员名 / YAML 值字符串 / 旧格式长路径统一归一化为枚举值。
 
-    适用于 Side、DataSource、NodeType 等继承自 ``str, Enum`` 的装饰器枚举。
+    适用于 Side、DataSource、NodeType、ExecutorKind 等继承自 ``str, Enum`` 的装饰器枚举。
 
     处理以下格式:
       - "MANUAL_CONFIRM"  →  NodeType["MANUAL_CONFIRM"].value = "manual_confirm"

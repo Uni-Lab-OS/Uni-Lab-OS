@@ -823,14 +823,15 @@ def _resolve_name(name: str, import_map: Dict[str, str]) -> str:
     return name
 
 
-_DECORATOR_ENUM_CLASSES = frozenset({"Side", "DataSource", "NodeType"})
+_DECORATOR_ENUM_CLASSES = frozenset({"Side", "DataSource", "NodeType", "ExecutorKind"})
 
 
 def _resolve_attribute(node: ast.Attribute, import_map: Dict[str, str]) -> str:
     """
     Resolve an attribute access like Side.NORTH or DataSource.HANDLE.
 
-    对于来自 ``unilabos.registry.decorators`` 的枚举类 (Side / DataSource / NodeType)，
+    对于来自 ``unilabos.registry.decorators`` 的枚举类
+    (Side / DataSource / NodeType / ExecutorKind)，
     直接返回枚举成员名 (如 ``"NORTH"`` / ``"HANDLE"`` / ``"MANUAL_CONFIRM"``)，
     省去消费端二次 rsplit 解析。其它 import 仍返回完整模块路径。
     """

@@ -64,7 +64,8 @@ def test_builtin_host_transfer_is_projected_with_material_lock_contract(
         "mount_resource": "unilabos_nodes",
     }
     assert legacy_mapping["always_free"] is True
-    assert legacy_mapping["node_type"] == "material_transfer"
+    assert legacy_mapping["node_type"] == "ILab"
+    assert legacy_mapping["executor_kind"] == "material_transfer"
 
     # ``projection`` 是工作流创作使用的持久模板权威；宿主资源模板 UUID 模拟已由
     # 库存权威（Inventory Authority）稳定解析，测试不创建第二套身份。
@@ -86,8 +87,12 @@ def test_builtin_host_transfer_is_projected_with_material_lock_contract(
     assert transfer_template["class"] == (
         "unilabos.ros.nodes.presets.host_node:HostNode"
     )
-    assert transfer_template["node_type"] == "material_transfer"
+    assert transfer_template["node_type"] == "ILab"
     assert transfer_template["meta_data"]["unilab"]["contract_kind"] == "typed"
+    assert (
+        transfer_template["meta_data"]["unilab"]["executor_kind"]
+        == "material_transfer"
+    )
     goal_properties = transfer_template["meta_data"]["unilab"][
         "action_contract_schema"
     ]["properties"]["goal"]["properties"]
