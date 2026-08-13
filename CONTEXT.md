@@ -42,8 +42,14 @@ normal reads exclude it after `deleted_at` becomes non-null.
 _Avoid_: Physical row deletion, empty status, hidden alias
 
 **Workflow**:
-A reusable persisted graph definition.
+A reusable persisted graph definition owned by the selected Authority. Workspace
+Python is an authoring source, not a replica of a Backend-owned Workflow.
 _Avoid_: One execution, runtime snapshot, Run
+
+**Workspace Workflow Source**:
+Editable project source that may become a Workflow definition while `local` is
+Authority; it has no implicit write relationship to a Backend-owned Workflow.
+_Avoid_: Backend definition, remote replica, implicit publication
 
 **Workflow Task**:
 One execution created from a frozen Workflow graph.
