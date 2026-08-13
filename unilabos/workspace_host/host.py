@@ -1196,8 +1196,7 @@ class WorkspaceHost:
             str(ready_file),
         ]
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        environment = dict(os.environ)
-        environment["UNILAB_RENDERER_MANAGED_HEADLESS"] = "1"
+        environment = _renderer_process_environment(configuration)
         with log_path.open("ab", buffering=0) as stream:
             process = subprocess.Popen(
                 command,
@@ -1689,6 +1688,21 @@ def _package_mounts_ready(payload: dict[str, object]) -> bool:
 
 def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _renderer_process_environment(
+    configuration: dict[str, object],
+    *,
+    base_environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the renderer environment from the selected workspace authority."""
+
+    environment = dict(os.environ if base_environment is None else base_environment)
+    environment["UNILAB_RENDERER_MANAGED_HEADLESS"] = "1"
+    backend_url = _optional_text(configuration.get("backendUrl"))
+    if configuration.get("domainMode") == "backend" and backend_url:
+        environment["UNILAB_BACKEND_PROXY_TARGET"] = backend_url
+    return environment
 
 
 def _pid_exists(pid: int) -> bool:

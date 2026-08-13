@@ -17,7 +17,11 @@ import pytest
 from unilabos.app.edge_control.store import EdgeControlStore
 from unilabos.workspace_host.client import WorkspaceHostClient
 from unilabos.workspace_host.discovery import WorkspaceHostLock, ensure_local_token
-from unilabos.workspace_host.host import WorkspaceHost, _handler_type
+from unilabos.workspace_host.host import (
+    WorkspaceHost,
+    _handler_type,
+    _renderer_process_environment,
+)
 from unilabos.workspace_host.launch import (
     LaunchPlan,
     resolve_backend_launch,
@@ -176,6 +180,20 @@ def test_attached_renderer_records_a_reusable_headless_adapter(workspace: Path) 
     ensured = host._dispatch("renderer.headless.ensure", {})
     assert ensured["adapter"] == "attached"
     host.close()
+
+
+def test_headless_renderer_inherits_selected_backend_authority() -> None:
+    environment = _renderer_process_environment(
+        {
+            "domainMode": "backend",
+            "backendUrl": "http://127.0.0.1:18080",
+        },
+        base_environment={"PATH": "/fixture/bin"},
+    )
+
+    assert environment["UNILAB_RENDERER_MANAGED_HEADLESS"] == "1"
+    assert environment["UNILAB_BACKEND_PROXY_TARGET"] == "http://127.0.0.1:18080"
+    assert environment["PATH"] == "/fixture/bin"
 
 
 def test_host_restart_adopts_a_live_workbench_renderer(workspace: Path) -> None:

@@ -131,6 +131,10 @@ class EdgeDataPlane:
         error_info: List[Dict[str, Any]],
         unknown_command_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
+        # Backend 是共享 API 合同的权威；unknown command 集合通过 Edge
+        # registration 上报，不能混入严格校验的 Job outcome 请求体。
+        # 该参数仅由 LocalEdgeAuthority 用于本地不确定命令对账。
+        _ = unknown_command_ids
         headers = _job_headers(job)
         headers["Idempotency-Key"] = f"{job.job_uuid}:outcome:v1"
         return self._request(
@@ -145,7 +149,6 @@ class EdgeDataPlane:
                 "outcome": outcome,
                 "return_info": return_info,
                 "error_info": error_info,
-                "unknown_command_ids": unknown_command_ids or [],
             },
         )
 

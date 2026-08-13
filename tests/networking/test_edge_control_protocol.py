@@ -623,6 +623,7 @@ def test_http_data_plane_uses_three_uuid_identity() -> None:
     outcome = session.calls[1]
     assert outcome["json"]["task_uuid"] == job.task_uuid
     assert outcome["json"]["node_uuid"] == job.node_uuid
+    assert "unknown_command_ids" not in outcome["json"]
     assert outcome["headers"]["Idempotency-Key"] == f"{job.job_uuid}:outcome:v1"
 
 
