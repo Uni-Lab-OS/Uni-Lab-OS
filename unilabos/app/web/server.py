@@ -99,6 +99,12 @@ def setup_server() -> FastAPI:
         should_mount_embedded_scheduler_routes,
         should_mount_workspace_authoring_routes,
     )
+    from unilabos.app.workspace_authority_gate import (
+        install_workspace_authority_gate,
+    )
+
+    if BasicConfig.process_role == "workspace_backend":
+        install_workspace_authority_gate(app)
 
     embedded_scheduler_enabled = should_mount_embedded_scheduler_routes()
     workspace_authoring_enabled = should_mount_workspace_authoring_routes()

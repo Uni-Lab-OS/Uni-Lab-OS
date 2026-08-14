@@ -374,7 +374,15 @@ def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
         {"address": backend.address, "metadata": backend.metadata},
     )
 
-    assert _argument_value(backend.command, "--control_plane") == "backend"
+    # Workspace Backend keeps one stable Local Domain service graph even while
+    # the selected device/runtime Authority is the external Backend.  The
+    # authority gate makes that local graph inaccessible until Local is chosen
+    # again, so switching never requires replacing this process.
+    assert _argument_value(backend.command, "--control_plane") == "local"
+    assert "--preserve_runtime_databases" in backend.command
+    assert backend.metadata["stateDirectory"] == str(
+        paths.runtime / "backend" / "local-domain"
+    )
     assert "fastapi" in backend.command
     assert "edge_control" not in backend.command
     assert backend.metadata["domainMode"] == "backend"
@@ -599,10 +607,23 @@ def test_authority_switch_preflights_before_restart_and_persists_mode(
     calls: list[str] = []
     host._preflight_backend_authority = lambda url: calls.append(f"preflight:{url}")  # type: ignore[method-assign]
     host._bootstrap_backend_authority = lambda url: calls.append(f"bootstrap:{url}")  # type: ignore[method-assign]
+    host._assert_local_authority_quiescent = lambda: calls.append("quiescent:local")  # type: ignore[method-assign]
     host._stop_component = lambda name: calls.append(f"stop:{name}") or {}  # type: ignore[method-assign]
     host._start_backend = lambda parameters: calls.append("start:backend") or {}  # type: ignore[method-assign]
     host._start_edge = lambda: calls.append("start:edge") or {}  # type: ignore[method-assign]
-    host._components["backend"]["phase"] = "ready"
+    host._components["backend"].update(
+        {
+            "phase": "ready",
+            "pid": 48_111,
+            "generation": "stable-backend-generation",
+            "address": "http://127.0.0.1:48111",
+            "capabilities": ["authoring", "inventory", "workflow-run"],
+            "metadata": {
+                "domainMode": "local",
+                "backendUrl": None,
+            },
+        }
+    )
     host._components["edge"]["phase"] = "ready"
 
     snapshot = host._dispatch(
@@ -614,14 +635,71 @@ def test_authority_switch_preflights_before_restart_and_persists_mode(
         "preflight:http://127.0.0.1:8080",
         "bootstrap:http://127.0.0.1:8080",
         "stop:edge",
-        "stop:backend",
-        "start:backend",
+        "quiescent:local",
         "start:edge",
     ]
     assert snapshot["configuration"]["domainMode"] == "backend"
     assert snapshot["configuration"]["backendUrl"] == "http://127.0.0.1:8080"
     persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
     assert persisted["domainMode"] == "backend"
+    backend = snapshot["components"]["backend"]
+    assert backend["pid"] == 48_111
+    assert backend["generation"] == "stable-backend-generation"
+    assert backend["address"] == "http://127.0.0.1:48111"
+    assert backend["capabilities"] == ["authoring"]
+    assert backend["metadata"]["domainMode"] == "backend"
+    assert backend["metadata"]["backendUrl"] == "http://127.0.0.1:8080"
+    host.close()
+
+
+def test_authority_switch_rolls_back_without_replacing_workspace_backend(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    calls: list[str] = []
+    host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
+    host._assert_local_authority_quiescent = lambda: None  # type: ignore[method-assign]
+    host._stop_component = lambda name: calls.append(f"stop:{name}") or {}  # type: ignore[method-assign]
+
+    def fail_edge_start() -> dict[str, object]:
+        calls.append("start:edge")
+        if calls.count("start:edge") == 1:
+            raise WorkspaceHostError("os_start_failed", "fixture")
+        return {}
+
+    host._start_edge = fail_edge_start  # type: ignore[method-assign]
+    host._components["backend"].update(
+        {
+            "phase": "ready",
+            "pid": 48_111,
+            "generation": "stable-backend-generation",
+            "address": "http://127.0.0.1:48111",
+            "capabilities": ["authoring", "inventory", "workflow-run"],
+            "metadata": {"domainMode": "local", "backendUrl": None},
+        }
+    )
+    host._components["edge"]["phase"] = "ready"
+
+    with pytest.raises(WorkspaceHostError) as caught:
+        host._dispatch(
+            "authority.switch",
+            {
+                "mode": "backend",
+                "backendUrl": "http://127.0.0.1:8080",
+                "bootstrap": False,
+            },
+        )
+
+    assert caught.value.code == "authority_switch_failed"
+    assert calls == ["stop:edge", "start:edge", "stop:edge", "start:edge"]
+    snapshot = host.snapshot()
+    assert snapshot["configuration"]["domainMode"] == "local"
+    backend = snapshot["components"]["backend"]
+    assert backend["pid"] == 48_111
+    assert backend["generation"] == "stable-backend-generation"
+    assert backend["metadata"]["domainMode"] == "local"
     host.close()
 
 
@@ -774,6 +852,27 @@ def test_authority_switch_back_to_local_preserves_backend_publication_target(
     assert snapshot["configuration"]["backendUrl"] == "http://127.0.0.1:8080"
     persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
     assert persisted["backendUrl"] == "http://127.0.0.1:8080"
+    host.close()
+
+
+def test_configuration_update_cannot_bypass_authority_switch_transaction(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+
+    with pytest.raises(WorkspaceHostError) as caught:
+        host._dispatch(
+            "configuration.update",
+            {
+                "domainMode": "backend",
+                "backendUrl": "http://127.0.0.1:8080",
+            },
+        )
+
+    assert caught.value.code == "configuration_authority_forbidden"
+    assert host.snapshot()["configuration"]["domainMode"] == "local"
     host.close()
 
 
