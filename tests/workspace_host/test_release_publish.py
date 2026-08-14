@@ -695,6 +695,19 @@ def test_workflow_import_uses_published_composite_template_identity() -> None:
                 "uuid": "source-composite-template",
                 "name": "workflow:source-child",
                 "resource_template_uuid": "source-host-template",
+                "meta_data": {
+                    "unilab": {
+                        "workflow_source": {
+                            "kind": "package",
+                            "module": "szlab_poly_studio.workflows.material_transfer",
+                            "symbol": "s_z_lab_标准物料转运",
+                            "definition_fqid": (
+                                "szlab_poly_studio.workflows.material_transfer."
+                                "s_z_lab_标准物料转运"
+                            ),
+                        }
+                    }
+                },
             }
         ],
         "handle_templates": [],
@@ -728,6 +741,15 @@ def test_workflow_import_uses_published_composite_template_identity() -> None:
     )
     assert "template_name" not in payload["nodes"][0]
     assert "resource_name" not in payload["nodes"][0]
+    assert payload["nodes"][0]["meta_data"]["unilab"]["workflow_source"] == {
+        "kind": "package",
+        "module": "szlab_poly_studio.workflows.material_transfer",
+        "symbol": "s_z_lab_标准物料转运",
+        "definition_fqid": (
+            "szlab_poly_studio.workflows.material_transfer."
+            "s_z_lab_标准物料转运"
+        ),
+    }
 
 
 def test_backend_workflow_projection_removes_visual_groups_and_promotes_children() -> None:

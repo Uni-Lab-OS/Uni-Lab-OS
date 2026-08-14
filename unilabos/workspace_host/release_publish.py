@@ -1826,6 +1826,20 @@ def _workflow_import_payload(
             deepcopy(_mapping_or_empty(source_node.get("meta_data"))),
             preimport_replacements,
         )
+        if str(source_node.get("type") or "").strip().casefold() == "workflow":
+            template = node_templates.get(template_uuid)
+            template_unilab = _mapping_or_empty(
+                _mapping_or_empty(
+                    _mapping_or_empty(template).get("meta_data")
+                ).get("unilab")
+            )
+            workflow_source = _mapping_or_empty(
+                template_unilab.get("workflow_source")
+            )
+            if workflow_source:
+                node_unilab = dict(_mapping_or_empty(meta_data.get("unilab")))
+                node_unilab["workflow_source"] = deepcopy(dict(workflow_source))
+                meta_data["unilab"] = node_unilab
         meta_data["unilab_release"] = {
             "release_id": release.release_id,
             "source_node_uuid": str(source_node.get("uuid") or ""),
