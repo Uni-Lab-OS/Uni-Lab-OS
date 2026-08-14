@@ -125,42 +125,12 @@ def create_backend_resource_router(
     """
 
     router = APIRouter(prefix="/api/v1", tags=["backend-resource-contract"])
-    # ``frozen_material_shapes`` 与调用者容器隔离，保证启动代际不会随请求漂移。
-    frozen_material_shapes = tuple(deepcopy(dict(shape)) for shape in material_shapes)
-
-    @router.get("/material-shapes")
-    def list_material_shapes() -> JSONResponse:
-        """返回工作区包声明的静态物料外形。
-
-        参数：无。返回：Backend 公共信封中的外形项目列表。异常：无。
-        """
-
-        return _success({"items": deepcopy(list(frozen_material_shapes))})
-
-    @router.get("/material-models/{asset_path:path}")
-    def read_material_model(asset_path: str) -> Response:
-        """返回一项工作区 3D 模型资产。
-
-        参数：``asset_path`` 是公共模型路由内的相对路径。返回：带媒体类型、摘要
-        和禁止陈旧缓存策略的资产字节。异常：目录未安装或资产未授权时返回 404。
-        """
-
-        if material_model_catalog is None:
-            raise HTTPException(status_code=404, detail="模型资产目录未安装")
-        public_path = f"/api/v1/material-models/{asset_path}"
-        try:
-            # ``asset`` 是当前工作区启动代际完成边界校验后的不可变读取结果。
-            asset = material_model_catalog.read_asset(public_path)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail="模型资产未找到") from error
-        return Response(
-            content=asset.content,
-            media_type=asset.media_type,
-            headers={
-                "Cache-Control": "private, max-age=0, must-revalidate",
-                "ETag": f'"{asset.etag}"',
-            },
+    router.include_router(
+        create_material_asset_router(
+            material_shapes=material_shapes,
+            material_model_catalog=material_model_catalog,
         )
+    )
 
     @router.post("/resource-templates")
     def sync_resource_templates(body: ResourceTemplateSyncRequest) -> JSONResponse:
@@ -316,6 +286,59 @@ def create_backend_resource_router(
     return router
 
 
+def create_material_asset_router(
+    *,
+    material_shapes: Sequence[Mapping[str, Any]] = (),
+    material_model_catalog: Any = None,
+) -> APIRouter:
+    """创建不依赖 Inventory 的只读物料外形与模型资产路由。
+
+    参数：``material_shapes`` 和 ``material_model_catalog`` 必须来自同一工作区
+    编译代。返回：可挂载到正式资源合同或纯 Authoring Web 进程的 Router。
+    异常：外形项目形状非法时原样抛出。
+    """
+
+    router = APIRouter()
+    # ``frozen_material_shapes`` 与调用者容器隔离，保证启动代际不会随请求漂移。
+    frozen_material_shapes = tuple(deepcopy(dict(shape)) for shape in material_shapes)
+
+    @router.get("/material-shapes")
+    def list_material_shapes() -> JSONResponse:
+        """返回工作区包声明的静态物料外形。
+
+        参数：无。返回：Backend 公共信封中的外形项目列表。异常：无。
+        """
+
+        return _success({"items": deepcopy(list(frozen_material_shapes))})
+
+    @router.get("/material-models/{asset_path:path}")
+    def read_material_model(asset_path: str) -> Response:
+        """返回一项工作区 3D 模型资产。
+
+        参数：``asset_path`` 是公共模型路由内的相对路径。返回：带媒体类型、摘要
+        和禁止陈旧缓存策略的资产字节。异常：目录未安装或资产未授权时返回 404。
+        """
+
+        if material_model_catalog is None:
+            raise HTTPException(status_code=404, detail="模型资产目录未安装")
+        public_path = f"/api/v1/material-models/{asset_path}"
+        try:
+            # ``asset`` 是当前工作区启动代际完成边界校验后的不可变读取结果。
+            asset = material_model_catalog.read_asset(public_path)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="模型资产未找到") from error
+        return Response(
+            content=asset.content,
+            media_type=asset.media_type,
+            headers={
+                "Cache-Control": "private, max-age=0, must-revalidate",
+                "ETag": f'"{asset.etag}"',
+            },
+        )
+
+    return router
+
+
 def install_backend_resource_api(
     app: FastAPI,
     service: BackendResourceService,
@@ -359,5 +382,6 @@ def install_backend_resource_api(
 
 __all__ = [
     "create_backend_resource_router",
+    "create_material_asset_router",
     "install_backend_resource_api",
 ]

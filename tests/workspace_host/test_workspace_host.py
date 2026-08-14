@@ -379,6 +379,7 @@ def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
         "https://backend.example.test"
     )
     assert edge.environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"]
+    assert 2 <= int(edge.environment["ROS_DOMAIN_ID"]) <= 99
     assert edge.metadata["authorityAddress"] == "https://backend.example.test"
     backend_state = edge.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"]
     assert backend_state.startswith(
@@ -392,6 +393,7 @@ def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
         {"address": backend.address, "metadata": backend.metadata},
     )
     assert repeated.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"] == backend_state
+    assert repeated.environment["ROS_DOMAIN_ID"] == edge.environment["ROS_DOMAIN_ID"]
 
 
 def test_authority_switch_preflights_before_restart_and_persists_mode(
@@ -427,6 +429,62 @@ def test_authority_switch_preflights_before_restart_and_persists_mode(
     persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
     assert persisted["domainMode"] == "backend"
     host.close()
+
+
+def test_authority_preflight_rejects_backend_without_edge_contract(
+    workspace: Path,
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _BackendWithoutEdgeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+
+    try:
+        with pytest.raises(WorkspaceHostError) as raised:
+            host._preflight_backend_authority(
+                f"http://127.0.0.1:{server.server_port}"
+            )
+        assert raised.value.code == "backend_authority_incompatible"
+        assert "Edge 调度连接" in str(raised.value)
+    finally:
+        host.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_backend_url_normalization_accepts_api_v1_suffix() -> None:
+    assert WorkspaceHost._normalize_backend_url(
+        "http://127.0.0.1:8080/api/v1/"
+    ) == "http://127.0.0.1:8080"
+
+
+def test_authority_preflight_explains_unavailable_scheduler(
+    workspace: Path,
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _BackendWithoutSchedulerHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+
+    try:
+        with pytest.raises(WorkspaceHostError) as raised:
+            host._preflight_backend_authority(
+                f"http://127.0.0.1:{server.server_port}"
+            )
+        assert raised.value.code == "backend_authority_unavailable"
+        assert str(raised.value) == (
+            "Backend 的 Scheduler 未就绪，Edge 暂时无法连接。"
+            "请启动 Scheduler 服务（默认端口 8081）后重试；"
+            "当前 OS 尚未切换。"
+        )
+    finally:
+        host.close()
+        server.shutdown()
+        server.server_close()
 
 
 def test_plc_launch_preserves_explicit_handshake_workflow(workspace: Path) -> None:
@@ -837,7 +895,13 @@ class _ReadyHandler(BaseHTTPRequestHandler):
                 },
             }
         elif self.path == "/api/v1/resource-templates?page=1&page_size=1":
-            payload = {"code": 0, "data": {"items": [{"uuid": "resource"}]}}
+            body = json.dumps({"detail": "Not Found"}).encode()
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         elif self.path == "/api/v1/workspace/package-mounts":
             payload = {
                 "code": 0,
@@ -857,6 +921,28 @@ class _ReadyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
+
+
+class _BackendWithoutEdgeHandler(_ReadyHandler):
+    def do_GET(self) -> None:
+        if self.path == "/api/v1/edge/sessions":
+            body = json.dumps({"error": {"code": "not_found"}}).encode()
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+
+class _BackendWithoutSchedulerHandler(_ReadyHandler):
+    def do_GET(self) -> None:
+        if self.path == "/api/v1/edge/sessions":
+            self.send_response(502)
+            self.end_headers()
+            return
+        super().do_GET()
 
 
 class _RendererHandler(BaseHTTPRequestHandler):

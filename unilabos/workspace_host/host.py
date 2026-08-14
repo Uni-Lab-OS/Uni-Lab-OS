@@ -19,7 +19,7 @@ from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -292,6 +292,8 @@ class WorkspaceHost:
             return self._switch_authority(parameters)
         if command == "release.publish":
             return self._publish_release(parameters)
+        if command == "release.inspect":
+            return self._inspect_release_target(parameters)
         if command == "renderer.attach":
             return self._attach_renderer(parameters)
         if command == "renderer.detach":
@@ -873,10 +875,6 @@ class WorkspaceHost:
                         "?page=1&page_size=100&node_type=material_source",
                         _material_source_catalog_ready,
                     ),
-                    (
-                        "/api/v1/resource-templates?page=1&page_size=1",
-                        _nonempty_catalog_ready,
-                    ),
                 ]
             )
         for path, accepts in probes:
@@ -1053,7 +1051,9 @@ class WorkspaceHost:
     def _publish_release(self, parameters: dict[str, object]) -> dict[str, object]:
         """Publish the visible Local generation and optionally activate Backend Authority."""
 
-        unknown = sorted(set(parameters) - {"backendUrl", "activate", "verify"})
+        unknown = sorted(set(parameters) - {
+            "backendUrl", "activate", "verify", "resetTarget", "confirmation"
+        })
         if unknown:
             raise WorkspaceHostError(
                 "release_parameters_invalid",
@@ -1063,6 +1063,12 @@ class WorkspaceHost:
             _optional_text(parameters.get("backendUrl"))
         )
         activate = bool(parameters.get("activate", False))
+        reset_target = parameters.get("resetTarget", False) is True
+        if reset_target and parameters.get("confirmation") != "CLEAR_BACKEND":
+            raise WorkspaceHostError(
+                "release_target_reset_confirmation_required",
+                "清空 Backend 必须提供明确确认",
+            )
         if parameters.get("verify", True) is not True:
             raise WorkspaceHostError(
                 "release_verification_required", "WorkspaceRelease 不允许跳过回读校验"
@@ -1087,6 +1093,15 @@ class WorkspaceHost:
                     "release_source_unavailable", "Local Backend 尚未就绪"
                 )
             from .release_publish import create_existing_backend_publisher
+
+            if reset_target:
+                from .release_publish import ExistingBackendDeploymentTarget
+
+                ExistingBackendDeploymentTarget(
+                    backend_url,
+                    os.environ.get("UNILAB_BACKEND_API_KEY") or self.token,
+                    timeout=self.readiness_timeout,
+                ).clear()
 
             staged_authority: dict[str, object] | None = None
 
@@ -1129,6 +1144,29 @@ class WorkspaceHost:
             receipt = {**receipt, "activated": False}
         return receipt
 
+    def _inspect_release_target(
+        self, parameters: dict[str, object]
+    ) -> dict[str, object]:
+        """Inspect a publish target without changing its data."""
+
+        unknown = sorted(set(parameters) - {"backendUrl"})
+        if unknown:
+            raise WorkspaceHostError(
+                "release_parameters_invalid",
+                f"未知检查字段：{', '.join(unknown)}",
+            )
+        backend_url = self._normalize_backend_url(
+            _optional_text(parameters.get("backendUrl"))
+        )
+        self._preflight_backend_authority(backend_url)
+        from .release_publish import ExistingBackendDeploymentTarget
+
+        return ExistingBackendDeploymentTarget(
+            backend_url,
+            os.environ.get("UNILAB_BACKEND_API_KEY") or self.token,
+            timeout=self.readiness_timeout,
+        ).inspect()
+
     def _bootstrap_backend_authority(self, backend_url: str) -> None:
         """Initialize a target from the current Local Backend projection."""
 
@@ -1157,6 +1195,7 @@ class WorkspaceHost:
             source_address,
             backend_url,
             credential,
+            source_workspace=self.paths.workspace,
             timeout=self.readiness_timeout,
         ).bootstrap(Path(graph_path))
         with self._lock:
@@ -1188,6 +1227,8 @@ class WorkspaceHost:
                 "backend_url_missing", "切换到 Backend Authority 必须提供 backendUrl"
             )
         normalized = value.rstrip("/")
+        if normalized.endswith("/api/v1"):
+            normalized = normalized.removesuffix("/api/v1").rstrip("/")
         parsed = urlparse(normalized)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise WorkspaceHostError(
@@ -1216,6 +1257,36 @@ class WorkspaceHost:
                     "backend_authority_unavailable",
                     f"Backend Authority 预检失败：{path}：{error}",
                 ) from error
+
+        # Edge Runtime registers itself through this scheduler route.  Probe
+        # route existence before stopping the currently healthy local OS.  A
+        # GET commonly returns 405 for a POST-only route, which still proves
+        # that the Backend exposes the required Edge control contract; 404
+        # means this Backend build cannot be used as an Authority yet.
+        edge_path = "/api/v1/edge/sessions"
+        try:
+            with urlopen(f"{backend_url}{edge_path}", timeout=3.0) as response:
+                response.read()
+            status = response.status
+        except HTTPError as error:
+            status = error.code
+        except (OSError, URLError) as error:
+            raise WorkspaceHostError(
+                "backend_authority_unavailable",
+                f"Backend Authority Edge 控制接口预检失败：{edge_path}：{error}",
+            ) from error
+        if status == HTTPStatus.NOT_FOUND:
+            raise WorkspaceHostError(
+                "backend_authority_incompatible",
+                "目标 Backend 暂不支持 Edge 调度连接，请启动包含 Edge 控制接口的 Backend 后重试",
+            )
+        if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+            raise WorkspaceHostError(
+                "backend_authority_unavailable",
+                "Backend 的 Scheduler 未就绪，Edge 暂时无法连接。"
+                "请启动 Scheduler 服务（默认端口 8081）后重试；"
+                "当前 OS 尚未切换。",
+            )
 
     def _attach_renderer(self, parameters: dict[str, object]) -> dict[str, object]:
         pid = parameters.get("pid")
@@ -1804,10 +1875,6 @@ def _material_source_catalog_ready(payload: dict[str, object]) -> bool:
         and isinstance(item.get("uuid"), str)
         for item in _catalog_items(payload)
     )
-
-
-def _nonempty_catalog_ready(payload: dict[str, object]) -> bool:
-    return payload.get("code") == 0 and bool(_catalog_items(payload))
 
 
 def _package_mounts_ready(payload: dict[str, object]) -> bool:

@@ -236,6 +236,18 @@ def resolve_edge_launch(
             "UNILABOS_WORKBENCH_RUNTIME_MODE": mode,
             "UNILABOS_WORKBENCH_PROCESS_ROLE": "edge_runtime",
             "UNILABOS_EDGE_READY_FILE": str(ready_file),
+            # Isolate DDS discovery per Workspace.  Leaving Edge on domain 0
+            # makes HostNode discover devices from unrelated laboratories
+            # running on the same machine and then attempt to register their
+            # barcodes with this Backend.
+            "ROS_DOMAIN_ID": str(
+                2
+                + int.from_bytes(
+                    hashlib.sha256(str(paths.workspace).encode("utf-8")).digest()[:4],
+                    "big",
+                )
+                % 98
+            ),
         }
     )
     command = (

@@ -37,12 +37,16 @@ class BackendAuthorityBootstrapper:
         target_address: str,
         credential: str,
         *,
+        source_workspace: Path | None = None,
         session: requests.Session | None = None,
         timeout: float = 30.0,
     ) -> None:
         self.source_api = _api_base(source_address)
         self.target_api = _api_base(target_address)
         self.credential = str(credential or "").strip()
+        self.source_workspace = (
+            str(source_workspace.resolve()) if source_workspace is not None else None
+        )
         if not self.credential:
             raise WorkspaceHostError(
                 "backend_authority_credentials_missing",
@@ -53,6 +57,32 @@ class BackendAuthorityBootstrapper:
 
     def bootstrap(self, graph_path: Path) -> AuthorityBootstrapReport:
         """Synchronize templates and graph materials without starting an Edge."""
+
+        try:
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise WorkspaceHostError(
+                "backend_authority_bootstrap_failed",
+                f"无法读取当前设备图：{graph_path}",
+            ) from error
+        if not isinstance(graph, Mapping):
+            raise WorkspaceHostError(
+                "backend_authority_bootstrap_failed",
+                "当前设备图根必须是 JSON object",
+            )
+        graph_node_ids = {
+            str(node.get("id") or "").strip()
+            for node in graph.get("nodes", [])
+            if isinstance(node, Mapping) and str(node.get("id") or "").strip()
+        }
+        released_node_ids = self._target_released_node_ids()
+        released_graph_node_ids = graph_node_ids & released_node_ids
+        if released_graph_node_ids:
+            return AuthorityBootstrapReport(
+                template_count=0,
+                created_material_count=0,
+                existing_material_count=len(released_graph_node_ids),
+            )
 
         definitions = [
             _template_definition(self._source_template(item))
@@ -77,18 +107,6 @@ class BackendAuthorityBootstrapper:
                 "Backend Authority 未返回完整模板身份",
             )
         try:
-            graph = json.loads(graph_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise WorkspaceHostError(
-                "backend_authority_bootstrap_failed",
-                f"无法读取当前设备图：{graph_path}",
-            ) from error
-        if not isinstance(graph, Mapping):
-            raise WorkspaceHostError(
-                "backend_authority_bootstrap_failed",
-                "当前设备图根必须是 JSON object",
-            )
-        try:
             material_report = InstanceSynchronizer(
                 self.target_api,
                 self.credential,
@@ -106,12 +124,69 @@ class BackendAuthorityBootstrapper:
             existing_material_count=material_report.existing_count,
         )
 
+    def _target_released_node_ids(self) -> set[str]:
+        """Return graph node identities already installed by a verified release."""
+
+        released: set[str] = set()
+        page_number = 1
+        while True:
+            response = self.session.get(
+                f"{self.target_api}/materials",
+                params={
+                    "page": page_number,
+                    "page_size": 100,
+                    "with_children": "true",
+                },
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            page = _response_data(response, "Backend Authority 物料列表")
+            raw_items = page.get("items")
+            if not isinstance(raw_items, list):
+                raise WorkspaceHostError(
+                    "backend_authority_bootstrap_failed",
+                    "Backend Authority 物料列表结构无效",
+                )
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                metadata = item.get("meta_data")
+                if not isinstance(metadata, Mapping):
+                    continue
+                release = metadata.get("unilab_release")
+                if not isinstance(release, Mapping):
+                    continue
+                if (
+                    self.source_workspace is not None
+                    and str(release.get("source_workspace") or "")
+                    != self.source_workspace
+                ):
+                    continue
+                node_id = str(metadata.get("source_node_id") or "").strip()
+                if node_id:
+                    released.add(node_id)
+            total = page.get("total")
+            if (
+                isinstance(total, int)
+                and not isinstance(total, bool)
+                and page_number * 100 < total
+            ):
+                page_number += 1
+                continue
+            return released
+
     def _source_templates(self) -> list[Mapping[str, Any]]:
         items: list[Mapping[str, Any]] = []
         cursor: str | None = None
+        page_number = 1
+        pagination_mode: str | None = None
         while True:
-            params: dict[str, object] = {"limit": 100}
-            if cursor:
+            params: dict[str, object]
+            if pagination_mode == "cursor":
+                params = {"limit": 100}
+            else:
+                params = {"page": page_number, "page_size": 100}
+            if pagination_mode == "cursor" and cursor:
                 params["cursor_uuid"] = cursor
             response = self.session.get(
                 f"{self.source_api}/resource-templates",
@@ -128,8 +203,66 @@ class BackendAuthorityBootstrapper:
             items.extend(item for item in raw_items if isinstance(item, Mapping))
             if not page.get("has_more"):
                 return items
-            next_cursor = page.get("next_cursor_uuid")
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+
+            has_numbered_fields = "page" in page or "page_size" in page
+            next_cursor = next(
+                (
+                    value
+                    for key in ("next_cursor_uuid", "next_cursor", "cursor")
+                    if isinstance((value := page.get(key)), str) and value
+                ),
+                None,
+            )
+            has_cursor_fields = next_cursor is not None
+            if has_numbered_fields and has_cursor_fields:
+                raise WorkspaceHostError(
+                    "backend_authority_bootstrap_failed",
+                    "Local Backend 模板列表混合了页码与游标合同",
+                )
+            # Local projections have shipped both a fully annotated numbered
+            # response and a compact ``items + has_more`` response.  The
+            # request itself is numbered until the server explicitly returns a
+            # cursor, so a compact response must keep advancing page numbers.
+            response_mode = (
+                "cursor"
+                if has_cursor_fields
+                else "numbered"
+            )
+            if pagination_mode is not None and response_mode != pagination_mode:
+                raise WorkspaceHostError(
+                    "backend_authority_bootstrap_failed",
+                    "Local Backend 模板列表分页合同发生漂移",
+                )
+            pagination_mode = response_mode
+            if pagination_mode == "numbered":
+                returned_page = page.get("page")
+                page_size = page.get("page_size")
+                if returned_page is not None and (
+                    not isinstance(returned_page, int)
+                    or isinstance(returned_page, bool)
+                    or returned_page != page_number
+                ):
+                    raise WorkspaceHostError(
+                        "backend_authority_bootstrap_failed",
+                        "Local Backend 模板列表页码无效",
+                    )
+                if page_size is not None and (
+                    not isinstance(page_size, int)
+                    or isinstance(page_size, bool)
+                    or page_size <= 0
+                ):
+                    raise WorkspaceHostError(
+                        "backend_authority_bootstrap_failed",
+                        "Local Backend 模板列表页大小无效",
+                    )
+                page_number += 1
+                continue
+
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor == cursor
+            ):
                 raise WorkspaceHostError(
                     "backend_authority_bootstrap_failed",
                     "Local Backend 模板列表游标无效",

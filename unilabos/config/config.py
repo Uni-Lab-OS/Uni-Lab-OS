@@ -25,6 +25,9 @@ class BasicConfig:
     workflow_source_discovery_plan: object | None = None
     # 与当前包目录编译代绑定的 Workbench 精确源码挂载；无工作区时保持 ``None``。
     workspace_package_mount_projection: object | None = None
+    # 与当前包目录同代编译的只读物料外形和模型资产，供纯 Authoring Web 进程发布。
+    workspace_material_shapes: tuple[dict[str, object], ...] = ()
+    workspace_material_model_catalog: object | None = None
     config_path = ""
     is_host_mode = True
     # False（默认）：Slave 必须等 HostLink/Host ROS 服务就绪后才初始化 ROS。

@@ -17,6 +17,7 @@ from unilabos.workspace_host.cli import (
 from unilabos.workspace_host.release_publish import (
     DeploymentPlan,
     DeploymentResult,
+    ExistingBackendDeploymentTarget,
     VerificationReport,
     WorkspaceRelease,
     WorkspaceReleasePublisher,
@@ -30,6 +31,18 @@ from unilabos.workspace_host.release_publish import (
     _workflow_import_payload,
     _normalized_workflow,
 )
+
+
+def test_release_target_inspection_returns_service_origin() -> None:
+    target = ExistingBackendDeploymentTarget(
+        "http://127.0.0.1:8080/api/v1/",
+        "test-token",
+    )
+    target._paged = lambda *_args, **_kwargs: []  # type: ignore[method-assign]
+
+    inspection = target.inspect()
+
+    assert inspection["targetAddress"] == "http://127.0.0.1:8080"
 
 
 def _release() -> WorkspaceRelease:

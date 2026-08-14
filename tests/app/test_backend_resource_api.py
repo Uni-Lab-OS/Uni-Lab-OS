@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from unilabos.app.scheduler.inventory.backend_api import (
+    create_material_asset_router,
     install_backend_resource_api,
 )
 from unilabos.app.scheduler.inventory.backend_contract import (
@@ -105,6 +106,45 @@ def test_material_model_assets_use_public_route_with_cache_identity(tmp_path) ->
     assert response.headers["etag"] == '"sha256:model"'
     assert missing.status_code == 404
     store.close()
+
+
+def test_workspace_authoring_can_publish_model_assets_without_inventory() -> None:
+    """纯 Authoring 进程必须能独立发布模型，且不暴露资源写路由。
+
+    参数：无。返回：无；断言只读资产 Router 不依赖 Inventory Store。异常：模型
+    路由仍与资源权威耦合或意外开放写接口时测试失败。
+    """
+
+    class _ModelCatalog:
+        def read_asset(self, public_path: str) -> WorkspaceMaterialModelAsset:
+            if public_path != "/api/v1/material-models/szlab/device.xacro":
+                raise KeyError("模型资产未授权")
+            return WorkspaceMaterialModelAsset(
+                content=b"<robot/>",
+                media_type="application/xml",
+                etag="sha256:workspace-model",
+            )
+
+    app = FastAPI()
+    app.include_router(
+        create_material_asset_router(
+            material_shapes=({"id": "szlab-device", "parts": []},),
+            material_model_catalog=_ModelCatalog(),
+        ),
+        prefix="/api/v1",
+    )
+    client = TestClient(app)
+
+    model = client.get("/api/v1/material-models/szlab/device.xacro")
+    shapes = client.get("/api/v1/material-shapes")
+
+    assert model.status_code == 200
+    assert model.content == b"<robot/>"
+    assert shapes.json() == {
+        "code": 0,
+        "data": {"items": [{"id": "szlab-device", "parts": []}]},
+    }
+    assert client.get("/api/v1/materials").status_code == 404
 
 
 def _sync_template(client: TestClient) -> str:

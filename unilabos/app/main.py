@@ -1280,6 +1280,10 @@ def main():
         workspace_material_shapes = workspace_registry_runtime.material_shapes
     else:
         workspace_material_shapes = ()
+    # Workspace Backend 不启动嵌入式 Inventory，但仍需以同一编译代发布前端 3D
+    # 场景依赖的只读模型资产；这里只保存不可变目录，不引入第二套资源权威。
+    BasicConfig.workspace_material_shapes = tuple(workspace_material_shapes)
+    BasicConfig.workspace_material_model_catalog = workspace_material_models
 
     # Check mode: 注册表验证完成后直接退出
     if check_mode:
@@ -1477,7 +1481,13 @@ def main():
             "Workspace Backend 使用 Backend Authority；仅保留 Authoring Projection",
             "info",
         )
-    elif BasicConfig.is_host_mode:
+    elif BasicConfig.is_host_mode or (
+        runtime_process_plan.role.value == "workspace_backend"
+        and runtime_process_plan.control_plane.value == "local"
+    ):
+        # Workspace Backend 的 Inventory/Scheduler 是本地 Authoring 发布源，
+        # 与是否加载实体设备无关；external_devices_only 只能跳过设备驱动，不能
+        # 让资源模板和物料图路由随 HostNode 一起消失。
         from unilabos.app.control_plane import (
             ControlPlaneRuntimeContext,
             start_control_plane_runtime,

@@ -229,6 +229,7 @@ class ExistingBackendDeploymentTarget:
         before_workflows: Callable[[], None] | None = None,
     ) -> None:
         self.target_api = _api_base(target_address)
+        self.target_address = self.target_api.removesuffix("/api/v1")
         self.credential = str(credential or "").strip()
         if not self.credential:
             raise WorkspaceHostError(
@@ -263,6 +264,56 @@ class ExistingBackendDeploymentTarget:
             material_count=len(material_nodes),
             workflow_count=len(release.workflows),
         )
+
+    def inspect(self) -> dict[str, Any]:
+        """Return destructive-reset preflight counts for the target."""
+
+        templates = self._paged("/resource-templates")
+        materials = self._paged("/materials", with_children="true")
+        workflows = self._paged("/workflows")
+        return {
+            "targetAddress": self.target_address,
+            "empty": not templates and not materials and not workflows,
+            "counts": {
+                "templates": len(templates),
+                "materials": len(materials),
+                "workflows": len(workflows),
+            },
+        }
+
+    def clear(self) -> dict[str, Any]:
+        """Delete target authoring data in dependency-safe order."""
+
+        before = self.inspect()
+        for workflow in self._paged("/workflows"):
+            self._request("DELETE", f"/workflows/{_required_identity(workflow, 'workflow')}")
+
+        materials = self._paged("/materials", with_children="true")
+        roots = [item for item in materials if not item.get("parent_uuid")]
+        for material in roots:
+            self._request(
+                "DELETE",
+                f"/materials/{_required_identity(material, 'material')}",
+                json={
+                    "idempotency_key": (
+                        "workspace-release-reset/"
+                        f"{_required_identity(material, 'material')}"
+                    )
+                },
+            )
+        for template in self._paged("/resource-templates"):
+            self._request(
+                "DELETE",
+                f"/resource-templates/{_required_identity(template, 'resource template')}",
+            )
+        after = self.inspect()
+        if not after["empty"]:
+            raise WorkspaceHostError(
+                "release_target_reset_failed",
+                "Backend 清空后仍存在模板、物料或工作流",
+                details={"target": after},
+            )
+        return {"before": before, "after": after}
 
     def apply(self, plan: DeploymentPlan) -> DeploymentResult:
         release = plan.release

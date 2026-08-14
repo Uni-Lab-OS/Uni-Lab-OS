@@ -31,6 +31,7 @@ install_http_tracing(app)
 pages = None
 workflow_routes_mounted = False
 resource_contract_routes_mounted = False
+workspace_material_asset_routes_mounted = False
 workspace_authoring_routes_mounted = False
 local_edge_control_routes_mounted = False
 
@@ -92,6 +93,7 @@ def setup_server() -> FastAPI:
     并保持工作流接口关闭，不回退到第二套运行时。
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
+    global workspace_material_asset_routes_mounted
     global local_edge_control_routes_mounted, workspace_authoring_routes_mounted
     from unilabos.app.control_plane import (
         should_mount_embedded_scheduler_routes,
@@ -122,6 +124,29 @@ def setup_server() -> FastAPI:
             BasicConfig.workspace_package_mount_projection,
         )
         workspace_authoring_routes_mounted = True
+
+    # Backend 模式的 Workspace 进程只承担 Authoring 与包资产读取；模型路由不依赖
+    # Inventory，因此可独立挂载而不会产生第二套物料写权威。
+    if (
+        workspace_authoring_enabled
+        and not embedded_scheduler_enabled
+        and not workspace_material_asset_routes_mounted
+    ):
+        from unilabos.app.scheduler.inventory.backend_api import (
+            create_material_asset_router,
+        )
+
+        app.include_router(
+            create_material_asset_router(
+                material_shapes=BasicConfig.workspace_material_shapes,
+                material_model_catalog=(
+                    BasicConfig.workspace_material_model_catalog
+                ),
+            ),
+            prefix="/api/v1",
+            tags=["workspace-material-assets"],
+        )
+        workspace_material_asset_routes_mounted = True
 
     # 共享 Workflow Interface 必须先于 Edge-only scheduler adapter 挂载，
     # /workflows 表示定义，/workflow-tasks 表示运行。
