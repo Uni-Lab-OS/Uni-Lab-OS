@@ -141,6 +141,7 @@ def setup_server() -> FastAPI:
             from unilabos.app.scheduler.integration import (
                 get_edge_scheduler,
                 get_inventory_service,
+                get_material_shapes_by_template,
             )
             from unilabos.app.workflow_api import install_workflow_api
             from unilabos.workflow.composition import (
@@ -180,6 +181,9 @@ def setup_server() -> FastAPI:
                         inventory_store=inventory_service.store,
                         registry=lab_registry,
                         scheduler=edge_scheduler,
+                        material_shapes_by_template=(
+                            get_material_shapes_by_template()
+                        ),
                         editable_package_roots=(
                             BasicConfig.workflow_editable_package_roots
                         ),

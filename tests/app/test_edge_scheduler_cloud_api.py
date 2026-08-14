@@ -165,6 +165,27 @@ class TestIntegrationWiring:
 
         assert integration.get_material_shapes() == list(material_shapes)
 
+    def test_inventory_composition_retains_shape_template_bindings(self, tmp_path):
+        """工作流二次模板事务必须复用库存组合根持有的同代 Shape 绑定。"""
+
+        bindings = {
+            "community.test_lab.beaker": {
+                "schema_version": "unilab.shape/v1",
+                "id": "beaker",
+                "bundle": "test-lab",
+                "parts": [{"type": "box"}],
+            }
+        }
+        integration.setup_edge_inventory(
+            str(tmp_path / "host-material.db"),
+            material_shapes_by_template=bindings,
+        )
+
+        first_read = integration.get_material_shapes_by_template()
+        first_read["community.test_lab.beaker"]["id"] = "tampered"
+
+        assert integration.get_material_shapes_by_template() == bindings
+
     def test_inventory_composition_retains_public_material_model_catalog(
         self,
         tmp_path,
