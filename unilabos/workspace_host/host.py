@@ -956,6 +956,13 @@ class WorkspaceHost:
             return self._snapshot_locked()
 
     def _update_configuration(self, parameters: dict[str, object]) -> dict[str, object]:
+        authority_fields = sorted(set(parameters) & {"domainMode", "backendUrl"})
+        if authority_fields:
+            raise WorkspaceHostError(
+                "configuration_authority_forbidden",
+                "Authority 必须通过 authority.switch 切换，不能直接改配置",
+                details={"fields": authority_fields},
+            )
         allowed = {
             "graphPath",
             "runtimeMode",
@@ -963,8 +970,6 @@ class WorkspaceHost:
             "plcVariableTablePath",
             "plcHandshakeProfile",
             "plcHandshakeWorkflow",
-            "domainMode",
-            "backendUrl",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
@@ -1035,21 +1040,18 @@ class WorkspaceHost:
         try:
             if edge_ready:
                 self._stop_component("edge")
-            if backend_ready:
-                self._stop_component("backend")
+            if current_mode == "local" and mode == "backend":
+                self._assert_local_authority_quiescent()
             self._replace_configuration(updated, "authority.switching")
-            if backend_ready:
-                self._start_backend({})
+            self._synchronize_backend_authority_metadata(updated)
             if edge_ready:
                 self._start_edge()
         except BaseException as error:  # noqa: BLE001 - rollback is the boundary.
             rollback_failures: list[str] = []
             try:
                 self._stop_component("edge")
-                self._stop_component("backend")
                 self._replace_configuration(previous, "authority.rollback")
-                if backend_ready:
-                    self._start_backend({})
+                self._synchronize_backend_authority_metadata(previous)
                 if edge_ready:
                     self._start_edge()
             except BaseException as rollback_error:  # noqa: BLE001
@@ -1064,6 +1066,45 @@ class WorkspaceHost:
                 {"mode": mode, "backendUrl": backend_url},
             )
             return self._snapshot_locked()
+
+    def _assert_local_authority_quiescent(self) -> None:
+        """Reject Local -> Backend while durable local execution is unsettled."""
+
+        try:
+            blockers = inspect_local_reset_blockers(self.paths)
+        except LocalResetInspectionError as error:
+            raise WorkspaceHostError(
+                "authority_switch_preflight_failed",
+                "无法证明 Local Authority 已停止接单；Authority 未切换",
+                details={"message": str(error)},
+            ) from error
+        if not blockers:
+            return
+        raise WorkspaceHostError(
+            "authority_switch_blocked",
+            "Local Authority 仍有活动任务或未收敛 Edge 事实；Authority 未切换",
+            details={"blockers": [blocker.as_dict() for blocker in blockers]},
+        )
+
+    def _synchronize_backend_authority_metadata(
+        self,
+        configuration: dict[str, object],
+    ) -> None:
+        """Update selected-Authority facts without changing Backend identity."""
+
+        with self._lock:
+            backend = self._components["backend"]
+            metadata = backend.setdefault("metadata", {})
+            assert isinstance(metadata, dict)
+            mode = str(configuration.get("domainMode") or "local")
+            metadata["domainMode"] = mode
+            metadata["backendUrl"] = _optional_text(configuration.get("backendUrl"))
+            if backend.get("phase") == "ready":
+                backend["capabilities"] = (
+                    ["authoring"]
+                    if mode == "backend"
+                    else ["authoring", "inventory", "workflow-run"]
+                )
 
     def _publish_release(self, parameters: dict[str, object]) -> dict[str, object]:
         """Publish the visible Local generation and optionally activate Backend Authority."""

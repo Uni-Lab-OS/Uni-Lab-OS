@@ -92,6 +92,59 @@ def test_workspace_restart_uses_the_shared_client_operation(
     ]
 
 
+def test_workspace_authority_switch_does_not_publish_implicitly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    calls: list[tuple[str, object]] = []
+
+    class Client:
+        def execute(self, command: str, **options: object) -> dict[str, object]:
+            calls.append((command, options))
+            return {"operationId": "authority", "phase": "succeeded"}
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.cli.ensure_workspace_host",
+        lambda _workspace: Client(),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "unilab",
+            "workspace",
+            "authority",
+            "backend",
+            "--backend-url",
+            "https://backend.example.test",
+            "--workspace",
+            str(workspace),
+            "--json",
+        ],
+    )
+
+    main()
+
+    assert json.loads(capsys.readouterr().out)["phase"] == "succeeded"
+    assert calls == [
+        (
+            "authority.switch",
+            {
+                "parameters": {
+                    "mode": "backend",
+                    "backendUrl": "https://backend.example.test",
+                    "bootstrap": False,
+                },
+                "operation_id": None,
+                "timeout": 120.0,
+            },
+        )
+    ]
+
+
 def test_workspace_reset_local_requires_confirmation_and_uses_shared_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

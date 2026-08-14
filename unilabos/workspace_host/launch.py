@@ -83,15 +83,14 @@ def resolve_backend_launch(
     generation = str(uuid.uuid4())
     runtime_directory = paths.runtime / "backend" / generation
     runtime_directory.mkdir(parents=True, exist_ok=False)
-    state_directory = paths.runtime / "backend" / (
-        "local-domain" if domain_mode == "local" else "authoring"
-    )
+    # Workspace Backend is a stable process.  It always owns the rebuildable
+    # Local Domain service graph and its databases; ``domainMode`` only selects
+    # which Authority is exposed to the Workbench and connected to Edge.  The
+    # in-process authority gate closes the Local Domain HTTP surface while the
+    # external Backend is selected.
+    state_directory = paths.runtime / "backend" / "local-domain"
     state_directory.mkdir(parents=True, exist_ok=True)
-    legacy_state = (
-        _migrate_legacy_backend_state(paths, state_directory)
-        if domain_mode == "local"
-        else None
-    )
+    legacy_state = _migrate_legacy_backend_state(paths, state_directory)
     validated_graph = runtime_directory / "selected-graph.json"
     shutil.copyfile(graph, validated_graph)
     os.chmod(validated_graph, 0o600)
@@ -112,6 +111,7 @@ def resolve_backend_launch(
             "UNILABOS_HOSTLINKCONFIG_PORT": str(hostlink_port),
             "UNILABOS_WORKBENCH_RUNTIME_MODE": mode,
             "UNILABOS_WORKBENCH_GRAPH_FINGERPRINT": _sha256(graph),
+            "UNILABOS_WORKSPACE_AUTHORITY_CONFIG": str(paths.environment),
             "ROS_DOMAIN_ID": str(2 + (uuid.uuid4().int % 98)),
         }
     )
@@ -127,15 +127,11 @@ def resolve_backend_launch(
         str(local_config),
         "--working_dir",
         str(state_directory),
-        *(
-            ("--preserve_runtime_databases",)
-            if domain_mode == "local"
-            else ()
-        ),
+        "--preserve_runtime_databases",
         "--process_role",
         "workspace_backend",
         "--control_plane",
-        domain_mode,
+        "local",
         "--backend",
         "ros",
         "--app_bridges",

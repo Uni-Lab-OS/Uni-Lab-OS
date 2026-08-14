@@ -89,6 +89,7 @@ def dispatch_workspace_command(args: dict[str, Any]) -> bool:
                 parameters={
                     "mode": args.get("mode"),
                     "backendUrl": args.get("backend_url"),
+                    "bootstrap": False,
                 },
                 operation_id=args.get("operation_id"),
                 timeout=float(args.get("wait") or 120.0),
