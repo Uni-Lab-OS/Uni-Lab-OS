@@ -12,6 +12,7 @@ import pytest
 from unilabos.ros.nodes import base_device_node
 from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode
 from unilabos.ros.nodes.resource_slot_hydration import (
+    PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA,
     ResourceSlotHydrationError,
     install_production_resource_nodes,
     plan_resource_slot_parent_context,
@@ -329,10 +330,159 @@ def test_production_resource_projection_uses_backend_identity_and_parent_tree() 
 
     assert [row["uuid"] for row in direct_rows] == [backend_target_uuid]
     assert direct_rows[0]["parent_uuid"] == backend_parent_uuid
+    assert direct_rows[0]["extra"][PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA] == (
+        local_target_uuid
+    )
     assert [row["uuid"] for row in parent_rows] == [
         backend_parent_uuid,
         backend_target_uuid,
     ]
+
+
+def test_production_projection_resolves_exact_local_runtime_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend identities must be translated back only at the driver boundary."""
+
+    local_uuid = "50000000-0000-4000-8000-000000000131"
+    backend_uuid = "50000000-0000-4000-8000-000000000132"
+    projected = SimpleNamespace(
+        unilabos_uuid=backend_uuid,
+        unilabos_extra={PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA: local_uuid},
+        children=[],
+    )
+    local_resource = SimpleNamespace(unilabos_uuid=local_uuid, children=[])
+    tree_set = SimpleNamespace(
+        trees=[SimpleNamespace(root_node=SimpleNamespace(res_content=projected))],
+        to_plr_resources=lambda: [projected],
+    )
+
+    monkeypatch.setattr(base_device_node.BasicConfig, "control_plane", "backend")
+    monkeypatch.setattr(base_device_node.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(
+        base_device_node,
+        "query_production_resource_nodes_sync",
+        lambda _uuids: [{"uuid": backend_uuid, "parent_uuid": None}],
+    )
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        lambda _rows: tree_set,
+    )
+
+    class _RuntimeTracker:
+        resources = [local_resource]
+
+        def figure_resource(self, _resource: object, try_mode: bool) -> list[object]:
+            assert try_mode is True
+            return []
+
+        def loop_find_with_uuid(self, root: object, wanted: str) -> object | None:
+            if root is local_resource and wanted == local_uuid:
+                return local_resource
+            return None
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node._resource_clients = {}
+    node.resource_tracker = _RuntimeTracker()
+    node.lab_logger = lambda: _Logger()
+
+    assert node._convert_resources_sync(backend_uuid) == [local_resource]
+
+
+def test_managed_local_edge_uses_backend_material_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed Local Edge 也必须使用 Backend 权威物料投影。
+
+    参数说明：``monkeypatch`` 隔离全局运行角色和资源装配。返回：无；断言 Edge
+    Runtime 不会回退到已拆除的本地 Scheduler/ROS 物料查询。
+    """
+
+    material_uuid = "50000000-0000-4000-8000-000000000115"
+    material = SimpleNamespace(unilabos_uuid=material_uuid, children=[])
+    direct_rows = [_raw_resource(material_uuid)]
+    install_production_resource_nodes(
+        [
+            {
+                **direct_rows[0],
+                "id": "managed-local-sample",
+                "name": "Managed local sample",
+                "barcode": "UNILAB-GRAPH-managed-local-sample",
+                "type": "container",
+                "class": "sample",
+                "config": {},
+                "data": {},
+                "extra": {},
+            }
+        ],
+        {"UNILAB-GRAPH-managed-local-sample": material_uuid},
+    )
+    monkeypatch.setattr(base_device_node.BasicConfig, "control_plane", "local")
+    monkeypatch.setattr(base_device_node.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        lambda _rows: _tree_set(direct_rows, material),
+    )
+
+    class _ForbiddenClient:
+        def call_async(self, _request: object) -> object:
+            raise AssertionError("Edge Runtime must not query legacy ROS material service")
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node._resource_clients = {"c2s_update_resource_tree": _ForbiddenClient()}
+    node.resource_tracker = _Tracker()
+    node.lab_logger = lambda: _Logger()
+
+    assert node._convert_resources_sync(material_uuid) == [material]
+
+
+def test_managed_local_edge_async_action_uses_backend_material_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HostNode 异步动作也不得回退到 Edge 内的旧物料服务。
+
+    参数说明：``monkeypatch`` 隔离运行角色、资源装配与网络接缝。返回：无；断言
+    ``transfer_resource`` 一类异步动作直接使用已注册的 Backend 投影。
+    """
+
+    material_uuid = "50000000-0000-4000-8000-000000000116"
+    material = SimpleNamespace(unilabos_uuid=material_uuid, children=[])
+    direct_rows = [_raw_resource(material_uuid)]
+    install_production_resource_nodes(
+        [
+            {
+                **direct_rows[0],
+                "id": "managed-local-async-sample",
+                "name": "Managed local async sample",
+                "barcode": "UNILAB-GRAPH-managed-local-async-sample",
+                "type": "container",
+                "class": "sample",
+                "config": {},
+                "data": {},
+                "extra": {},
+            }
+        ],
+        {"UNILAB-GRAPH-managed-local-async-sample": material_uuid},
+    )
+    monkeypatch.setattr(base_device_node.BasicConfig, "control_plane", "local")
+    monkeypatch.setattr(base_device_node.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        lambda _rows: _tree_set(direct_rows, material),
+    )
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node.resource_tracker = _Tracker()
+
+    async def forbidden_get_resource(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Edge Runtime must not query legacy async material service")
+
+    node.get_resource = forbidden_get_resource
+
+    assert asyncio.run(node._convert_resource_async({"uuid": material_uuid})) is material
 
 
 def test_sync_conversion_without_parent_keeps_single_query(

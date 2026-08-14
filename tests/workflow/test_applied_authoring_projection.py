@@ -176,6 +176,24 @@ def test_retained_nodes_and_edges_preserve_the_exact_persisted_read_shape() -> N
     assert result.graph["edges"] == applied_graph["edges"]
 
 
+def test_legacy_store_status_is_not_an_authoring_graph_change() -> None:
+    """旧 Store 的内部节点状态不得把原样源码误报为整图修改。
+
+    参数：无。返回：无；模拟本地 SQLite 仍返回 ``status=idle``、而公共
+    Backend/Authoring DTO 已移除该字段，断言相同源码仍是源码单独变更。
+    """
+
+    engine, applied_graph, normalized_source = _persisted_standard_graph()
+    for node in applied_graph["nodes"]:
+        node["status"] = "idle"
+
+    result = _compile(engine, graph=applied_graph, source=normalized_source)
+
+    assert result.valid and result.graph is not None, result.diagnostics
+    assert result.changeset["kind"] == "source_only"
+    assert result.changeset["updated_node_uuids"] == []
+
+
 def test_retained_group_preserves_omitted_nullable_action_name() -> None:
     """展示分组节点必须保留 Backend 省略的空动作名读形状。
 
@@ -404,9 +422,7 @@ def test_catalog_projection_accepts_browser_json_number_lexical_collapse() -> No
     catalog = engine._catalog
     node_templates = [action.detached_template() for action in catalog.actions]
     handle_templates = [
-        handle
-        for action in catalog.actions
-        for handle in action.detached_handles()
+        handle for action in catalog.actions for handle in action.detached_handles()
     ]
     current_template = next(
         item for item in node_templates if item["uuid"] == PREPARE_TEMPLATE_UUID

@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _scheduler: Optional[EdgeScheduler] = None
 _backend: Optional[JobExecutionBackend] = None
 _inventory: Optional[Any] = None
+_inventory_resource_tree_set: Optional[Any] = None
 _outbox_worker: Optional[Any] = None
 # 工作区物料外形是包资产编译结果，不属于库存数据库私有事实。
 _material_shapes: tuple[dict[str, Any], ...] = ()
@@ -76,6 +77,12 @@ def get_edge_backend() -> Optional[JobExecutionBackend]:
 
 def get_inventory_service() -> Optional[Any]:
     return _inventory
+
+
+def get_inventory_resource_tree_set() -> Optional[Any]:
+    """Return the Backend-owned startup graph projection without requiring ROS."""
+
+    return _inventory_resource_tree_set
 
 
 def get_material_shapes() -> list[dict[str, Any]]:
@@ -215,7 +222,8 @@ def setup_edge_inventory(
     从节点不调用本函数，因此不会打开此数据库。
     """
 
-    global _inventory, _material_model_catalog, _material_shapes, _outbox_worker
+    global _inventory, _inventory_resource_tree_set
+    global _material_model_catalog, _material_shapes, _outbox_worker
     path = str(inventory_db_path or "").strip()
     if not path:
         raise ValueError("inventory_db_path is required")
@@ -299,6 +307,7 @@ def setup_edge_inventory(
                 else None
             ),
         )
+        _inventory_resource_tree_set = resource_tree_set
 
     if ws_client is not None:
         _wire_inventory_ws_client(_inventory, ws_client)
@@ -324,7 +333,8 @@ def setup_edge_scheduler(
     sync_sender: Any = None,
     device_state_db_path: str = "",
     workflow_history_db_path: str = "",
-) -> Tuple[EdgeScheduler, JobExecutionBackend]:
+    execution_backend: Any = None,
+) -> Tuple[EdgeScheduler, Any]:
     """装配本地调度器（Scheduler）与执行后端，并可接通旧云端 WS。
 
     参数：
@@ -346,6 +356,8 @@ def setup_edge_scheduler(
             空则用 ULAB_WORKFLOW_HISTORY_DB，默认
             ~/.unilabos/workflow_history.db，"off" 关闭）。启动时把上一
             世代残留的非终态 run 标记 interrupted。
+        execution_backend: 可选的跨进程 Edge dispatcher；Workspace Backend
+            注入生产同形的 loopback authority，旧 combined 模式保持进程内实现。
     返回：
         ``(scheduler, backend)``；``backend`` 需由调用方追加进
         ``HostNode.bridges``。
@@ -421,6 +433,7 @@ def setup_edge_scheduler(
     scheduler, backend = create_edge_stack(
         orderer=orderer,
         host_node_getter=host_node_getter,
+        execution_backend=execution_backend,
         inventory=inventory,
         estimator=estimator,
         monitor=monitor_bus,
@@ -475,7 +488,7 @@ def shutdown_edge_services() -> None:
     参数：无。返回：无。异常：底层关闭错误原样抛出，避免遗留半关闭单例。
     """
 
-    global _scheduler, _backend, _inventory
+    global _scheduler, _backend, _inventory, _inventory_resource_tree_set
     global _material_model_catalog, _material_shapes, _outbox_worker
     from unilabos.app.scheduler.host_network import shutdown_network_services
 
@@ -497,6 +510,7 @@ def shutdown_edge_services() -> None:
     _scheduler = None
     _backend = None
     _inventory = None
+    _inventory_resource_tree_set = None
     _material_model_catalog = None
     _material_shapes = ()
     _outbox_worker = None
@@ -513,6 +527,7 @@ __all__ = [
     "get_edge_backend",
     "get_edge_scheduler",
     "get_inventory_service",
+    "get_inventory_resource_tree_set",
     "get_material_model_catalog",
     "get_material_shapes",
     "make_http_snapshot_sender",

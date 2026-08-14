@@ -60,6 +60,7 @@ from unilabos.registry.utils import (
 )
 from unilabos.resources.graphio import resource_plr_to_ulab, tree_to_list
 from unilabos.resources.resource_tracker import ResourceTreeSet, RETURN_UNILABOS_SAMPLES
+from unilabos.resources.site_definition import normalize_available_sites
 from unilabos.ros.msgs.message_converter import (
     msg_converter_manager,
     ros_action_to_json_schema,
@@ -972,6 +973,9 @@ class Registry:
 
         Returns:
             包含动作 Schema、传输映射和状态 Schema 的设备注册表条目。
+
+        Raises:
+            ValueError: 库位（Site）模板定义非法时抛出。
         """
         # 三个变量分别保存驱动类型位置、证据文件路径和静态导入符号表。
         module_str = ast_meta.get("module", "")
@@ -1324,6 +1328,9 @@ class Registry:
             "description": ast_meta.get("description", ""),
             "displayname": resolve_registry_displayname(ast_meta.get("displayname"), device_id),
             "handles": handles,
+            "available_sites": normalize_available_sites(
+                ast_meta.get("available_sites")
+            ),
             "icon": ast_meta.get("icon", ""),
             "init_param_schema": init_schema,
             "version": ast_meta.get("version", "1.0.0"),
@@ -1403,7 +1410,12 @@ class Registry:
         return schema
 
     def _build_resource_entry_from_ast(self, resource_id: str, ast_meta: dict) -> Dict[str, Any]:
-        """Build a resource registry entry from AST-scanned metadata."""
+        """把 AST 静态元数据投影为完整器材注册表（Registry）条目。
+
+        参数：``resource_id`` 是器材模板稳定业务身份，``ast_meta`` 是不执行作者
+        源码得到的静态元数据。返回：包含规范库位（Site）定义、连接点和实现身份的
+        器材模板条目；库位模板非法时抛出 ``ValueError``。
+        """
         module_str = ast_meta.get("module", "")
         file_path = ast_meta.get("file_path", "")
 
@@ -1419,6 +1431,9 @@ class Registry:
             "config_info": [],
             "description": ast_meta.get("description", ""),
             "displayname": resolve_registry_displayname(ast_meta.get("displayname"), resource_id),
+            "available_sites": normalize_available_sites(
+                ast_meta.get("available_sites")
+            ),
             "metadata": dict(ast_meta.get("metadata") or {}),
             "file_path": file_path,
         }
@@ -1471,7 +1486,7 @@ class Registry:
             return Path(BasicConfig.working_dir) / "registry_cache.pkl"
         return None
 
-    _CACHE_VERSION = 6
+    _CACHE_VERSION = 7
 
     def _load_config_cache(self) -> dict:
         import pickle

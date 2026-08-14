@@ -202,6 +202,36 @@ class WorkflowTaskCreateRequest(_BackendModel):
         return normalize_json_object(value)
 
 
+class DebugWorkflowTaskCreateRequest(_BackendModel):
+    workflow_uuid: str
+    start_node_uuids: List[str]
+    breakpoint_node_uuids: List[str] = Field(default_factory=list)
+    input: Dict[str, Any] = Field(default_factory=dict)
+    description: Optional[str] = None
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("start_node_uuids", "breakpoint_node_uuids", mode="before")
+    @classmethod
+    def _json_array(cls, value: Any) -> List[Any]:
+        return normalize_json_array(value)
+
+    @field_validator("input", "meta_data", mode="before")
+    @classmethod
+    def _json_object(cls, value: Any) -> Dict[str, Any]:
+        return normalize_json_object(value)
+
+
+class DebugCommandScope(_StrictModel):
+    type: str
+    hold_uuid: str
+
+
+class DebugWorkflowTaskCommandRequest(_StrictModel):
+    type: str
+    scope: DebugCommandScope
+    idempotency_key: str
+
+
 class WorkflowTaskCommandRequest(_StrictModel):
     type: str
     target_node_uuid: Optional[str] = None
@@ -363,10 +393,21 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
     def list_workflows(
         page: int = Query(default=1),
         page_size: int = Query(default=20),
-        name: str = Query(default=""),
+        keyword: str = Query(default=""),
     ) -> JSONResponse:
+        result = service.list_workflows(
+            page=page,
+            page_size=page_size,
+            name=keyword,
+        )
         return _success(
-            service.list_workflows(page=page, page_size=page_size, name=name)
+            {
+                "items": result["items"],
+                "has_more": result["page"] * result["page_size"]
+                < result["total"],
+                "page": result["page"],
+                "page_size": result["page_size"],
+            }
         )
 
     @router.get("/workflows/{workflow_uuid}")
@@ -422,6 +463,44 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
                 input_value=body.input,
                 description=body.description,
                 meta_data=body.meta_data,
+            ),
+            status=201,
+        )
+
+    @router.post("/debug/workflow-tasks")
+    def create_debug_workflow_task(
+        body: DebugWorkflowTaskCreateRequest,
+    ) -> JSONResponse:
+        """以不可变起始点和断点配置创建标准工作流任务。"""
+
+        return _success(
+            service.create_debug_workflow_task(
+                workflow_uuid=body.workflow_uuid,
+                start_node_uuids=body.start_node_uuids,
+                breakpoint_node_uuids=body.breakpoint_node_uuids,
+                input_value=body.input,
+                description=body.description,
+                meta_data=body.meta_data,
+            ),
+            status=201,
+        )
+
+    @router.get("/debug/workflow-tasks/{task_uuid}")
+    def get_debug_workflow_task(task_uuid: str) -> JSONResponse:
+        return _success(service.get_debug_workflow_task(task_uuid))
+
+    @router.post("/debug/workflow-tasks/{task_uuid}/commands")
+    def command_debug_workflow_task(
+        task_uuid: str,
+        body: DebugWorkflowTaskCommandRequest,
+    ) -> JSONResponse:
+        return _success(
+            service.command_debug_workflow_task(
+                task_uuid,
+                command_type=body.type,
+                scope_type=body.scope.type,
+                hold_uuid=body.scope.hold_uuid,
+                idempotency_key=body.idempotency_key,
             ),
             status=201,
         )

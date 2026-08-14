@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -60,6 +61,16 @@ _SITE_GENERATORS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogMaterialShapeBinding:
+    """保存一个资源模板（ResourceTemplate）与同代编译外形的精确绑定。"""
+
+    # ``template_fqid`` 是包目录（PackageCatalog）分配的跨包稳定模板业务身份。
+    template_fqid: str
+    # ``shape`` 是已完成同代摘要和公共图元合同校验的 2.5D JSON 对象。
+    shape: dict[str, Any]
+
+
 def compile_catalog_material_shapes(
     source: WorkspaceSource,
     catalog: PackageCatalog,
@@ -74,14 +85,44 @@ def compile_catalog_material_shapes(
     返回部分目录。
     """
 
+    # ``shapes_by_identity`` 按发行包与外形 ID 保持跨定义幂等和冲突检测。
+    shapes_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    for template_binding in compile_catalog_material_shape_bindings(source, catalog):
+        # ``shape`` 与模板绑定容器隔离，公共查询可独立按 bundle/id 去重。
+        shape = _json_object(template_binding.shape, "公开外形")
+        shape_identity = (shape["bundle"], shape["id"])
+        existing = shapes_by_identity.get(shape_identity)
+        if existing is not None and existing != shape:
+            raise ValueError(
+                "同一工作区外形身份指向不同内容: "
+                f"{shape_identity[0]}/{shape_identity[1]}"
+            )
+        shapes_by_identity[shape_identity] = shape
+    return tuple(
+        _json_object(shapes_by_identity[identity], "公开外形")
+        for identity in sorted(shapes_by_identity)
+    )
+
+
+def compile_catalog_material_shape_bindings(
+    source: WorkspaceSource,
+    catalog: PackageCatalog,
+) -> tuple[CatalogMaterialShapeBinding, ...]:
+    """编译一代包目录中每个模板拥有的完整 2.5D 外形。
+
+    参数：``source`` 是本代唯一工作区文件来源；``catalog`` 是同一来源的不可变
+    包目录（PackageCatalog）。返回：按模板 FQID 排序的精确绑定；同一外形可由
+    多个模板复用，但每个模板仍保留独立绑定。异常：来源、资产摘要、绑定路径、
+    YAML 或公共外形合同无效时抛出 ``TypeError``/``ValueError``，不返回部分结果。
+    """
+
     if not isinstance(source, WorkspaceSource):
         raise TypeError("source 必须是 WorkspaceSource")
     if not isinstance(catalog, PackageCatalog):
         raise TypeError("catalog 必须是 PackageCatalog")
     # ``catalog_assets`` 是本代内容摘要索引，用于拒绝目录编译后的来源漂移。
     catalog_assets = {asset.logical_path: asset.digest for asset in catalog.assets}
-    # ``shapes_by_identity`` 按发行包与外形 ID 保持跨定义幂等和冲突检测。
-    shapes_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    bindings: list[CatalogMaterialShapeBinding] = []
     for definition in (
         *catalog.definitions.devices,
         *catalog.definitions.resources,
@@ -102,23 +143,19 @@ def compile_catalog_material_shapes(
             raise ValueError(
                 f"外形资产不属于当前包目录（PackageCatalog）代或摘要漂移: {logical_shape_path}"
             )
+        # ``shape`` 是从摘要已匹配的同一次字节读取编译出的前端公共合同。
         shape = _load_public_shape_bytes(
             shape_bytes,
             logical_shape_path=logical_shape_path,
             bundle=catalog.distribution.name,
         )
-        shape_identity = (shape["bundle"], shape["id"])
-        existing = shapes_by_identity.get(shape_identity)
-        if existing is not None and existing != shape:
-            raise ValueError(
-                "同一工作区外形身份指向不同内容: "
-                f"{shape_identity[0]}/{shape_identity[1]}"
+        bindings.append(
+            CatalogMaterialShapeBinding(
+                template_fqid=definition.fqid,
+                shape=_json_object(shape, "模板物料外形"),
             )
-        shapes_by_identity[shape_identity] = shape
-    return tuple(
-        _json_object(shapes_by_identity[identity], "公开外形")
-        for identity in sorted(shapes_by_identity)
-    )
+        )
+    return tuple(sorted(bindings, key=lambda binding: binding.template_fqid))
 
 
 def compile_workspace_material_shapes(
@@ -522,6 +559,8 @@ def _validate_workspace_material_plan(startup_plan: object) -> None:
 
 
 __all__ = [
+    "CatalogMaterialShapeBinding",
+    "compile_catalog_material_shape_bindings",
     "compile_catalog_material_shapes",
     "compile_workspace_material_shapes",
 ]

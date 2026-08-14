@@ -232,8 +232,8 @@ def test_product_composition_publishes_and_restores_workflow_templates(
         assert compiled.valid and compiled.graph is not None, compiled.diagnostics
         query = WorkflowTemplateQueryService(projection)
         page = query.list_node_templates(
-            limit=20,
-            cursor_uuid=None,
+            page=1,
+            page_size=20,
             keyword="",
             resource_template_uuid=None,
             action_type="",

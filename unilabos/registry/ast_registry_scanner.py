@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from unilabos.registry.utils import resolve_registry_displayname
+from unilabos.resources.site_definition import normalize_available_sites
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ from unilabos.registry.utils import resolve_registry_displayname
 
 MAX_SCAN_DEPTH = 10      # 最大目录递归深度
 MAX_SCAN_FILES = 1000    # 最大扫描文件数量
-_CACHE_VERSION = 9       # 缓存格式版本号，动作合同投影变化时递增
+_CACHE_VERSION = 10      # 缓存格式版本号，模板库位合同变化时递增
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # 合法的装饰器来源模块
@@ -359,6 +360,10 @@ def _parse_file(
 
     Returns:
         设备元数据列表和资源元数据列表；扫描过程不导入或执行作者源码。
+
+    Raises:
+        SyntaxError: 文件不是有效 Python 源码时抛出。
+        ValueError: 设备身份或库位（Site）模板定义非法时抛出。
     """
     # ``source`` 和 ``tree`` 只用于静态语法分析，不进入 Python import 机制。
     source = filepath.read_text(encoding="utf-8", errors="replace")
@@ -369,6 +374,8 @@ def _parse_file(
 
     # ``import_map`` 同时包含导入符号和同文件定义，仍不执行任何源码。
     import_map = _collect_imports(tree, module_path)
+    # ``literal_constants`` 只收集当前文件根级安全字面量，供较长的库位数组复用。
+    literal_constants = _collect_literal_constants(tree)
 
     devices: List[dict] = []
     resources: List[dict] = []
@@ -379,6 +386,12 @@ def _parse_file(
             device_decorator = _find_decorator(node, "device")
             if device_decorator is not None and _is_registry_decorator("device", import_map):
                 device_args = _extract_decorator_args(device_decorator, import_map)
+                for key in ("available_sites", "id_meta"):
+                    value = device_args.get(key)
+                    if isinstance(value, str):
+                        constant_name = value.rsplit(":", 1)[-1]
+                        if constant_name in literal_constants:
+                            device_args[key] = literal_constants[constant_name]
                 class_body = _extract_class_body(
                     node,
                     import_map,
@@ -408,6 +421,9 @@ def _parse_file(
                     "version": device_args.get("version", "1.0.0"),
                     "device_type": _detect_class_type(node, import_map),
                     "handles": device_args.get("handles", []),
+                    "available_sites": normalize_available_sites(
+                        device_args.get("available_sites")
+                    ),
                     "model": device_args.get("model"),
                     "hardware_interface": device_args.get("hardware_interface"),
                     "metadata": device_args.get("metadata") or {},
@@ -424,6 +440,7 @@ def _parse_file(
                     overrides = id_meta.get(did, {})
                     for key in (
                         "handles",
+                        "available_sites",
                         "description",
                         "displayname",
                         "icon",
@@ -432,7 +449,9 @@ def _parse_file(
                         "metadata",
                     ):
                         if key in overrides:
-                            if key == "metadata" and isinstance(overrides[key], dict):
+                            if key == "available_sites":
+                                meta[key] = normalize_available_sites(overrides[key])
+                            elif key == "metadata" and isinstance(overrides[key], dict):
                                 meta[key] = {**(base_meta.get("metadata") or {}), **overrides[key]}
                             else:
                                 meta[key] = overrides[key]
@@ -444,6 +463,7 @@ def _parse_file(
             if resource_decorator is not None and _is_registry_decorator("resource", import_map):
                 res_meta = _extract_resource_meta(
                     resource_decorator, node.name, module_path, filepath, import_map,
+                    literal_constants=literal_constants,
                     is_function=False,
                     init_node=_find_init_in_class(node),
                 )
@@ -455,12 +475,43 @@ def _parse_file(
             if resource_decorator is not None and _is_registry_decorator("resource", import_map):
                 res_meta = _extract_resource_meta(
                     resource_decorator, node.name, module_path, filepath, import_map,
+                    literal_constants=literal_constants,
                     is_function=True,
                     func_node=node,
                 )
                 resources.append(res_meta)
 
     return devices, resources
+
+
+def _collect_literal_constants(tree: ast.Module) -> Dict[str, Any]:
+    """收集当前模块根级的安全字面量常量。
+
+    参数：``tree`` 是已经解析但从未执行的 Python AST。返回：变量名到
+    ``ast.literal_eval`` 结果的映射；动态表达式、导入值和无法安全求值的节点被
+    忽略，绝不执行设备包代码。
+    """
+
+    result: Dict[str, Any] = {}
+    for statement in tree.body:
+        target: Optional[ast.Name] = None
+        value: Optional[ast.expr] = None
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            if isinstance(statement.targets[0], ast.Name):
+                target = statement.targets[0]
+                value = statement.value
+        elif isinstance(statement, ast.AnnAssign) and isinstance(
+            statement.target, ast.Name
+        ):
+            target = statement.target
+            value = statement.value
+        if target is None or value is None:
+            continue
+        try:
+            result[target.id] = ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            continue
+    return result
 
 
 def _find_init_in_class(cls_node: ast.ClassDef) -> Optional[ast.FunctionDef]:
@@ -477,14 +528,24 @@ def _extract_resource_meta(
     module_path: str,
     filepath: Path,
     import_map: Dict[str, str],
+    literal_constants: Optional[Dict[str, Any]] = None,
     is_function: bool = False,
     func_node: Optional[Union[ast.FunctionDef, ast.AsyncFunctionDef]] = None,
     init_node: Optional[ast.FunctionDef] = None,
 ) -> dict:
-    """
-    Extract resource metadata from a @resource decorator on a function or class.
+    """从类或工厂函数的 ``@resource`` 提取静态 Registry 元数据。
+
+    参数：``decorator_node`` 是装饰器 AST，``name`` 是源码对象名，
+    ``module_path`` 和 ``filepath`` 提供稳定源码身份，``import_map`` 解析导入符号，
+    ``literal_constants`` 提供当前模块安全字面量，``is_function`` 区分工厂函数，
+    ``func_node``/``init_node`` 提供初始化参数来源。返回：不执行作者代码即可上传的
+    器材模板定义；库位（Site）定义非法时抛出 ``ValueError``。
     """
     res_args = _extract_decorator_args(decorator_node, import_map)
+    raw_sites = res_args.get("available_sites")
+    if isinstance(raw_sites, str):
+        constant_name = raw_sites.rsplit(":", 1)[-1]
+        raw_sites = (literal_constants or {}).get(constant_name, raw_sites)
 
     resource_id = res_args.get("id") or res_args.get("resource_id")
     if resource_id is None:
@@ -510,6 +571,7 @@ def _extract_resource_meta(
         "version": res_args.get("version", "1.0.0"),
         "class_type": res_args.get("class_type", "pylabrobot"),
         "handles": res_args.get("handles", []),
+        "available_sites": normalize_available_sites(raw_sites),
         "model": res_args.get("model"),
         "metadata": res_args.get("metadata") or {},
         "init_params": init_params,

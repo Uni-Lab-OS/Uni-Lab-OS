@@ -593,13 +593,13 @@ class WorkflowService:
     ) -> Dict[str, Any]:
         """幂等执行本地工作流任务控制命令。
 
-        当前 Edge 调度内核先开放单步命令；它只允许暂停的 ``step`` 任务放行
-        一个就绪节点。返回与 Backend 相同的 WorkflowTaskCommand 投影。
+        暂停只阻止后续派发，不中断已在途设备动作；恢复、单步和取消都复用
+        同一个 Task 身份。返回与 Backend 相同的 WorkflowTaskCommand 投影。
         """
 
         try:
             task_uuid = validate_uuid(task_uuid)
-            if command_type != "step":
+            if command_type not in {"step", "pause", "resume", "cancel"}:
                 raise WorkflowError("invalid_input")
             if target_node_uuid is not None:
                 target_node_uuid = validate_uuid(target_node_uuid)
@@ -609,16 +609,17 @@ class WorkflowService:
             meta_data = normalize_json_object(meta_data)
             description = self._optional_text(description)
             task = self._store.get_task(task_uuid)
-            if (
+            if task.get("status") in {
+                "succeeded",
+                "success",
+                "failed",
+                "canceled",
+                "timeout",
+            }:
+                raise WorkflowError("invalid_input")
+            if command_type == "step" and (
                 task.get("run_mode") != "step"
                 or task.get("control_status") != "paused"
-                or task.get("status") in {
-                    "succeeded",
-                    "success",
-                    "failed",
-                    "canceled",
-                    "timeout",
-                }
             ):
                 raise WorkflowError("invalid_input")
             command, created = self._store.create_task_command(
@@ -639,10 +640,17 @@ class WorkflowService:
                     result={"reason": "scheduler_unavailable"},
                 )
             try:
-                result = self._task_scheduler_bridge.step(
-                    task_uuid,
-                    target_node_uuid=target_node_uuid,
-                )
+                if command_type == "step":
+                    result = self._task_scheduler_bridge.step(
+                        task_uuid,
+                        target_node_uuid=target_node_uuid,
+                    )
+                elif command_type == "pause":
+                    result = self._task_scheduler_bridge.pause(task_uuid)
+                elif command_type == "resume":
+                    result = self._task_scheduler_bridge.resume(task_uuid)
+                else:
+                    result = self._task_scheduler_bridge.cancel(task_uuid)
             except TaskSchedulerBridgeError as error:
                 return self._store.complete_task_command(
                     command["uuid"],
@@ -657,6 +665,165 @@ class WorkflowService:
         except WorkflowError:
             raise
         except (StoreNotFound, StoreConflict, ValueError):
+            raise WorkflowError("invalid_input") from None
+
+    def create_debug_workflow_task(
+        self,
+        *,
+        workflow_uuid: str,
+        start_node_uuids: List[str],
+        breakpoint_node_uuids: List[str],
+        input_value: Dict[str, Any],
+        description: Optional[str],
+        meta_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """创建带不可变起始点、断点和首个 Admission Hold 的调试任务。"""
+
+        workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
+        try:
+            normalized_starts = [validate_uuid(value) for value in start_node_uuids]
+            normalized_breakpoints = [
+                validate_uuid(value) for value in breakpoint_node_uuids
+            ]
+            if len(normalized_starts) != 1 or len(set(normalized_starts)) != 1:
+                raise ValueError
+            if len(set(normalized_breakpoints)) != len(normalized_breakpoints):
+                raise ValueError
+            input_value = normalize_json_object(input_value)
+            meta_data = normalize_json_object(meta_data)
+        except (TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
+        description = self._optional_text(description)
+        meta_data = {**meta_data, "debug": True}
+        start_node_uuid = normalized_starts[0]
+
+        def plan_builder(graph: Dict[str, Any]) -> PreparedTaskInput:
+            prepared = self._prepare_task_input(
+                graph,
+                input_value=input_value,
+                run_mode="step",
+                target_node_uuid=None,
+            )
+            return self._scope_debug_task_input(
+                prepared,
+                start_node_uuid=start_node_uuid,
+                breakpoint_node_uuids=normalized_breakpoints,
+            )
+
+        try:
+            task = self._store.create_task_with_jobs(
+                workflow_uuid=workflow_uuid,
+                task_uuid=str(uuid4()),
+                run_mode="step",
+                target_node_uuid=None,
+                description=description,
+                meta_data=meta_data,
+                plan_builder=plan_builder,
+            )
+            self._store.create_debug_configuration(
+                task_uuid=task["uuid"],
+                start_node_uuids=normalized_starts,
+                breakpoint_node_uuids=normalized_breakpoints,
+            )
+            if self._task_scheduler_bridge is None:
+                return task
+            return self._task_scheduler_bridge.submit(task)["task"]
+        except (TaskInputError, StoreConflict, ValueError):
+            raise WorkflowError("invalid_input") from None
+        except TaskSchedulerBridgeError:
+            raise WorkflowError("internal_error") from None
+
+    def get_debug_workflow_task(self, task_uuid: str) -> Dict[str, Any]:
+        """返回标准 Task/Jobs 与调试配置、范围和 Hold 的三源一致投影。"""
+
+        try:
+            task_uuid = validate_uuid(task_uuid)
+            task = self._store.get_task(task_uuid)
+            jobs = self._store.list_jobs(task_uuid)
+            debug = self._store.get_debug_projection(task_uuid)
+        except (StoreNotFound, ValueError):
+            raise WorkflowError("not_found") from None
+        snapshot_nodes = task.get("workflow_snapshot", {}).get("nodes", [])
+        disabled = [
+            str(node.get("uuid"))
+            for node in snapshot_nodes
+            if isinstance(node, Mapping) and node.get("disabled") is True
+        ]
+        enabled = [
+            str(node.get("uuid"))
+            for node in snapshot_nodes
+            if isinstance(node, Mapping)
+            and node.get("disabled") is not True
+            and node.get("uuid")
+        ]
+        active = [
+            str(node.get("uuid"))
+            for node in task.get("execution_plan", {}).get("nodes", [])
+            if isinstance(node, Mapping) and node.get("uuid")
+        ]
+        active_set = set(active)
+        return {
+            "task": task,
+            "jobs": jobs,
+            **debug,
+            "active_node_uuids": active,
+            "out_of_scope_node_uuids": [
+                node_uuid for node_uuid in enabled if node_uuid not in active_set
+            ],
+            "disabled_node_uuids": disabled,
+        }
+
+    def command_debug_workflow_task(
+        self,
+        task_uuid: str,
+        *,
+        command_type: str,
+        scope_type: str,
+        hold_uuid: str,
+        idempotency_key: str,
+    ) -> Dict[str, Any]:
+        """按精确 Hold 范围幂等执行调试单步或继续。"""
+
+        try:
+            task_uuid = validate_uuid(task_uuid)
+            hold_uuid = validate_uuid(hold_uuid)
+            if command_type not in {"step", "continue"} or scope_type != "hold":
+                raise ValueError
+            normalized_key = str(idempotency_key).strip()
+            if not normalized_key:
+                raise ValueError
+            command, created, node_uuid = self._store.begin_debug_command(
+                task_uuid=task_uuid,
+                command_uuid=str(uuid4()),
+                command_type=command_type,
+                hold_uuid=hold_uuid,
+                idempotency_key=normalized_key,
+            )
+            if not created or command["status"] != "pending":
+                return command
+            if self._task_scheduler_bridge is None:
+                return self._store.complete_debug_command(
+                    command["uuid"],
+                    status="rejected",
+                    result={"reason": "scheduler_unavailable"},
+                )
+            try:
+                result = self._task_scheduler_bridge.step(
+                    task_uuid,
+                    target_node_uuid=node_uuid,
+                )
+            except TaskSchedulerBridgeError as error:
+                return self._store.complete_debug_command(
+                    command["uuid"],
+                    status="rejected",
+                    result={"reason": str(error)},
+                )
+            return self._store.complete_debug_command(
+                command["uuid"], status="succeeded", result=result
+            )
+        except WorkflowError:
+            raise
+        except (StoreNotFound, StoreConflict, TypeError, ValueError):
             raise WorkflowError("invalid_input") from None
 
     def create_device_action_run(
@@ -881,6 +1048,138 @@ class WorkflowService:
             execution_plan=plan,
             jobs=jobs,
             resource_resolver=self._material_resolver,
+        )
+
+    @staticmethod
+    def _scope_debug_task_input(
+        prepared: PreparedTaskInput,
+        *,
+        start_node_uuid: str,
+        breakpoint_node_uuids: List[str],
+    ) -> PreparedTaskInput:
+        """把已验证计划裁成从起始点可达的活动子图，快照保持完整。"""
+
+        plan = dict(prepared.execution_plan)
+        nodes = [dict(node) for node in plan.get("nodes", [])]
+        node_ids = {str(node.get("uuid") or "") for node in nodes}
+        if start_node_uuid not in node_ids:
+            raise StoreConflict("debug start node is not enabled and executable")
+        snapshot_nodes = prepared.workflow_snapshot.get("nodes", [])
+        enabled_snapshot_ids = {
+            str(node.get("uuid") or "")
+            for node in snapshot_nodes
+            if isinstance(node, Mapping) and node.get("disabled") is not True
+        }
+        if any(node_uuid not in enabled_snapshot_ids for node_uuid in breakpoint_node_uuids):
+            raise StoreConflict("debug breakpoint node is not enabled")
+        outgoing: Dict[str, List[str]] = {}
+        for edge in plan.get("edges", []):
+            if not isinstance(edge, Mapping):
+                continue
+            source = str(edge.get("source_node_uuid") or "")
+            target = str(edge.get("target_node_uuid") or "")
+            outgoing.setdefault(source, []).append(target)
+        reachable: set[str] = set()
+        pending = [start_node_uuid]
+        while pending:
+            current = pending.pop()
+            if current in reachable:
+                continue
+            reachable.add(current)
+            pending.extend(outgoing.get(current, []))
+        # 调试起点只裁掉此前的物理动作；MaterialSource 是任务级物料准入，
+        # 不是可以跳过的设备动作。资源可能先经过被跳过动作的 ResourceSlot
+        # 透传链，再进入活动子图。此时把来源的冻结绑定目标重接到活动子图的
+        # 第一个消费者，既不补跑起点前的物理动作，也不会丢失稳定物料身份。
+        resource_outgoing: Dict[str, List[Mapping[str, Any]]] = {}
+        for edge in plan.get("edges", []):
+            if not isinstance(edge, Mapping):
+                continue
+            if (
+                edge.get("dependency_only") is True
+                or edge.get("source_type") != "ResourceSlot"
+                or edge.get("target_type") != "ResourceSlot"
+            ):
+                continue
+            resource_outgoing.setdefault(
+                str(edge.get("source_node_uuid") or ""),
+                [],
+            ).append(edge)
+        supporting_material_sources: set[str] = set()
+        for node in nodes:
+            if str(node.get("kind") or "") != "material_source":
+                continue
+            source_uuid = str(node.get("uuid") or "")
+            raw_targets = node.get("material_binding_targets", [])
+            if not isinstance(raw_targets, list):
+                continue
+            rebound_targets: List[Dict[str, str]] = []
+            seen_targets: set[tuple[str, str]] = set()
+
+            def append_target(target_uuid: str, param_key: str) -> None:
+                identity = (target_uuid, param_key)
+                if not target_uuid or not param_key or identity in seen_targets:
+                    return
+                seen_targets.add(identity)
+                rebound_targets.append(
+                    {
+                        "workflow_node_uuid": target_uuid,
+                        "param_key": param_key,
+                    }
+                )
+
+            for target in raw_targets:
+                if not isinstance(target, Mapping):
+                    continue
+                target_uuid = str(target.get("workflow_node_uuid") or "")
+                if target_uuid in reachable:
+                    append_target(target_uuid, str(target.get("param_key") or ""))
+
+            visited_resource_nodes = {source_uuid}
+            pending_resource_nodes = [source_uuid]
+            while pending_resource_nodes:
+                current = pending_resource_nodes.pop()
+                for edge in resource_outgoing.get(current, []):
+                    target_uuid = str(edge.get("target_node_uuid") or "")
+                    if target_uuid in reachable:
+                        append_target(
+                            target_uuid,
+                            str(edge.get("target_data_key") or ""),
+                        )
+                        continue
+                    if target_uuid and target_uuid not in visited_resource_nodes:
+                        visited_resource_nodes.add(target_uuid)
+                        pending_resource_nodes.append(target_uuid)
+            if rebound_targets:
+                supporting_material_sources.add(source_uuid)
+                node["material_binding_targets"] = rebound_targets
+        scoped_node_ids = reachable | supporting_material_sources
+        plan["nodes"] = [
+            node for node in nodes if str(node.get("uuid")) in scoped_node_ids
+        ]
+        plan["edges"] = [
+            edge
+            for edge in plan.get("edges", [])
+            if str(edge.get("source_node_uuid")) in scoped_node_ids
+            and str(edge.get("target_node_uuid")) in scoped_node_ids
+        ]
+        plan["handles"] = [
+            handle
+            for handle in plan.get("handles", [])
+            if str(handle.get("node_uuid")) in scoped_node_ids
+        ]
+        jobs = [
+            job
+            for job in prepared.jobs
+            if str(job.get("workflow_node_uuid")) in scoped_node_ids
+        ]
+        if not jobs:
+            raise StoreConflict("debug task has no reachable jobs")
+        return PreparedTaskInput(
+            workflow_snapshot=prepared.workflow_snapshot,
+            resolved_input=prepared.resolved_input,
+            execution_plan=plan,
+            jobs=jobs,
         )
 
     # 工作流创作（Authoring） ---------------------------------------------
@@ -1261,6 +1560,18 @@ class WorkflowService:
                 applied_graph=applied_graph,
                 draft_python_source=source["python_source"],
             )
+            record = self._store.get_authoring_record(workflow_uuid)
+            applied_source = record.get("applied_source")
+            if (
+                candidate is not None
+                and candidate["changeset"]["kind"] == "source_only"
+                and applied_source is not None
+                and applied_source["workflow_revision"] == workflow["revision"]
+                and applied_source["source_hash"] == source["draft_hash"]
+            ):
+                # 恢复到已应用的精确作者字节且重新编译证明图未变时，没有待
+                # Apply 的新事实；清空旧无效草稿派生状态即可回到 applied。
+                candidate = None
             event_data = {
                 "workflow_uuid": workflow_uuid,
                 "cause": "draft_saved",
@@ -1338,9 +1649,7 @@ class WorkflowService:
             source = self._read_source(registration)
             record = self._store.get_authoring_record(workflow_uuid)
             current_catalog_fingerprint = (
-                self._catalog_fingerprint()
-                if self.compiler is not None
-                else None
+                self._catalog_fingerprint() if self.compiler is not None else None
             )
             catalog_changed = (
                 current_catalog_fingerprint is not None
@@ -2181,6 +2490,16 @@ class WorkflowService:
         ) as error:
             if isinstance(error, WorkflowError) and error.code != "candidate_invalid":
                 raise
+            logger.exception(
+                "工作流候选签发失败 workflow_uuid=%s revision=%s draft_hash=%s "
+                "error=%s",
+                compilation.graph.get("workflow", {}).get("uuid")
+                if isinstance(compilation.graph, dict)
+                else None,
+                workflow_revision,
+                draft_hash,
+                error,
+            )
             self._set_candidate_invalid_diagnostic(compilation)
             return None
         bundle = {

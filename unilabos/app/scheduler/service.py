@@ -178,6 +178,7 @@ class EdgeScheduler:
         # 生命周期监听器仅承载标准 Task/Job 兼容回写，不成为第二个状态权威。
         self._job_pre_dispatch_listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._job_finished_listeners: List[Callable[[str, bool, Any, str], None]] = []
+        self._job_settled_listeners: List[Callable[[str, bool, Any, str], None]] = []
         # 准入重试监听器把尚未注册为旧调度运行的来源受阻任务接到同一个公开
         # 重排触发点；监听器本身仍由工作流任务桥拥有。
         self._admission_retry_listeners: List[Callable[[], None]] = []
@@ -285,6 +286,24 @@ class EdgeScheduler:
             current for current in self._job_finished_listeners if current != listener
         ]
 
+    def add_job_settled_listener(
+        self,
+        listener: Callable[[str, bool, Any, str], None],
+    ) -> None:
+        """注册 DAG 节点结算监听器；仅在完成事实持久化并更新内存 DAG 后调用。"""
+
+        self._job_settled_listeners.append(listener)
+
+    def remove_job_settled_listener(
+        self,
+        listener: Callable[[str, bool, Any, str], None],
+    ) -> None:
+        """幂等移除节点结算监听器。"""
+
+        self._job_settled_listeners = [
+            current for current in self._job_settled_listeners if current != listener
+        ]
+
     def _notify_job_pre_dispatch(self, dispatching: Dict[str, Any]) -> None:
         """同步通知派发意图；参数 ``dispatching`` 是即将越过执行边界的摘要。
 
@@ -310,6 +329,18 @@ class EdgeScheduler:
         """
 
         for listener in tuple(self._job_finished_listeners):
+            listener(job_id, success, ret_value, suc_type)
+
+    def _notify_job_settled(
+        self,
+        job_id: str,
+        success: bool,
+        ret_value: Any,
+        suc_type: str,
+    ) -> None:
+        """在持久完成事实和 DAG 结算都成立后通知后继控制逻辑。"""
+
+        for listener in tuple(self._job_settled_listeners):
             listener(job_id, success, ret_value, suc_type)
 
     # ── 触发点 1：任务进来 ────────────────────────────────────
@@ -442,6 +473,49 @@ class EdgeScheduler:
                 self._step_targets.pop(workflow_id, None)
                 if run.state is WorkflowState.RUNNING:
                     run.state = WorkflowState.PAUSED
+            notifications = self._collect_terminal_notifications()
+            result = {
+                "workflow_id": workflow_id,
+                "state": run.state.value,
+                "dispatched": dispatched,
+            }
+        self._fire_notifications(notifications)
+        return result
+
+    def pause_workflow(self, workflow_id: str) -> Dict[str, Any]:
+        """Pause future dispatch for a normal workflow without stopping in-flight work."""
+
+        with self._lock:
+            run = self._workflows.get(workflow_id)
+            if run is None:
+                raise ValueError(f"workflow {workflow_id} not found")
+            if run.spec.run_mode == "step":
+                raise ValueError(f"workflow {workflow_id} is in step mode")
+            if run.state in self._TERMINAL_STATES:
+                raise ValueError(f"workflow {workflow_id} is terminal")
+            if run.state is not WorkflowState.PAUSED:
+                run.state = WorkflowState.PAUSED
+                self._emit_monitor(
+                    "scheduler",
+                    "workflow_paused",
+                    {"workflow_id": workflow_id, "reason": "command"},
+                )
+                self._safe_history("record_state", workflow_id, "paused")
+            return {"workflow_id": workflow_id, "state": run.state.value}
+
+    def resume_workflow(self, workflow_id: str) -> Dict[str, Any]:
+        """Resume a command-paused normal workflow and run one scheduling round."""
+
+        with self._lock:
+            run = self._workflows.get(workflow_id)
+            if run is None:
+                raise ValueError(f"workflow {workflow_id} not found")
+            if run.spec.run_mode == "step":
+                raise ValueError(f"workflow {workflow_id} is in step mode")
+            if run.state is not WorkflowState.PAUSED:
+                raise ValueError(f"workflow {workflow_id} is not paused")
+            run.state = WorkflowState.RUNNING
+            dispatched = self._reschedule_locked()
             notifications = self._collect_terminal_notifications()
             result = {
                 "workflow_id": workflow_id,
@@ -640,6 +714,10 @@ class EdgeScheduler:
                     job.node_id,
                     job.workflow_id,
                 )
+
+            # 调试器的继续/断点推进必须等当前节点已经写入 WorkflowRun；否则下一
+            # 节点仍被依赖判定为未就绪。完成事实监听与 DAG 结算监听明确分阶段。
+            self._notify_job_settled(job_id, success, ret_value, suc_type)
 
             logger.info(
                 "[EdgeScheduler] job %s (wf=%s node=%s success=%s) finished, reschedule",

@@ -14,6 +14,9 @@ setup(
         'msgcenterpy>=0.1.8,<0.2',
         'pylabrobot==0.2.1',
     ],
+    extras_require={
+        'mcp': ['mcp>=1.10,<2'],
+    },
     zip_safe=True,
     author="The unilabos developers",
     maintainer='Junhan Chang, Xuwznln',
@@ -25,6 +28,7 @@ setup(
         'console_scripts': [
             "unilab = unilabos.app.main:main",
             "unilab-supervisor = unilabos.managed_runtime.supervisor:main",
+            "unilab-mcp = unilabos.agent_tools.workflow:main",
         ],
     },
 )

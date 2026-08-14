@@ -159,6 +159,67 @@ class EdgeControlStore:
         with self._lock:
             self._connection.close()
 
+    def reset_transient_state(self) -> None:
+        """Clear recoverable protocol work while preserving the Edge identity.
+
+        Managed Local exposes this only through the explicit ``local.reset-state``
+        operation, after the Edge process has stopped.  It is intentionally not
+        part of an ordinary Edge restart: command/outcome durability must survive
+        those restarts.
+        """
+
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._clear_transient_state_locked()
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def adopt_authority_edge_uuid(self, edge_uuid: str) -> bool:
+        """Bind recovery state to the Edge identity assigned by the Backend.
+
+        A rebuilt Backend can reuse the same URL and Edge key while assigning a
+        new Edge UUID. Commands, ACK cursors, jobs, and outbox rows from the old
+        authority must not be replayed into that new identity. The first call is
+        migration-safe and only records the identity; later identity changes
+        atomically retire transient protocol state.
+
+        Returns ``True`` when an authority change caused a reset.
+        """
+
+        normalized = str(uuid.UUID(edge_uuid))
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT value FROM edge_control_meta WHERE key = 'authority_edge_uuid'"
+                ).fetchone()
+                previous = str(row["value"]) if row is not None else ""
+                changed = bool(previous and previous != normalized)
+                if changed:
+                    self._clear_transient_state_locked()
+                self._connection.execute(
+                    """
+                    INSERT INTO edge_control_meta(key, value)
+                    VALUES ('authority_edge_uuid', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (normalized,),
+                )
+                self._connection.commit()
+                return changed
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def _clear_transient_state_locked(self) -> None:
+        self._connection.execute("DELETE FROM edge_job_outcome_pending")
+        self._connection.execute("DELETE FROM edge_job_runtime")
+        self._connection.execute("DELETE FROM edge_event_outbox")
+        self._connection.execute("DELETE FROM edge_command")
+
     def get_or_create_instance_uuid(self, configured: str = "") -> str:
         configured = configured.strip()
         if configured:

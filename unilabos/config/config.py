@@ -13,6 +13,10 @@ class BasicConfig:
     working_dir = ""
     # local：启动调试用嵌入式 Scheduler；backend：仅运行生产 Edge 协议。
     control_plane: Literal["local", "backend"] = "local"
+    # combined 保持历史单进程；Workbench 使用 workspace_backend + edge_runtime。
+    process_role: Literal["combined", "workspace_backend", "edge_runtime"] = (
+        "combined"
+    )
     # 当前进程唯一允许发现/读取/写入的工作流源码（Workflow Source）选择目录。
     # 使用不可变 tuple，空值表示没有本地源码授权，禁止隐式扫描工作区。
     workflow_editable_package_roots: tuple[str, ...] = ()

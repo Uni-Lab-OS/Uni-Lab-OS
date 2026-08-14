@@ -10,6 +10,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -67,6 +68,50 @@ def _device_dispatch_state(host_node: Any, device_id: str) -> tuple[str, List[st
         else []
     )
     return block_reason, command_ids
+
+
+def _registration_action_mappings(
+    host_node: Any,
+    device_id: str,
+    resource: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Resolve logical actions even before ROS discovery has mirrored them."""
+
+    mappings_by_device = getattr(host_node, "_action_value_mappings", {})
+    runtime_mappings = (
+        mappings_by_device.get(device_id, {})
+        if isinstance(mappings_by_device, Mapping)
+        else {}
+    )
+    if isinstance(runtime_mappings, Mapping) and runtime_mappings:
+        return runtime_mappings
+
+    devices = getattr(host_node, "devices_instances", {})
+    wrapper = devices.get(device_id) if isinstance(devices, Mapping) else None
+    base_node = getattr(wrapper, "_ros_node", None)
+    instance_mappings = getattr(base_node, "_action_value_mappings", {})
+    if isinstance(instance_mappings, Mapping) and instance_mappings:
+        return instance_mappings
+
+    registry_name = str(
+        resource.get("class") or resource.get("klass") or ""
+    ).strip()
+    if not registry_name:
+        return {}
+    from unilabos.registry.registry import lab_registry
+
+    registry_entry = lab_registry.device_type_registry.get(registry_name, {})
+    class_entry = (
+        registry_entry.get("class", {})
+        if isinstance(registry_entry, Mapping)
+        else {}
+    )
+    registry_mappings = (
+        class_entry.get("action_value_mappings", {})
+        if isinstance(class_entry, Mapping)
+        else {}
+    )
+    return registry_mappings if isinstance(registry_mappings, Mapping) else {}
 
 
 @dataclass(frozen=True)
@@ -284,7 +329,13 @@ class EdgeControlClient(BaseCommunicationClient):
         while not self._stopping.is_set():
             try:
                 registration = await asyncio.to_thread(self._register)
-                self._edge_uuid = str(registration["edge_uuid"])
+                registered_edge_uuid = str(registration["edge_uuid"])
+                if self.store.adopt_authority_edge_uuid(registered_edge_uuid):
+                    logger.warning(
+                        "[EdgeControl] Backend Authority 身份已变化，"
+                        "已清理上一 Authority 的命令、任务与事件恢复状态"
+                    )
+                self._edge_uuid = registered_edge_uuid
                 self._session_uuid = str(registration["session_uuid"])
                 await self._connect_once()
             except asyncio.CancelledError:
@@ -374,12 +425,14 @@ class EdgeControlClient(BaseCommunicationClient):
         install_production_resource_nodes(resource_trees, material_uuids)
 
         devices: List[Dict[str, Any]] = []
-        action_mappings_by_device = getattr(
-            host_node, "_action_value_mappings", {}
-        )
         for candidate in candidates:
+            resource = nodes.get(candidate["local_id"], {})
             actions = project_device_action_capabilities(
-                action_mappings_by_device.get(candidate["local_id"], {})
+                _registration_action_mappings(
+                    host_node,
+                    candidate["local_id"],
+                    resource,
+                )
             )
             _, unknown_command_ids = _device_dispatch_state(host_node, candidate["local_id"])
             devices.append(

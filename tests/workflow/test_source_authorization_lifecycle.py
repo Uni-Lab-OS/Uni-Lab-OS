@@ -19,6 +19,41 @@ WORKFLOW_B_UUID = "22222222-2222-4222-8222-222222222222"
 HASH_TOKEN = f"sha256:{'a' * 64}"
 
 
+class _SourceOnlyCompiler:
+    """为授权生命周期测试提供完整但不改变图的目录编译边界。"""
+
+    compiler_version = "source-authorization-lifecycle-v1"
+    template_catalog_fingerprint = HASH_TOKEN
+
+    def compile(
+        self,
+        *,
+        python_source: str,
+        applied_graph: dict[str, Any],
+        **_identity: Any,
+    ) -> CandidateCompilation:
+        """返回与已应用图相同的可信源码候选。"""
+
+        return CandidateCompilation(
+            diagnostics=[],
+            graph=applied_graph,
+            normalized_python_source=python_source,
+            source_map=[],
+            changeset={
+                "kind": "source_only",
+                "created_node_uuids": [],
+                "updated_node_uuids": [],
+                "deleted_node_uuids": [],
+                "created_edge_uuids": [],
+                "updated_edge_uuids": [],
+                "deleted_edge_uuids": [],
+                "reserved_metadata_changed": False,
+            },
+            compiler_version=self.compiler_version,
+            template_catalog_fingerprint=self.template_catalog_fingerprint,
+        )
+
+
 @pytest.fixture(autouse=True)
 def clean_composition() -> Any:
     """隔离每个用例使用的进程级工作流组合根。
@@ -144,6 +179,7 @@ def test_restart_uses_only_current_roots_and_exact_reauthorization_recovers(
 
     first = composition.compose_workflow_runtime(
         working_dir,
+        compiler=_SourceOnlyCompiler(),
         editable_package_roots=(root_a, root_b),
     )
     assert {row["workflow_uuid"] for row in first.list_registered_sources()} == {
@@ -156,6 +192,7 @@ def test_restart_uses_only_current_roots_and_exact_reauthorization_recovers(
     root_b.rename(hidden_root_b)
     only_a = composition.compose_workflow_runtime(
         working_dir,
+        compiler=_SourceOnlyCompiler(),
         editable_package_roots=(root_a,),
     )
     assert [row["workflow_uuid"] for row in only_a.list_registered_sources()] == [
@@ -168,6 +205,7 @@ def test_restart_uses_only_current_roots_and_exact_reauthorization_recovers(
     hidden_root_b.rename(root_b)
     reauthorized = composition.compose_workflow_runtime(
         working_dir,
+        compiler=_SourceOnlyCompiler(),
         editable_package_roots=(root_b,),
     )
     assert reauthorized.get_authoring(WORKFLOW_B_UUID)["draft"][
@@ -194,6 +232,7 @@ def test_empty_current_roots_do_not_activate_or_read_historical_sources(
     )
     composition.compose_workflow_runtime(
         working_dir,
+        compiler=_SourceOnlyCompiler(),
         editable_package_roots=(root_a,),
     )
     composition.reset_workflow_service_for_test()

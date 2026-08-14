@@ -4,17 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 from unilabos.config.config import BasicConfig
-
-
-class ControlPlaneMode(str, Enum):
-    """工作流和物料权威所在的位置。"""
-
-    LOCAL = "local"
-    BACKEND = "backend"
+from unilabos.app.runtime_topology import (
+    ControlPlaneMode,
+    RuntimeProcessRole,
+    resolve_runtime_process_plan,
+)
 
 
 @dataclass(frozen=True)
@@ -44,38 +41,25 @@ def validate_control_plane_arguments(
 ) -> ControlPlaneMode:
     """验证控制面模式及 bridge 组合，错误配置关闭式失败。"""
 
-    try:
-        mode = ControlPlaneMode(str(arguments.get("control_plane") or "local"))
-    except ValueError as error:
-        raise ValueError("control_plane 必须是 local 或 backend") from error
-    bridges = {str(value) for value in arguments.get("app_bridges") or ()}
-    if mode is ControlPlaneMode.LOCAL:
-        if "edge_control" in bridges:
-            raise ValueError(
-                "edge_control 生产 bridge 必须与 --control_plane backend 一起使用"
-            )
-        return mode
-
-    if arguments.get("is_slave", False):
-        raise ValueError("--control_plane backend 不能与 --is_slave 一起使用")
-    if arguments.get("preserve_runtime_databases", False):
-        raise ValueError(
-            "--control_plane backend 不使用 --preserve_runtime_databases；"
-            "协议恢复状态由 edge_control.db 独立持久化"
-        )
-    if "edge_control" not in bridges:
-        raise ValueError("--control_plane backend 必须启用 edge_control bridge")
-    if "websocket" in bridges:
-        raise ValueError(
-            "--control_plane backend 不能同时启用遗留 websocket bridge"
-        )
-    return mode
+    return resolve_runtime_process_plan(arguments).control_plane
 
 
 def should_mount_embedded_scheduler_routes() -> bool:
     """仅本地调试控制面向 FastAPI 挂载嵌入式微后端路由。"""
 
-    return BasicConfig.control_plane == ControlPlaneMode.LOCAL.value
+    return (
+        BasicConfig.control_plane == ControlPlaneMode.LOCAL.value
+        and BasicConfig.process_role != RuntimeProcessRole.EDGE_RUNTIME.value
+    )
+
+
+def should_mount_workspace_authoring_routes() -> bool:
+    """工作区 Backend 在两种 Authority 下都保留 Authoring Interface。"""
+
+    return BasicConfig.process_role in {
+        RuntimeProcessRole.COMBINED.value,
+        RuntimeProcessRole.WORKSPACE_BACKEND.value,
+    }
 
 
 def start_control_plane_runtime(
@@ -97,9 +81,11 @@ def start_control_plane_runtime(
 
 __all__ = [
     "ControlPlaneMode",
+    "RuntimeProcessRole",
     "ControlPlaneRuntimeContext",
     "ControlPlaneRuntimeHandle",
     "should_mount_embedded_scheduler_routes",
+    "should_mount_workspace_authoring_routes",
     "start_control_plane_runtime",
     "validate_control_plane_arguments",
 ]

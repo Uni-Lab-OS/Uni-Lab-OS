@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from ..package_catalog import (
     PackageCatalog,
     RegistryActivationPlan,
     WorkspaceSource,
 )
-from ..package_catalog.material_shapes import compile_catalog_material_shapes
+from ..package_catalog.material_shapes import (
+    compile_catalog_material_shape_bindings,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +49,29 @@ class PackageCatalogSource:
         return self.source.root
 
 
+@dataclass(frozen=True, slots=True)
+class MaterialShapeGeneration:
+    """保存同一候选代的公共外形清单和模板精确绑定。"""
+
+    # ``public_shapes`` 供 OS 本地只读 `/api/v1/material-shapes` 投影消费。
+    public_shapes: tuple[dict[str, object], ...]
+    # ``shapes_by_template`` 供显式模板同步按 FQID 写入 `model.shape`。
+    shapes_by_template: Mapping[str, dict[str, object]]
+
+    def __post_init__(self) -> None:
+        """冻结模板绑定根映射，避免同步调用方增删候选成员。
+
+        参数：无；读取构造时的 ``shapes_by_template``。返回：无；将根映射替换为
+        按模板 FQID 排序的只读视图。异常：无；外形对象已由编译器验证为严格 JSON。
+        """
+
+        object.__setattr__(
+            self,
+            "shapes_by_template",
+            MappingProxyType(dict(sorted(self.shapes_by_template.items()))),
+        )
+
+
 def _package_namespace(package: PackageCatalogSource) -> str:
     """读取包目录来源配对的规范社区命名空间排序键。
 
@@ -67,17 +94,33 @@ def compile_generation_material_shapes(
     ``TypeError``/``ValueError``，不返回部分投影。
     """
 
-    # ``material_shapes_by_identity`` 让跨包外形聚合保持全有或全无和确定顺序。
+    return compile_material_shape_generation(packages).public_shapes
+
+
+def compile_material_shape_generation(
+    packages: tuple[PackageCatalogSource, ...],
+) -> MaterialShapeGeneration:
+    """一次编译完整候选代的公共 2.5D 外形及模板归属。
+
+    参数：``packages`` 是主包和全部显式锁定外部包的来源/目录配对。返回：公共
+    查询清单与 ``template_fqid -> shape`` 精确绑定组成的同代结果。异常：配对、
+    外形身份、模板身份或跨包内容冲突无效时抛出 ``TypeError``/``ValueError``，
+    不产生部分代。
+    """
+
+    # ``material_shapes_by_identity`` 让跨包外形聚合保持全有或全无和确定顺序；
+    # ``material_shapes_by_template`` 则保留模板同步所需的唯一所有者关系。
     material_shapes_by_identity: dict[tuple[str, str], dict[str, object]] = {}
+    material_shapes_by_template: dict[str, dict[str, object]] = {}
     for package in packages:
         if not isinstance(package, PackageCatalogSource):
             raise TypeError("完整候选代只能包含 PackageCatalogSource")
-        for raw_shape in compile_catalog_material_shapes(
+        for binding in compile_catalog_material_shape_bindings(
             package.source,
             package.catalog,
         ):
             # ``shape`` 是本次聚合独占的前端公共物料外形对象。
-            shape = dict(raw_shape)
+            shape = dict(binding.shape)
             bundle = shape.get("bundle")
             shape_id = shape.get("id")
             if not isinstance(bundle, str) or not isinstance(shape_id, str):
@@ -90,9 +133,24 @@ def compile_generation_material_shapes(
                     f"{shape_identity[0]}/{shape_identity[1]}"
                 )
             material_shapes_by_identity[shape_identity] = shape
-    return tuple(
-        material_shapes_by_identity[identity]
-        for identity in sorted(material_shapes_by_identity)
+            # ``published_shape`` 是待合并到资源模板（ResourceTemplate）的完整
+            # 公共外形字段；设备包原有 format/entry 由模板同步阶段原样保留。
+            published_shape = {
+                "schema_version": "unilab.shape/v1",
+                **shape,
+            }
+            prior_shape = material_shapes_by_template.get(binding.template_fqid)
+            if prior_shape is not None and prior_shape != published_shape:
+                raise ValueError(
+                    "同一资源模板绑定不同物料外形: " + binding.template_fqid
+                )
+            material_shapes_by_template[binding.template_fqid] = published_shape
+    return MaterialShapeGeneration(
+        public_shapes=tuple(
+            material_shapes_by_identity[identity]
+            for identity in sorted(material_shapes_by_identity)
+        ),
+        shapes_by_template=material_shapes_by_template,
     )
 
 
@@ -151,7 +209,9 @@ def selected_package_import_roots(
 
 
 __all__ = [
+    "MaterialShapeGeneration",
     "PackageCatalogSource",
     "compile_generation_material_shapes",
+    "compile_material_shape_generation",
     "selected_package_import_roots",
 ]

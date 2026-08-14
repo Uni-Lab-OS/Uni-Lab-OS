@@ -47,8 +47,10 @@ from unilabos.registry.action_policy import (
 )
 from unilabos.registry.placeholder_type import ResourceSlotRawInput
 from unilabos.ros.nodes.resource_slot_hydration import (
+    PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA,
     hydrate_resource_slot_nodes_sync,
     hydrate_resource_slot_tree_async,
+    plan_resource_slot_parent_context,
     query_production_resource_nodes_sync,
     query_resource_nodes_sync,
     resolve_resource_slot_target,
@@ -148,6 +150,36 @@ def _stable_resource_uuid(value: Any) -> str:
         or getattr(value, "id", None)
         or ""
     )
+
+
+def _production_runtime_uuid(value: Any) -> str:
+    """Read the Edge-private local UUID retained in a Backend projection."""
+
+    if isinstance(value, dict):
+        extra = value.get("extra")
+    else:
+        extra = getattr(value, "unilabos_extra", None)
+    if not isinstance(extra, dict):
+        return ""
+    return str(extra.get(PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA) or "").strip()
+
+
+def _resolve_production_runtime_resource(tracker: Any, value: Any) -> Any:
+    """Resolve a Backend-projected resource to the exact local runtime object."""
+
+    runtime_uuid = _production_runtime_uuid(value)
+    if not runtime_uuid:
+        return None
+    matches = []
+    for root in getattr(tracker, "resources", ()) or ():
+        match = tracker.loop_find_with_uuid(root, runtime_uuid)
+        if match is not None and all(match is not existing for existing in matches):
+            matches.append(match)
+    if len(matches) > 1:
+        raise ValueError(
+            f"生产资源投影的本地 UUID={runtime_uuid} 对应多个运行时实例: {matches}"
+        )
+    return matches[0] if matches else None
 
 
 def _device_root_mapping(tree: Any) -> Optional[Dict[str, Any]]:
@@ -3143,7 +3175,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 for resource_uuid in uuids_list
             ]
 
-        if BasicConfig.control_plane == "backend":
+        # A split Edge Runtime always executes against the Backend-owned material
+        # projection, including Managed Local.  ``control_plane`` describes where
+        # authority lives (local/backend); it no longer implies that the Edge may
+        # query a co-located scheduler through the legacy ROS material service.
+        if (
+            BasicConfig.control_plane == "backend"
+            or BasicConfig.process_role == "edge_runtime"
+        ):
             raw_data = query_production_resource_nodes_sync(uuids_list)
             query_nodes = query_production_resource_nodes_sync
         else:
@@ -3190,8 +3229,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 continue
             res = self.resource_tracker.figure_resource(plr_resource, try_mode=True)
             if len(res) == 0:
-                self.lab_logger().warning(f"资源转换未能索引到实例: {tree.root_node.res_content}，返回新建实例")
-                resolved_resource = plr_resource
+                runtime_resource = _resolve_production_runtime_resource(
+                    self.resource_tracker, plr_resource
+                )
+                if runtime_resource is None:
+                    self.lab_logger().warning(f"资源转换未能索引到实例: {tree.root_node.res_content}，返回新建实例")
+                    resolved_resource = plr_resource
+                else:
+                    resolved_resource = runtime_resource
             elif len(res) == 1:
                 resolved_resource = res[0]
             else:
@@ -3225,6 +3270,12 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         continue
                     if source_match is source_root:
                         found = resolved_root
+                        break
+                    runtime_resource = _resolve_production_runtime_resource(
+                        self.resource_tracker, source_match
+                    )
+                    if runtime_resource is not None:
+                        found = runtime_resource
                         break
                     local_matches = self.resource_tracker.figure_resource(
                         source_match, try_mode=True
@@ -3388,14 +3439,32 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         if unilabos_uuid:
             # ``target_uuid`` 是普通动作实际引用的目标物料稳定身份。
             target_uuid = str(unilabos_uuid)
-            resource_tree = await self.get_resource([target_uuid], with_children=True)
-            resource_tree, parent_context = await hydrate_resource_slot_tree_async(
-                target_uuid,
-                resource_tree,
-                query_tree=lambda parent_uuid: self.get_resource(
-                    [parent_uuid], with_children=True
-                ),
-            )
+            if (
+                BasicConfig.control_plane == "backend"
+                or BasicConfig.process_role == "edge_runtime"
+            ):
+                direct_nodes = query_production_resource_nodes_sync([target_uuid])
+                parent_context = plan_resource_slot_parent_context(
+                    target_uuid,
+                    direct_nodes,
+                )
+                hydrated_nodes = hydrate_resource_slot_nodes_sync(
+                    target_uuid,
+                    direct_nodes,
+                    query_nodes=query_production_resource_nodes_sync,
+                )
+                resource_tree = ResourceTreeSet.from_raw_dict_list(hydrated_nodes)
+            else:
+                resource_tree = await self.get_resource(
+                    [target_uuid], with_children=True
+                )
+                resource_tree, parent_context = await hydrate_resource_slot_tree_async(
+                    target_uuid,
+                    resource_tree,
+                    query_tree=lambda parent_uuid: self.get_resource(
+                        [parent_uuid], with_children=True
+                    ),
+                )
             plr_resources = resource_tree.to_plr_resources()
             if plr_resources:
                 plr_resource = plr_resources[0]

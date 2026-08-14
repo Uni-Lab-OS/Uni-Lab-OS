@@ -352,9 +352,9 @@ def test_complete_generation_exposes_external_shapes_and_read_only_workflows(
     """主包与外部包的资源外形、工作流源码和资产必须来自同一完整候选代。
 
     参数：``tmp_path`` 提供主工作区和含外形及工作流的显式外部包。
-    返回：无；断言外部资源外形进入聚合投影，外部工作流（Workflow）只存在于
-    注册表快照（Registry Snapshot）查询，不进入主包可编辑源码计划，也不产生
-    工作流任务（WorkflowTask）。
+    返回：无；断言外部资源外形进入聚合投影并保留模板 FQID 精确归属，外部
+    工作流（Workflow）只存在于注册表快照（Registry Snapshot）查询，不进入
+    主包可编辑源码计划，也不产生工作流任务（WorkflowTask）。
     异常：若实现只编译主包外形、遗漏外部资产或授权编辑外部源码则测试失败。
     """
 
@@ -394,6 +394,30 @@ def test_complete_generation_exposes_external_shapes_and_read_only_workflows(
     assert [shape["id"] for shape in runtime.material_shapes] == [
         "external-shaped-plate"
     ]
+    # ``material_shapes_by_template`` 保留外部资源模板到同代编译外形的精确归属，
+    # 后续模板同步不得再按 category 或外形 ID 猜测拥有者。
+    assert runtime.material_shapes_by_template == {
+        "community.external_lab.shaped_plate": {
+            "schema_version": "unilab.shape/v1",
+            "id": "external-shaped-plate",
+            "bundle": "external-lab",
+            "displayName": "外部孔板",
+            "categories": ["container"],
+            "categoryTokens": [],
+            "priority": 0,
+            "envelope": [127.0, 85.0, 15.0],
+            "units": "mm",
+            "shadow": "box",
+            "sort": "center",
+            "parts": [
+                {
+                    "type": "box",
+                    "from": [0, 0, 0],
+                    "to": [127, 85, 15],
+                }
+            ],
+        }
+    }
     assert tuple(item.fqid for item in runtime.registry_snapshot.workflows) == (
         "community.external_lab.inspect_external",
     )

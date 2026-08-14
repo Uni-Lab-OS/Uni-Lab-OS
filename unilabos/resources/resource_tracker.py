@@ -928,6 +928,43 @@ class ResourceTreeSet(object):
         """
         return [node for tree in self.trees for node in tree.get_all_nodes()]
 
+    def merge_disjoint_trees_by_id(
+        self,
+        reported: "ResourceTreeSet",
+    ) -> Tuple[int, Tuple[str, ...]]:
+        """合入不与当前权威物理图冲突的完整资源树。
+
+        Workspace Backend 已从工作区加载权威物理图；Edge Runtime 随注册请求
+        重报同一张图时，UUID 可能因重建而不同，但业务 ``id`` 必须保持稳定。
+        因此只要一棵上报树中的任一节点 ID 已存在，就保留本地树并跳过整棵
+        上报树，避免同一设备/物料被复制。完全不相交的树仍可用于兼容远程
+        Slave 动态注册。
+
+        返回新增树数量与发生冲突的稳定 ID（排序、去重）。
+        """
+
+        existing_ids = {
+            str(node.res_content.id).strip()
+            for node in self.all_nodes
+            if str(node.res_content.id).strip()
+        }
+        added = 0
+        conflicts: set[str] = set()
+        for tree in reported.trees:
+            reported_ids = {
+                str(node.res_content.id).strip()
+                for node in tree.get_all_nodes()
+                if str(node.res_content.id).strip()
+            }
+            overlap = existing_ids.intersection(reported_ids)
+            if overlap:
+                conflicts.update(overlap)
+                continue
+            self.trees.append(tree)
+            existing_ids.update(reported_ids)
+            added += 1
+        return added, tuple(sorted(conflicts))
+
     @property
     def all_nodes_uuid(self) -> List[str]:
         """

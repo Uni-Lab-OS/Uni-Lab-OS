@@ -63,6 +63,8 @@ class PreparedWorkspaceProductGeneration:
     candidate: WorkspaceRegistryRuntime
     input_generation: WorkspaceInputGeneration
     monitor: StableWorkspaceFileMonitor
+    prepare_generation: Callable[[WorkspaceInputGeneration], Any] | None = None
+    authoring_worker_pid: int | None = None
 
 
 class _RestartOnlyGenerationPublisher(WorkspaceGenerationPublisher):
@@ -213,6 +215,51 @@ def prepare_stable_workspace_product_generation(
     )
 
 
+def prepare_stable_workspace_product_generation_in_worker(
+    arguments: dict[str, Any],
+    *,
+    timeout_seconds: float = 90.0,
+) -> PreparedWorkspaceProductGeneration | None:
+    """通过可丢弃 Authoring Worker 准备产品首代与后续隔离编译端口。
+
+    参数：``arguments`` 是公共命令行（CLI）参数；``timeout_seconds`` 是单次完整
+    候选编译上限。返回：未启用工作区时为 ``None``，否则返回父进程已验证的纯
+    数据候选、稳定输入代、监视器和后续 Worker 编译端口。异常：Worker 超时、
+    crash、协议损坏或候选编译失败时抛出 ``AuthoringWorkerError``，Local
+    Backend 不执行或导入未验证工作区实现。
+    """
+
+    from .authoring_worker import (
+        prepare_candidate_in_worker,
+        prepare_workspace_generation_in_worker,
+    )
+
+    result = prepare_workspace_generation_in_worker(
+        arguments,
+        timeout_seconds=timeout_seconds,
+    )
+    if result is None:
+        return None
+
+    def prepare_generation(
+        generation: WorkspaceInputGeneration,
+    ) -> WorkspaceRegistryRuntime:
+        """把每个后续稳定文件代交给新的隔离 Worker。"""
+
+        return prepare_candidate_in_worker(
+            generation,
+            timeout_seconds=timeout_seconds,
+        )
+
+    return PreparedWorkspaceProductGeneration(
+        candidate=result.candidate,
+        input_generation=result.input_generation,
+        monitor=result.monitor,
+        prepare_generation=prepare_generation,
+        authoring_worker_pid=result.worker_pid,
+    )
+
+
 def compose_workspace_product_lifecycle(
     initial_candidate: WorkspaceRegistryRuntime,
     *,
@@ -323,6 +370,7 @@ def install_workspace_product_lifecycle(
             registry=registry,
             initial_input=prepared.input_generation,
             monitor=prepared.monitor,
+            prepare_generation=prepared.prepare_generation,
             restart_mode=restart_mode,
             execution_states=execution_states,
             request_restart=request_restart,
@@ -429,4 +477,5 @@ __all__ = [
     "get_workspace_product_lifecycle",
     "install_workspace_product_lifecycle",
     "prepare_stable_workspace_product_generation",
+    "prepare_stable_workspace_product_generation_in_worker",
 ]

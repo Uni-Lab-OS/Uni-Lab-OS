@@ -14,7 +14,11 @@ from .auth_resolver import resolve_effective_auth
 from .config import cmd_config_show
 from .lab import cmd_lab_list
 from .material import cmd_material_list
-from .workflow import cmd_workflow_upload
+from .workflow import (
+    cmd_workflow_upload,
+    dispatch_workflow_domain_command,
+    register_workflow_domain_subcommands,
+)
 
 __all__ = [
     "cmd_login",
@@ -25,4 +29,6 @@ __all__ = [
     "cmd_lab_list",
     "cmd_material_list",
     "cmd_workflow_upload",
+    "dispatch_workflow_domain_command",
+    "register_workflow_domain_subcommands",
 ]

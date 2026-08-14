@@ -89,6 +89,8 @@ if TYPE_CHECKING:
     from .workspace_runtime import (
         PreparedWorkspaceProductGeneration as PreparedWorkspaceProductGeneration,
     )
+    from .workspace_runtime import AuthoringWorkerError as AuthoringWorkerError
+    from .workspace_runtime import AuthoringWorkerResult as AuthoringWorkerResult
     from .workspace_runtime import (
         StableWorkspaceFileMonitor as StableWorkspaceFileMonitor,
     )
@@ -145,6 +147,9 @@ if TYPE_CHECKING:
     )
     from .workspace_runtime import (
         prepare_stable_workspace_product_generation as prepare_stable_workspace_product_generation,
+    )
+    from .workspace_runtime import (
+        prepare_stable_workspace_product_generation_in_worker as prepare_stable_workspace_product_generation_in_worker,
     )
     from .workspace_runtime import (
         prepare_workspace_registry_runtime as prepare_workspace_registry_runtime,
@@ -218,6 +223,8 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         ".workspace_runtime",
         (
+            "AuthoringWorkerError",
+            "AuthoringWorkerResult",
             "PreparedWorkspaceProductGeneration",
             "StableWorkspaceFileMonitor",
             "StableWorkspaceGenerationMonitor",
@@ -238,6 +245,7 @@ _EXPORT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "get_workspace_product_lifecycle",
             "install_workspace_product_lifecycle",
             "prepare_stable_workspace_product_generation",
+            "prepare_stable_workspace_product_generation_in_worker",
             "prepare_workspace_registry_runtime",
             "prepare_workspace_startup",
         ),

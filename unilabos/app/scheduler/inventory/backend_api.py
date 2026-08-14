@@ -40,6 +40,7 @@ class ResourceTemplateUpdateRequest(BackendModel):
     init_param_schema: Optional[Dict[str, Any]] = None
     category: List[Any] = Field(default_factory=list)
     config_info: List[Any] = Field(default_factory=list)
+    available_sites: List[Dict[str, Any]] = Field(default_factory=list)
     cover: Optional[str] = None
     scene: List[Any] = Field(default_factory=list)
     device_params: Dict[str, Any] = Field(default_factory=dict)
@@ -167,15 +168,15 @@ def create_backend_resource_router(
 
     @router.get("/resource-templates")
     def list_resource_templates(
-        limit: int = Query(default=0),
-        cursor_uuid: Optional[UUID] = Query(default=None),
+        page: int = Query(default=0),
+        page_size: int = Query(default=0),
         keyword: str = Query(default=""),
         resource_type: str = Query(default=""),
     ) -> JSONResponse:
         return _call(
             service.list_resource_templates,
-            limit=limit,
-            cursor_uuid=str(cursor_uuid) if cursor_uuid else None,
+            page=page,
+            page_size=page_size,
             keyword=keyword,
             resource_type=resource_type,
         )
@@ -188,12 +189,22 @@ def create_backend_resource_router(
     def update_resource_template(
         template_uuid: UUID, body: ResourceTemplateUpdateRequest
     ) -> JSONResponse:
+        """更新一项本地资源模板（ResourceTemplate）定义。
+
+        参数：``template_uuid`` 是既有模板稳定身份，``body`` 是调用方显式更新
+        内容。返回：公共 Backend 信封中的最新模板详情；模板不存在、字段非法或
+        持久化冲突时返回对应业务错误，未传 ``available_sites`` 时保留既有定义。
+        """
+
         try:
             template_identity = str(template_uuid)
             current = service.get_resource_template(template_identity)
             definition = body.model_dump(by_alias=True, mode="json")
             if "handles" not in body.model_fields_set:
                 definition.pop("handles", None)
+            if "available_sites" not in body.model_fields_set:
+                # 旧调用方更新展示字段时未携带新字段，不得清空既有库位模板定义。
+                definition["available_sites"] = current.get("available_sites") or []
             definition["id"] = current["name"]
             service.sync_resource_templates([definition])
             return _success(service.get_resource_template(template_identity))

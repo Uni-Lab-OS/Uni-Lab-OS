@@ -116,20 +116,17 @@ def _client() -> TestClient:
 
 
 def test_workflow_template_list_and_detail_match_backend_shape() -> None:
-    """列表使用游标摘要，详情在同一响应内嵌句柄模板。"""
+    """列表使用页码摘要，详情在同一响应内嵌句柄模板。"""
 
     client = _client()
     first_page = client.get(
         "/api/v1/workflow-node-templates",
-        params={"limit": 1},
+        params={"page": 1, "page_size": 1},
     )
 
     assert first_page.status_code == 200
-    # ``first_data`` 是同一不可变目录代际的游标页及权威元数据。
+    # ``first_data`` 与 Go Backend 共用同一 has-more 页码外壳。
     first_data = first_page.json()["data"]
-    assert first_data["authority"] == {"authority_id": "local", "kind": "local"}
-    assert first_data["catalog_fingerprint"].startswith("sha256:")
-    catalog_fingerprint = first_data["catalog_fingerprint"]
     assert {
         "code": first_page.json()["code"],
         "data": {
@@ -148,20 +145,14 @@ def test_workflow_template_list_and_detail_match_backend_shape() -> None:
                 }
             ],
             "has_more": True,
-            "next_cursor_uuid": NODE_TEMPLATE_B,
+            "page": 1,
+            "page_size": 1,
         },
-    } == {
-        "code": 0,
-        "data": {
-            key: value
-            for key, value in first_data.items()
-            if key not in {"authority", "catalog_fingerprint"}
-        },
-    }
+    } == {"code": 0, "data": first_data}
 
     second_page = client.get(
         "/api/v1/workflow-node-templates",
-        params={"limit": 1, "cursor_uuid": NODE_TEMPLATE_B, "keyword": "输"},
+        params={"page": 1, "page_size": 1, "keyword": "输"},
     )
     assert [item["uuid"] for item in second_page.json()["data"]["items"]] == [
         NODE_TEMPLATE_A
@@ -170,8 +161,7 @@ def test_workflow_template_list_and_detail_match_backend_shape() -> None:
     detail = client.get(f"/api/v1/workflow-node-templates/{NODE_TEMPLATE_A}")
     assert detail.status_code == 200
     assert detail.json()["code"] == 0
-    assert detail.json()["data"]["authority"] == first_data["authority"]
-    assert detail.json()["data"]["catalog_fingerprint"] == catalog_fingerprint
+    assert set(detail.json()["data"]) == {"template", "handles"}
     assert detail.json()["data"]["template"]["uuid"] == NODE_TEMPLATE_A
     assert detail.json()["data"]["handles"] == [
         {
@@ -195,9 +185,9 @@ def test_workflow_template_query_uses_backend_business_errors() -> None:
 
     client = _client()
     invalid_path = client.get("/api/v1/workflow-node-templates/not-a-uuid")
-    nil_cursor = client.get(
+    invalid_resource_template = client.get(
         "/api/v1/workflow-node-templates",
-        params={"cursor_uuid": "00000000-0000-0000-0000-000000000000"},
+        params={"resource_template_uuid": "not-a-uuid"},
     )
     missing_template = client.get(
         "/api/v1/workflow-node-templates/ffffffff-ffff-4fff-8fff-ffffffffffff"
@@ -205,8 +195,8 @@ def test_workflow_template_query_uses_backend_business_errors() -> None:
 
     assert invalid_path.status_code == 200
     assert invalid_path.json()["code"] == 1000
-    assert nil_cursor.status_code == 200
-    assert nil_cursor.json()["code"] == 1000
+    assert invalid_resource_template.status_code == 200
+    assert invalid_resource_template.json()["code"] == 1000
     assert missing_template.status_code == 200
     assert missing_template.json()["code"] == 5001
     assert missing_template.json()["error"]["msg"]

@@ -57,3 +57,47 @@ def test_resourcetreeset_from_plr(materials_fixture, request) -> list[dict]:
     dumped = tree_set.dump()
     assert len(dumped) == len(output)
     assert {tree[0]["name"] for tree in dumped} == {resource.name for resource in output}
+
+
+def test_merge_disjoint_trees_by_id_keeps_authoritative_runtime_identity() -> None:
+    """Edge 重报相同物理图时不复制节点，只接纳真正的新树。"""
+
+    authoritative = ResourceTreeSet.from_raw_dict_list(
+        [
+            {
+                "id": "device-a",
+                "uuid": "10000000-0000-4000-8000-000000000001",
+                "name": "Authoring Device A",
+                "type": "device",
+                "class": "community.device_a",
+            }
+        ]
+    )
+    reported = ResourceTreeSet.from_raw_dict_list(
+        [
+            {
+                "id": "device-a",
+                "uuid": "20000000-0000-4000-8000-000000000001",
+                "name": "Edge Device A",
+                "type": "device",
+                "class": "community.device_a",
+            },
+            {
+                "id": "device-b",
+                "uuid": "20000000-0000-4000-8000-000000000002",
+                "name": "Edge Device B",
+                "type": "device",
+                "class": "community.device_b",
+            },
+        ]
+    )
+
+    added, conflicts = authoritative.merge_disjoint_trees_by_id(reported)
+
+    assert added == 1
+    assert conflicts == ("device-a",)
+    assert [node.res_content.id for node in authoritative.all_nodes] == [
+        "device-a",
+        "device-b",
+    ]
+    assert authoritative.all_nodes[0].res_content.name == "Authoring Device A"

@@ -27,6 +27,20 @@ from .output import (
     print_error,
     print_warning,
 )
+from .domain import (
+    DOMAIN_CLIENT_SCHEMA,
+    DomainBackendClient,
+    DomainClientError,
+    DomainSource,
+)
+from .material_renderer import (
+    MATERIAL_RENDERER_CLIENT_SCHEMA,
+    MATERIAL_RENDERER_CONTRACT,
+    MaterialRendererClient,
+    MaterialRendererClientError,
+)
+from .material_layout import MaterialLayoutClient
+from .material_template import MaterialTemplateClient
 
 __all__ = [
     "Envelope",
@@ -49,4 +63,14 @@ __all__ = [
     "print_success",
     "print_error",
     "print_warning",
+    "DOMAIN_CLIENT_SCHEMA",
+    "DomainBackendClient",
+    "DomainClientError",
+    "DomainSource",
+    "MATERIAL_RENDERER_CLIENT_SCHEMA",
+    "MATERIAL_RENDERER_CONTRACT",
+    "MaterialRendererClient",
+    "MaterialRendererClientError",
+    "MaterialLayoutClient",
+    "MaterialTemplateClient",
 ]

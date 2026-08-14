@@ -543,12 +543,13 @@ def create_edge_stack(
     orderer: Any = None,
     device_manager: Optional[DeviceActionManager] = None,
     host_node_getter: Optional[Callable[[], Any]] = None,
+    execution_backend: Any = None,
     inventory: Any = None,
     estimator: Any = None,
     monitor: Any = None,
     device_state_store: Any = None,
     history: Any = None,
-) -> "tuple[Any, JobExecutionBackend]":
+) -> "tuple[Any, Any]":
     """组装本地调度器（EdgeScheduler）与作业执行微后端（composition root）。
 
     返回 (scheduler, backend)；backend 已 start，并需由调用方注册进
@@ -566,6 +567,9 @@ def create_edge_stack(
         orderer: 本地任务排序策略。
         device_manager: 复用设备动作互斥与排队的执行管理器。
         host_node_getter: 返回当前 HostNode 的函数。
+        execution_backend: 可选的 durable Edge dispatcher；省略时保留历史
+            进程内 ``JobExecutionBackend``，Workspace Backend 则注入 loopback
+            Edge Authority，避免跨进程时回退到直接 ROS 派发。
         inventory: 本地库存（Inventory）预留、消费和释放服务。
         estimator: 动作预计时长计算器。
         monitor: 实时监控事件输出适配器。
@@ -577,7 +581,7 @@ def create_edge_stack(
     """
     from unilabos.app.scheduler.service import EdgeScheduler
 
-    backend = JobExecutionBackend(
+    backend = execution_backend or JobExecutionBackend(
         device_manager=device_manager,
         host_node_getter=host_node_getter,
         device_state_store=device_state_store,
@@ -594,7 +598,9 @@ def create_edge_stack(
         history=history,
     )
     backend.add_job_finished_listener(scheduler.on_job_finished)
-    backend.start()
+    start = getattr(backend, "start", None)
+    if callable(start):
+        start()
     return scheduler, backend
 
 

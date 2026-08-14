@@ -52,6 +52,8 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from unilabos.resources.site_definition import normalize_available_sites
+
 F = TypeVar("F", bound=Callable[..., Any])
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -265,6 +267,7 @@ def device(
     device_type: str = "python",
     hardware_interface: Optional[HardwareInterface] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    available_sites: Optional[List[Dict[str, Any]]] = None,
 ):
     """
     设备类装饰器
@@ -278,7 +281,7 @@ def device(
     Args:
         id: 单设备时的注册表唯一标识
         ids: 多设备时的 id 列表，与 id_meta 配合使用
-        id_meta: 每个 device_id 的覆盖元数据 (handles/description/icon/model/metadata)
+        id_meta: 每个 device_id 的覆盖元数据，包括可选的 available_sites
         category: 设备分类标签列表 (必填)
         description: 设备描述
         displayname: 人类可读的设备显示名称，缺失时默认使用 id
@@ -290,6 +293,13 @@ def device(
         device_type: 设备实现类型 ("python" / "ros2")
         hardware_interface: 硬件通信接口 (HardwareInterface)
         metadata: 设备扩展元数据，如供应商、规格、容量、孔位数等
+        available_sites: 资源模板（ResourceTemplate）拥有的库位（Site）固定定义
+
+    Returns:
+        保存规范 Registry 元数据的类装饰器。
+
+    Raises:
+        ValueError: 设备身份、分类或库位模板定义非法时抛出。
     """
     # Resolve device ids
     if ids is not None:
@@ -297,6 +307,23 @@ def device(
         if not device_ids:
             raise ValueError("@device ids 不能为空")
         id_meta = id_meta or {}
+        # ``id_meta`` 是多设备模板的逐身份覆盖；此处先冻结库位定义，避免装饰器
+        # 返回后调用方修改原始数组导致同一资源模板代际漂移。
+        id_meta = {
+            device_id: {
+                **meta,
+                **(
+                    {
+                        "available_sites": normalize_available_sites(
+                            meta.get("available_sites")
+                        )
+                    }
+                    if "available_sites" in meta
+                    else {}
+                ),
+            }
+            for device_id, meta in id_meta.items()
+        }
     elif id is not None:
         device_ids = [id]
         id_meta = {}
@@ -321,6 +348,7 @@ def device(
         "icon": icon,
         "version": version,
         "handles": _device_handles_to_list(handles),
+        "available_sites": normalize_available_sites(available_sites),
         "model": model,
         "device_type": device_type,
         "hardware_interface": (hardware_interface.model_dump(exclude_none=True) if hardware_interface else None),
@@ -328,6 +356,12 @@ def device(
     }
 
     def decorator(cls):
+        """把设备类注册为一个或多个资源模板（ResourceTemplate）。
+
+        参数：``cls`` 是被装饰的设备类。返回：原设备类；注册身份重复时抛出
+        ``ValueError``。库位（Site）模板已在外层冻结，本函数只绑定同一代元数据。
+        """
+
         cls._device_registry_meta = base_meta
         cls._device_registry_id_meta = id_meta
         cls._device_registry_ids = device_ids
@@ -555,6 +589,7 @@ def resource(
     model: Optional[Dict[str, Any]] = None,
     class_type: str = "pylabrobot",
     metadata: Optional[Dict[str, Any]] = None,
+    available_sites: Optional[List[Dict[str, Any]]] = None,
 ):
     """
     资源类/函数装饰器
@@ -572,9 +607,22 @@ def resource(
         model: 可选的 3D 模型配置
         class_type: 资源实现类型 ("python" / "pylabrobot" / "unilabos")
         metadata: 物料扩展元数据，如供应商、规格、容量、孔位数等
+        available_sites: 资源模板（ResourceTemplate）拥有的库位（Site）固定定义
+
+    Returns:
+        保存规范 Registry 元数据的类或工厂函数装饰器。
+
+    Raises:
+        ValueError: 资源身份或库位模板定义非法时抛出。
     """
 
     def decorator(obj):
+        """把器材类或工厂函数注册为资源模板（ResourceTemplate）。
+
+        参数：``obj`` 是被装饰的器材类或工厂函数。返回：原对象；注册身份重复时
+        抛出 ``ValueError``。库位（Site）模板在写入 Registry 元数据前完成冻结。
+        """
+
         meta = {
             "resource_id": id,
             "category": category,
@@ -583,6 +631,7 @@ def resource(
             "icon": icon,
             "version": version,
             "handles": _device_handles_to_list(handles),
+            "available_sites": normalize_available_sites(available_sites),
             "model": model,
             "class_type": class_type,
             "metadata": dict(metadata or {}),
@@ -599,11 +648,14 @@ def resource(
 
 
 def get_device_meta(cls, device_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """
-    获取类上的 @device 装饰器元数据。
+    """获取类上的 ``@device`` 装饰器元数据。
 
     当 device_id 存在且类使用 ids+id_meta 时，返回合并后的 meta
     (base_meta 与 id_meta[device_id] 深度合并)。
+
+    参数：``cls`` 是设备类，``device_id`` 是可选的多设备模板身份。返回：不与逐
+    设备覆盖共享库位容器的 Registry 元数据；类未声明 ``@device`` 时返回 ``None``；
+    元数据被外部破坏而导致库位模板非法时抛出 ``ValueError``。
     """
     base = getattr(cls, "_device_registry_meta", None)
     if base is None:
@@ -611,6 +663,9 @@ def get_device_meta(cls, device_id: Optional[str] = None) -> Optional[Dict[str, 
     id_meta = getattr(cls, "_device_registry_id_meta", None) or {}
     if device_id is None or device_id not in id_meta:
         result = dict(base)
+        result["available_sites"] = normalize_available_sites(
+            base.get("available_sites")
+        )
         ids = getattr(cls, "_device_registry_ids", None)
         result["device_id"] = device_id if device_id is not None else (ids[0] if ids else None)
         return result
@@ -618,12 +673,22 @@ def get_device_meta(cls, device_id: Optional[str] = None) -> Optional[Dict[str, 
     overrides = id_meta[device_id]
     result = dict(base)
     result["device_id"] = device_id
-    for key in ["handles", "description", "displayname", "icon", "model", "metadata"]:
+    for key in [
+        "handles",
+        "available_sites",
+        "description",
+        "displayname",
+        "icon",
+        "model",
+        "metadata",
+    ]:
         if key in overrides:
             val = overrides[key]
             if key == "handles" and isinstance(val, list):
                 # handles 必须是 Handle 对象列表
                 result[key] = [h.to_registry_dict() for h in val]
+            elif key == "available_sites":
+                result[key] = normalize_available_sites(val)
             elif key == "metadata" and isinstance(val, dict):
                 result[key] = {**(base.get("metadata") or {}), **val}
             else:

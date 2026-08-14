@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +12,12 @@ import pytest
 
 from tests.package_manager import test_workspace_package_runtime as support
 from tests.package_manager.test_package_dependency_lock import _write_package
+from tests.package_manager.test_workspace_registry_runtime import (
+    _arguments as runtime_arguments,
+)
+from tests.package_manager.test_workspace_registry_runtime import (
+    _write_workspace as write_runtime_workspace,
+)
 from tests.package_manager.test_workspace_refresh_coordinator import (
     RecordingStableMonitor,
 )
@@ -20,10 +28,12 @@ from unilabos.package_manager import (
     compile_package_source,
     compose_workspace_product_lifecycle,
     prepare_stable_workspace_product_generation,
+    prepare_stable_workspace_product_generation_in_worker,
 )
 from unilabos.package_manager.workspace_runtime import (
     discovery as workspace_startup_module,
 )
+from unilabos.package_manager.workspace_runtime import authoring_worker
 
 
 def test_product_lifecycle_reuses_precompiled_initial_candidate(
@@ -211,3 +221,131 @@ def test_product_initial_generation_reads_each_manifest_once(
     assert prepared is not None
     assert project_manifest_reads == 1
     assert workflow_manifest_reads == 1
+
+
+def test_authoring_worker_returns_detached_complete_generation(
+    tmp_path: Path,
+) -> None:
+    """产品首代必须由独立 Worker 编译并以纯数据候选返回父进程。"""
+
+    workspace_root = tmp_path / "workspace"
+    source = write_runtime_workspace(workspace_root)
+    arguments = runtime_arguments(source)
+
+    prepared = prepare_stable_workspace_product_generation_in_worker(arguments)
+
+    assert prepared is not None
+    assert prepared.authoring_worker_pid is not None
+    assert prepared.authoring_worker_pid != os.getpid()
+    assert prepared.prepare_generation is not None
+    assert prepared.candidate.source.root == source.root
+    assert prepared.candidate.catalog.import_package == "runtime_lab"
+    assert prepared.candidate.registry_snapshot.fingerprint.startswith("sha256:")
+    assert arguments["graph"] == str(workspace_root / "graph.json")
+
+
+def test_authoring_worker_failure_preserves_last_valid_generation(
+    tmp_path: Path,
+) -> None:
+    """后续源码损坏只能记录刷新失败，不能覆盖父进程 last-valid 候选。"""
+
+    workspace_root = tmp_path / "workspace"
+    source = write_runtime_workspace(workspace_root)
+    prepared = prepare_stable_workspace_product_generation_in_worker(
+        runtime_arguments(source)
+    )
+    assert prepared is not None
+    assert prepared.prepare_generation is not None
+    registry = SimpleNamespace(device_type_registry={}, resource_type_registry={})
+    monitor = RecordingStableMonitor()
+    lifecycle = compose_workspace_product_lifecycle(
+        prepared.candidate,
+        registry=registry,
+        initial_input=prepared.input_generation,
+        monitor=monitor,
+        prepare_generation=prepared.prepare_generation,
+    )
+    lifecycle.start()
+    active_entry = dict(
+        registry.device_type_registry["community.runtime_lab.selected_device"]
+    )
+    source.root.joinpath("runtime_lab", "selected_device.py").write_text(
+        "def broken(:\n",
+        encoding="utf-8",
+    )
+    changed_input = prepared.monitor.capture()
+
+    result = monitor.emit(changed_input)
+    status = lifecycle.status()
+    lifecycle.close()
+
+    assert result.outcome == "failed"
+    assert status.active_input_identity == prepared.input_generation.identity
+    assert status.observed_input_identity == changed_input.identity
+    assert status.last_error == "python_syntax_error"
+    assert (
+        registry.device_type_registry["community.runtime_lab.selected_device"]
+        == active_entry
+    )
+
+
+def test_authoring_worker_reports_selected_module_import_failure(
+    tmp_path: Path,
+) -> None:
+    """物理图选中模块的坏 import 必须在隔离进程内成为稳定诊断。"""
+
+    workspace_root = tmp_path / "workspace"
+    source = write_runtime_workspace(workspace_root)
+    selected_device = source.root / "runtime_lab" / "selected_device.py"
+    selected_device.write_text(
+        "import dependency_that_does_not_exist_for_unilab_test\n"
+        + selected_device.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(authoring_worker.AuthoringWorkerError) as captured:
+        prepare_stable_workspace_product_generation_in_worker(
+            runtime_arguments(source)
+        )
+
+    assert captured.value.code == "python_import_error"
+
+
+def test_authoring_worker_timeout_has_stable_failure_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker 超时必须在父进程转为稳定错误，不继续发布。"""
+
+    def time_out(*_args: Any, **_kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired("authoring-worker", 0.01)
+
+    monkeypatch.setattr(authoring_worker.subprocess, "run", time_out)
+
+    with pytest.raises(authoring_worker.AuthoringWorkerError) as captured:
+        authoring_worker.prepare_workspace_generation_in_worker(
+            {"workspace": str(tmp_path)},
+            timeout_seconds=0.01,
+        )
+
+    assert captured.value.code == "authoring_worker_timeout"
+
+
+def test_authoring_worker_crash_without_response_has_stable_failure_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker crash 不得被误认为空工作区或可用候选。"""
+
+    monkeypatch.setattr(
+        authoring_worker.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=17),
+    )
+
+    with pytest.raises(authoring_worker.AuthoringWorkerError) as captured:
+        authoring_worker.prepare_workspace_generation_in_worker(
+            {"workspace": str(tmp_path)},
+        )
+
+    assert captured.value.code == "authoring_worker_crashed"

@@ -400,6 +400,27 @@ def test_step_task_stays_paused_until_bridge_step_dispatches_one_job(
         bridge.close()
 
 
+def test_step_uses_scheduler_runtime_when_bridge_route_ledger_is_stale(
+    store: WorkflowStore,
+) -> None:
+    """桥接层临时路由账本丢失时，单步仍以调度器运行事实为准。"""
+
+    task = _seed_task(store, with_material=False, run_mode="step")
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    try:
+        bridge.submit(task)
+        bridge._submitted_tasks.clear()
+
+        result = bridge.step(TASK_UUID)
+
+        assert [item["job_id"] for item in result["dispatched"]] == [JOB_UUID]
+        assert len(dispatcher.dispatched) == 1
+    finally:
+        bridge.close()
+
+
 def test_step_command_api_is_idempotent_and_dispatches_once(
     store: WorkflowStore,
 ) -> None:
@@ -423,6 +444,237 @@ def test_step_command_api_is_idempotent_and_dispatches_once(
         assert store.count_rows("workflow_task_command") == 1
     finally:
         bridge.close()
+
+
+def test_pause_resume_command_api_updates_standard_task_control_status(
+    store: WorkflowStore,
+) -> None:
+    task = _seed_task(store, with_material=False)
+    scheduler = EdgeScheduler(dispatcher=RecordingDispatcher())
+    bridge = _bridge(store, scheduler)
+    service = WorkflowService(store, task_scheduler_bridge=bridge)
+    client = TestClient(create_workflow_app(service))
+    try:
+        bridge.submit(task)
+        paused = client.post(
+            f"/api/v1/workflow-tasks/{TASK_UUID}/commands",
+            json={"type": "pause", "idempotency_key": "pause-once"},
+        )
+        assert paused.status_code == 201, paused.text
+        assert paused.json()["data"]["status"] == "succeeded"
+        assert store.get_task(TASK_UUID)["control_status"] == "paused"
+
+        resumed = client.post(
+            f"/api/v1/workflow-tasks/{TASK_UUID}/commands",
+            json={"type": "resume", "idempotency_key": "resume-once"},
+        )
+        assert resumed.status_code == 201, resumed.text
+        assert resumed.json()["data"]["status"] == "succeeded"
+        assert store.get_task(TASK_UUID)["control_status"] == "active"
+    finally:
+        bridge.close()
+
+
+def test_debug_hold_step_continue_and_stop_use_real_scheduler_projection(
+    store: WorkflowStore,
+) -> None:
+    """调试命令须在真实调度桥上逐 Hold 放行，并由共享 cancel 停止。"""
+
+    task = _seed_two_node_debug_task(store)
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    service = WorkflowService(store, task_scheduler_bridge=bridge)
+    client = TestClient(create_workflow_app(service))
+    try:
+        bridge.submit(task)
+        first_hold = store.get_debug_projection(TASK_UUID)["holds"][0]
+        step = client.post(
+            f"/api/v1/debug/workflow-tasks/{TASK_UUID}/commands",
+            json={
+                "type": "step",
+                "scope": {"type": "hold", "hold_uuid": first_hold["uuid"]},
+                "idempotency_key": "debug-first-step",
+            },
+        )
+        assert step.status_code == 201, step.text
+        assert [item["job_id"] for item in dispatcher.dispatched] == [JOB_UUID]
+
+        scheduler.on_job_finished(JOB_UUID, True, {"ok": True})
+        second_hold = store.get_debug_projection(TASK_UUID)["holds"][-1]
+        assert second_hold["workflow_node_uuid"] == SECOND_NODE_UUID
+        assert second_hold["reason"] == "breakpoint"
+
+        continued = client.post(
+            f"/api/v1/debug/workflow-tasks/{TASK_UUID}/commands",
+            json={
+                "type": "continue",
+                "scope": {"type": "hold", "hold_uuid": second_hold["uuid"]},
+                "idempotency_key": "debug-continue",
+            },
+        )
+        assert continued.status_code == 201, continued.text
+        assert [item["job_id"] for item in dispatcher.dispatched] == [
+            JOB_UUID,
+            SECOND_JOB_UUID,
+        ]
+
+        stopped = client.post(
+            f"/api/v1/workflow-tasks/{TASK_UUID}/commands",
+            json={"type": "cancel", "idempotency_key": "debug-stop"},
+        )
+        assert stopped.status_code == 201, stopped.text
+        assert store.get_task(TASK_UUID)["status"] == "canceled"
+        assert store.get_debug_projection(TASK_UUID)["status"] == "stopped"
+    finally:
+        bridge.close()
+
+
+def test_debug_continue_advances_only_after_current_dag_node_is_settled(
+    store: WorkflowStore,
+) -> None:
+    """继续模式在当前节点完成后自动派发已就绪的后继节点。"""
+
+    task = _seed_two_node_debug_task(store)
+    with store.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE workflow_task_debug_configuration
+            SET breakpoint_node_uuids = '[]'
+            WHERE workflow_task_uuid = ?
+            """,
+            (TASK_UUID,),
+        )
+    dispatcher = RecordingDispatcher()
+    scheduler = EdgeScheduler(dispatcher=dispatcher)
+    bridge = _bridge(store, scheduler)
+    service = WorkflowService(store, task_scheduler_bridge=bridge)
+    client = TestClient(create_workflow_app(service))
+    try:
+        bridge.submit(task)
+        first_hold = store.get_debug_projection(TASK_UUID)["holds"][0]
+        continued = client.post(
+            f"/api/v1/debug/workflow-tasks/{TASK_UUID}/commands",
+            json={
+                "type": "continue",
+                "scope": {"type": "hold", "hold_uuid": first_hold["uuid"]},
+                "idempotency_key": "debug-continue-from-start",
+            },
+        )
+        assert continued.status_code == 201, continued.text
+        assert [item["job_id"] for item in dispatcher.dispatched] == [JOB_UUID]
+
+        scheduler.on_job_finished(JOB_UUID, True, {"ok": True})
+
+        assert [item["job_id"] for item in dispatcher.dispatched] == [
+            JOB_UUID,
+            SECOND_JOB_UUID,
+        ]
+    finally:
+        bridge.close()
+
+
+def _seed_two_node_debug_task(store: WorkflowStore) -> dict[str, Any]:
+    """安装两个真实调度作业与一份持久 Debug Configuration。"""
+
+    store.create_workflow(
+        workflow_uuid=WORKFLOW_UUID,
+        name="debug bridge",
+        tags=[],
+        description=None,
+        meta_data={},
+    )
+    plan = {
+        "version": 1,
+        "run_mode": "step",
+        "nodes": [
+            {
+                "uuid": NODE_UUID,
+                "kind": "device_action",
+                "device_id": "debug-device",
+                "action_name": "first",
+                "action_type": "UniLabJsonCommand",
+                "param": {},
+                "param_schema": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "uuid": SECOND_NODE_UUID,
+                "kind": "device_action",
+                "device_id": "debug-device",
+                "action_name": "second",
+                "action_type": "UniLabJsonCommand",
+                "param": {},
+                "param_schema": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        ],
+        "handles": [],
+        "edges": [
+            {
+                "uuid": "71000000-0000-4000-8000-000000000001",
+                "source_node_uuid": NODE_UUID,
+                "target_node_uuid": SECOND_NODE_UUID,
+                "dependency_only": True,
+            }
+        ],
+    }
+    with store.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO workflow_task(
+                uuid, create_time, update_time, deleted_at, description,
+                meta_data, workflow_uuid, status, workflow_snapshot,
+                execution_plan, run_mode, target_node_uuid, control_status,
+                cleanup_status, trace_context, input, output, error_info
+            ) VALUES (?, ?, ?, NULL, NULL, '{"debug":true}', ?, 'pending',
+                      '{}', ?, 'step', NULL, 'paused', 'none', '{}', '{}',
+                      '{}', '[]')
+            """,
+            (TASK_UUID, _CREATED_AT, _CREATED_AT, WORKFLOW_UUID, json.dumps(plan)),
+        )
+        for index, (job_uuid, node_uuid) in enumerate(
+            ((JOB_UUID, NODE_UUID), (SECOND_JOB_UUID, SECOND_NODE_UUID))
+        ):
+            connection.execute(
+                """
+                INSERT INTO workflow_node_job(
+                    uuid, create_time, update_time, deleted_at, description,
+                    meta_data, workflow_task_uuid, workflow_node_uuid,
+                    feedback_sequence, topological_index, executor_kind,
+                    execution_policy, execution_timeout_seconds, status,
+                    attempt, param, feedback_data, return_info, control_data,
+                    error_info
+                ) VALUES (?, ?, ?, NULL, NULL, '{}', ?, ?, 0, ?,
+                          'device_action', '{}', 0, 'pending', 1, '{}', '{}',
+                          '{}', '{}', '[]')
+                """,
+                (job_uuid, _CREATED_AT, _CREATED_AT, TASK_UUID, node_uuid, index),
+            )
+    store.create_debug_configuration(
+        task_uuid=TASK_UUID,
+        start_node_uuids=[NODE_UUID],
+        breakpoint_node_uuids=[SECOND_NODE_UUID],
+    )
+    return store.get_task(TASK_UUID)
 
 
 def test_restart_recovers_pending_paused_step_task_without_dispatch(
@@ -617,12 +869,14 @@ def test_close_is_idempotent_and_unregisters_scheduler_listeners(
 
     assert len(scheduler._job_pre_dispatch_listeners) == 1
     assert len(scheduler._job_finished_listeners) == 1
+    assert len(scheduler._job_settled_listeners) == 1
 
     bridge.close()
     bridge.close()
 
     assert scheduler._job_pre_dispatch_listeners == []
     assert scheduler._job_finished_listeners == []
+    assert scheduler._job_settled_listeners == []
 
 
 def test_restart_recovers_succeeded_test_mode_passthrough_without_replay(

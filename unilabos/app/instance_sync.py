@@ -347,7 +347,12 @@ def _mapping_list(value: Any) -> list[Mapping[str, Any]]:
 def _attach_external_roots(
     nodes: list[Dict[str, Any]],
 ) -> list[Dict[str, Any]]:
-    """把未随设备图提供的场景根收口到正式 HostNode 实例。"""
+    """把场景根和未随图提供的父节点收口到正式 HostNode。
+
+    Backend 的 Material 合同要求非设备实例必须有父实例。设备图通常把
+    Deck 表达为无父场景根，因此在跨 Authority 初始化时显式把它挂到
+    HostNode；设备根仍保持无父，不虚构物理包含关系。
+    """
 
     node_ids = {node["id"] for node in nodes}
     external_roots = {
@@ -355,7 +360,12 @@ def _attach_external_roots(
         for node in nodes
         if node.get("parent") and node["parent"] not in node_ids
     }
-    if not external_roots:
+    orphan_resources = {
+        node["id"]
+        for node in nodes
+        if node.get("type") != "device" and not node.get("parent")
+    }
+    if not external_roots and not orphan_resources:
         return nodes
     host_id = "host_node"
     if host_id not in node_ids:
@@ -376,7 +386,10 @@ def _attach_external_roots(
         {
             **node,
             "parent": (
-                host_id if node.get("parent") in external_roots else node.get("parent", "")
+                host_id
+                if node["id"] in orphan_resources
+                or node.get("parent") in external_roots
+                else node.get("parent", "")
             ),
         }
         for node in nodes

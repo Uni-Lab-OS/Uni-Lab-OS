@@ -29,7 +29,8 @@ from unilabos.workflow.source_coordinates import (
 )
 
 _NODE_ANCHOR = re.compile(
-    r"^[ \t]*#[ \t]*unilab:node_uuid=([0-9a-fA-F-]{36})[ \t]*$"
+    r"^[ \t]*#[ \t]*unilab:node_uuid=([0-9a-fA-F-]{36})"
+    r"(?:[ \t]+disabled=(true))?[ \t]*$"
 )
 _NODE_METADATA_PREFIX = re.compile(r"^[ \t]*#[ \t]*\[")
 _NODE_METADATA = re.compile(
@@ -147,6 +148,7 @@ class WorkflowProgram:
     parent_by_node: tuple[tuple[str, str], ...]
     order_dependencies: tuple[tuple[str, str], ...]
     source_order: tuple[str, ...]
+    disabled_node_uuids: tuple[str, ...]
     outputs: tuple[tuple[str, ValueBinding], ...]
 
 
@@ -243,6 +245,7 @@ def parse_authoring_source(
         imports=imports,
     )
     anchors = _source_anchors(python_source)
+    disabled_node_uuids = _source_disabled_nodes(python_source)
     # 节点展示元数据以节点 UUID 锚点行号为键，只影响工作流节点（WorkflowNode）
     # 的展示字段，不改变动作结果变量或执行身份。
     node_metadata = _source_node_metadata(
@@ -289,6 +292,7 @@ def parse_authoring_source(
         parent_by_node=tuple(sorted(parent_by_node.items())),
         order_dependencies=tuple(order_dependencies),
         source_order=tuple(authoring_source_order),
+        disabled_node_uuids=tuple(sorted(disabled_node_uuids)),
         outputs=tuple(outputs),
     )
 
@@ -686,6 +690,19 @@ def _source_anchors(python_source: str) -> dict[int, str]:
         identities.add(identity)
         anchors[line_number] = identity
     return anchors
+
+
+def _source_disabled_nodes(python_source: str) -> set[str]:
+    """读取 UUID 锚点上显式声明的静态禁用标记。"""
+
+    disabled: set[str] = set()
+    for line in source_lines(python_source):
+        if "unilab:node_uuid" not in line:
+            continue
+        match = _NODE_ANCHOR.fullmatch(line)
+        if match is not None and match.group(2) == "true":
+            disabled.add(validate_uuid(match.group(1)))
+    return disabled
 
 
 def _source_node_metadata(

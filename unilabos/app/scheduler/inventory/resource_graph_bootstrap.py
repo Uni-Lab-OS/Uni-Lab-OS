@@ -18,12 +18,13 @@ from unilabos.registry.local_template_identity import (
     synchronize_local_template_identities,
 )
 from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
+from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 
 _SITE_TYPES = frozenset({"well", "tipspot", "tip_spot", "tip-spot"})
 _SOURCE_KEY = "resource_graph_bootstrap_source"
 _FINGERPRINT_KEY = "resource_graph_bootstrap_fingerprint"
 _FINGERPRINT_VERSION_KEY = "resource_graph_bootstrap_fingerprint_version"
-_FINGERPRINT_VERSION = "2"
+_FINGERPRINT_VERSION = "3"
 _HOST_EXECUTOR_ID = "host_node"
 
 logger = logging.getLogger(__name__)
@@ -288,7 +289,10 @@ def _compile_projection(
                 "template_uuid": "",
                 "parent_uuid": material_uuid_by_runtime.get(parent_runtime or ""),
                 "class": graph_class,
-                "barcode": str(node.get("barcode") or ""),
+                "type": _required_text(node.get("type"), f"Material {node_id} type"),
+                "barcode": normalize_resource_instance_barcode(
+                    node.get("barcode"), node_id
+                ),
                 "name": _required_text(node.get("name") or node_id, "material.name"),
                 "description": _optional_text(node.get("description")),
                 "meta_data": {
@@ -536,25 +540,38 @@ def _commit_projection(
                 or stored_fingerprint is not None
             ):
                 if stored_source == source_name and stored_fingerprint == fingerprint:
-                    if stored_fingerprint_version is None:
+                    if stored_fingerprint_version != _FINGERPRINT_VERSION:
                         connection.execute(
-                            "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?)",
+                            "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?) "
+                            "ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value",
                             (_FINGERPRINT_VERSION_KEY, _FINGERPRINT_VERSION),
                         )
                     return "unchanged"
                 if (
                     stored_source == source_name
-                    and stored_fingerprint_version is None
-                    and _projection_matches_persisted_rows(connection, projection)
+                    and stored_fingerprint_version in {None, "2"}
+                    and _projection_matches_persisted_rows(
+                        connection,
+                        projection,
+                        ignore_material_type=True,
+                    )
                 ):
-                    # 第 1 版指纹错误包含整个设备动作注册表。仅当当前库存基础行与
-                    # 候选投影逐字段相同时，原子升级为只覆盖库存图的第 2 版指纹。
+                    # 第 1 版错误包含整个动作注册表；第 2 版尚未包含 Material.type。
+                    # 仅当旧合同的全部库存基础字段匹配时，才从同源资源图补写
+                    # 原始节点类型；ResourceTemplate.resource_type 不是该字段，
+                    # 因而绝不能用模板类别猜测。
+                    for material in projection["materials"]:
+                        connection.execute(
+                            "UPDATE material SET type=? WHERE uuid=?",
+                            (material["type"], material["uuid"]),
+                        )
                     connection.execute(
                         "UPDATE lab_meta SET meta_value=? WHERE meta_key=?",
                         (fingerprint, _FINGERPRINT_KEY),
                     )
                     connection.execute(
-                        "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?)",
+                        "INSERT INTO lab_meta(meta_key,meta_value) VALUES (?,?) "
+                        "ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value",
                         (_FINGERPRINT_VERSION_KEY, _FINGERPRINT_VERSION),
                     )
                     return "unchanged"
@@ -566,8 +583,8 @@ def _commit_projection(
                     """
                     INSERT INTO material(
                         uuid,create_time,update_time,deleted_at,description,meta_data,
-                        resource_template_uuid,parent_uuid,class,barcode,name,config,data
-                    ) VALUES (?,?,?,NULL,?,?,?,NULL,?,?,?,?,?)
+                        resource_template_uuid,parent_uuid,class,type,barcode,name,config,data
+                    ) VALUES (?,?,?,NULL,?,?,?,NULL,?,?,?,?,?,?)
                     """,
                     (
                         material["uuid"],
@@ -577,6 +594,7 @@ def _commit_projection(
                         _dump(material["meta_data"]),
                         material["template_uuid"],
                         material["class"],
+                        material["type"],
                         material["barcode"],
                         material["name"],
                         _dump(material["config"]),
@@ -675,6 +693,8 @@ def _commit_projection(
 def _projection_matches_persisted_rows(
     connection: sqlite3.Connection,
     projection: Mapping[str, list[dict[str, Any]]],
+    *,
+    ignore_material_type: bool = False,
 ) -> bool:
     """核对旧指纹库中的库存资源图基础行是否与当前投影完全一致。
 
@@ -683,30 +703,37 @@ def _projection_matches_persisted_rows(
     与持久字段全部一致时为真。异常：SQL 错误交由外层统一包装。
     """
 
-    material_fields = (
+    material_fields = [
         "uuid",
         "description",
         "meta_data",
         "resource_template_uuid",
         "parent_uuid",
         "class",
+        "type",
         "barcode",
         "name",
         "config",
         "data",
-    )
+    ]
+    if ignore_material_type:
+        material_fields.remove("type")
     expected_materials = sorted(
-        (
-            material["uuid"],
-            material["description"],
-            _stable_projection_meta(material["meta_data"]),
-            material["template_uuid"],
-            material["parent_uuid"],
-            material["class"],
-            material["barcode"],
-            material["name"],
-            _dump(material["config"]),
-            _dump(material["data"]),
+        tuple(
+            {
+                "uuid": material["uuid"],
+                "description": material["description"],
+                "meta_data": _stable_projection_meta(material["meta_data"]),
+                "resource_template_uuid": material["template_uuid"],
+                "parent_uuid": material["parent_uuid"],
+                "class": material["class"],
+                "type": material["type"],
+                "barcode": material["barcode"],
+                "name": material["name"],
+                "config": _dump(material["config"]),
+                "data": _dump(material["data"]),
+            }[field]
+            for field in material_fields
         )
         for material in projection["materials"]
     )

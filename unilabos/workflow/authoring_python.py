@@ -437,7 +437,7 @@ def _append_group_source(
     metadata_comment = _node_metadata_comment(node=node, action=action)
     if metadata_comment is not None:
         lines.append(f"{indent}{metadata_comment}")
-    lines.append(f"{indent}# unilab:node_uuid={node_uuid}")
+    lines.append(f"{indent}{_node_anchor(node_uuid, node)}")
     params = node.get("param")
     name = params.get("name") if isinstance(params, Mapping) else None
     if not isinstance(name, str) or not name.strip():
@@ -488,7 +488,7 @@ def _append_action_source(
     metadata_comment = _node_metadata_comment(node=node, action=action)
     if metadata_comment is not None:
         lines.append(f"{indent}{metadata_comment}")
-    lines.append(f"{indent}# unilab:node_uuid={node_uuid}")
+    lines.append(f"{indent}{_node_anchor(node_uuid, node)}")
     if node_uuid in material_sources:
         call = material_sources[node_uuid].call
     elif _is_published_workflow(action):
@@ -537,6 +537,13 @@ class _NoDefault:
 
 
 _NO_DEFAULT = _NoDefault()
+
+
+def _node_anchor(node_uuid: str, node: Mapping[str, Any]) -> str:
+    """把静态禁用事实编码进仍与动作声明相邻的稳定 UUID 锚点。"""
+
+    suffix = " disabled=true" if node.get("disabled") is True else ""
+    return f"# unilab:node_uuid={node_uuid}{suffix}"
 
 
 def _node_index(nodes: list[Any]) -> dict[str, dict[str, Any]]:

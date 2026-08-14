@@ -32,6 +32,7 @@ pages = None
 workflow_routes_mounted = False
 resource_contract_routes_mounted = False
 workspace_authoring_routes_mounted = False
+local_edge_control_routes_mounted = False
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -91,10 +92,14 @@ def setup_server() -> FastAPI:
     并保持工作流接口关闭，不回退到第二套运行时。
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
-    global workspace_authoring_routes_mounted
-    from unilabos.app.control_plane import should_mount_embedded_scheduler_routes
+    global local_edge_control_routes_mounted, workspace_authoring_routes_mounted
+    from unilabos.app.control_plane import (
+        should_mount_embedded_scheduler_routes,
+        should_mount_workspace_authoring_routes,
+    )
 
     embedded_scheduler_enabled = should_mount_embedded_scheduler_routes()
+    workspace_authoring_enabled = should_mount_workspace_authoring_routes()
 
     # 创建页面路由
     if pages is None:
@@ -104,7 +109,7 @@ def setup_server() -> FastAPI:
     setup_api_routes(app)
 
     if (
-        embedded_scheduler_enabled
+        workspace_authoring_enabled
         and not workspace_authoring_routes_mounted
         and BasicConfig.workspace_package_mount_projection is not None
     ):
@@ -237,6 +242,19 @@ def setup_server() -> FastAPI:
                 app.include_router(create_inventory_router(inventory_service))
                 app.include_router(create_legacy_material_router(inventory_service))
                 app.include_router(create_lab_router(inventory_service))
+
+            edge_backend = get_edge_backend()
+            if not local_edge_control_routes_mounted:
+                from unilabos.app.edge_control.local_authority import (
+                    LocalEdgeControlAuthority,
+                    create_local_edge_control_router,
+                )
+
+                if isinstance(edge_backend, LocalEdgeControlAuthority):
+                    app.include_router(
+                        create_local_edge_control_router(edge_backend)
+                    )
+                    local_edge_control_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - 调度器路由失败不影响设备诊断
             error(f"[Web] 挂载本地调试 Scheduler 路由失败: {str(e)}")
 

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.resources.site_definition import normalize_available_sites
 
 
 class BackendContractError(RuntimeError):
@@ -135,6 +136,17 @@ class BackendResourceService:
                     class_definition = resource.get("class") or {}
                     # ``schema`` 是资源模板初始化参数的数据/配置命名空间合同。
                     schema = resource.get("init_param_schema") or {}
+                    try:
+                        # 本地 Backend 也在写边界关闭式校验，避免发布阶段才发现
+                        # Registry 库位（Site）模板定义不可被云端实例化。
+                        available_sites = normalize_available_sites(
+                            resource.get("available_sites")
+                        )
+                    except ValueError as error:
+                        raise BackendContractError(
+                            TEMPLATE_DEFINITION_INVALID,
+                            f"invalid resource template available_sites: {error}",
+                        ) from error
                     # ``data_schema`` 与 ``config_schema`` 分别持久化初始化状态字段合同。
                     data_schema = (schema.get("data") or {}).get("properties") or {}
                     config_schema = (schema.get("config") or {}).get("properties") or {}
@@ -157,6 +169,7 @@ class BackendResourceService:
                         _dump(config_schema),
                         _dump({}),
                         _dump(resource.get("config_info") or []),
+                        _dump(available_sites),
                         _optional(resource.get("cover")),
                         _dump(resource.get("scene") or []),
                         _dump(resource.get("device_params") or {}),
@@ -168,8 +181,9 @@ class BackendResourceService:
                             uuid, create_time, update_time, description, meta_data,
                             name, display_name, resource_type, icon, model, module,
                             language, tags, data_schema, config_schema, pose,
-                            config_info, cover, scene, device_params, ui_overlay
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            config_info, available_sites, cover, scene,
+                            device_params, ui_overlay
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(uuid) DO UPDATE SET
                             update_time=excluded.update_time,
                             deleted_at=NULL,
@@ -185,6 +199,7 @@ class BackendResourceService:
                             data_schema=excluded.data_schema,
                             config_schema=excluded.config_schema,
                             config_info=excluded.config_info,
+                            available_sites=excluded.available_sites,
                             cover=excluded.cover,
                             scene=excluded.scene,
                             device_params=excluded.device_params
@@ -217,30 +232,30 @@ class BackendResourceService:
     def list_resource_templates(
         self,
         *,
-        limit: int,
-        cursor_uuid: Optional[str],
+        page: int,
+        page_size: int,
         keyword: str,
         resource_type: str,
     ) -> Dict[str, Any]:
-        limit = 20 if limit <= 0 else min(limit, 100)
-        where = ["deleted_at IS NULL"]
-        values: List[Any] = []
-        if cursor_uuid:
-            where.append("uuid > ?")
-            values.append(cursor_uuid)
+        page = 1 if page <= 0 else page
+        page_size = 20 if page_size <= 0 else min(page_size, 100)
+        where = ["deleted_at IS NULL", "resource_type <> ?"]
+        values: List[Any] = ["framework"]
         if keyword:
-            where.append("(name LIKE ? OR display_name LIKE ?)")
-            values.extend((f"%{keyword}%", f"%{keyword}%"))
+            where.append("(LOWER(name) LIKE ? OR LOWER(display_name) LIKE ?)")
+            keyword_pattern = f"%{keyword.strip().lower()}%"
+            values.extend((keyword_pattern, keyword_pattern))
         if resource_type:
             where.append("resource_type = ?")
-            values.append(resource_type)
+            values.append(resource_type.strip())
+        offset = (page - 1) * page_size
         rows = self.store.query_all(
-            "SELECT uuid,name,display_name,resource_type,tags,meta_data "
+            "SELECT uuid,name,display_name,resource_type,icon,tags "
             f"FROM resource_template WHERE {' AND '.join(where)} "
-            "ORDER BY uuid LIMIT ?",
-            (*values, limit + 1),
+            "ORDER BY create_time DESC,uuid DESC LIMIT ? OFFSET ?",
+            (*values, page_size + 1, offset),
         )
-        page = rows[:limit]
+        page_rows = rows[:page_size]
         return {
             "items": [
                 {
@@ -249,14 +264,13 @@ class BackendResourceService:
                     "display_name": row["display_name"],
                     "resource_type": row["resource_type"],
                     "tags": _json(row["tags"], []),
-                    "source_uri": _json(row["meta_data"], {})
-                    .get("unilab", {})
-                    .get("source_uri"),
+                    **({"icon": row["icon"]} if row["icon"] is not None else {}),
                 }
-                for row in page
+                for row in page_rows
             ],
-            "has_more": len(rows) > limit,
-            "next_cursor_uuid": page[-1]["uuid"] if len(rows) > limit else None,
+            "has_more": len(rows) > page_size,
+            "page": page,
+            "page_size": page_size,
         }
 
     def get_resource_template(self, template_uuid: str) -> Dict[str, Any]:
@@ -546,12 +560,17 @@ class BackendResourceService:
 
     def material_graph(self) -> Dict[str, Any]:
         materials = self.store.query_all(
-            "SELECT * FROM material WHERE deleted_at IS NULL ORDER BY create_time,uuid"
+            "SELECT material.*,material_inventory.aggregate_version,"
+            "resource_template.resource_type AS template_resource_type "
+            "FROM material "
+            "JOIN material_inventory ON material_inventory.material_uuid=material.uuid "
+            "JOIN resource_template ON resource_template.uuid=material.resource_template_uuid "
+            "WHERE material.deleted_at IS NULL ORDER BY material.create_time,material.uuid"
         )
         return {
             "nodes": [
                 {
-                    "material": self._material_row(material),
+                    "material": self._material_graph_row(material),
                     "relative_position": self._relative_position_for_material(
                         material["uuid"]
                     ),
@@ -566,6 +585,9 @@ class BackendResourceService:
                             (material["resource_template_uuid"],),
                         )
                     ],
+                    "resource_template": self._resource_template_summary(
+                        material["resource_template_uuid"]
+                    ),
                 }
                 for material in materials
             ]
@@ -945,6 +967,13 @@ class BackendResourceService:
 
     @classmethod
     def _resource_template_row(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        """把持久行投影为后端形态资源模板（ResourceTemplate）DTO。
+
+        参数：``cls`` 是投影方法所属服务类，``row`` 是 SQLite 查询得到的资源模板
+        行。返回：JSON 字段已解码且 ``available_sites`` 缺省为空数组的独立字典；
+        本方法不创建实例库位（Site）。
+        """
+
         result = cls._base_row(row)
         for field in (
             "name",
@@ -966,6 +995,7 @@ class BackendResourceService:
             ("config_schema", {}),
             ("pose", {}),
             ("config_info", []),
+            ("available_sites", []),
             ("scene", []),
             ("device_params", {}),
             ("ui_overlay", {}),
@@ -1004,6 +1034,33 @@ class BackendResourceService:
                 "data": _json(row.get("data"), {}),
             }
         )
+        return result
+
+    @classmethod
+    def _material_graph_row(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Project the authoritative Backend-shaped Material used by graph reads."""
+
+        result = cls._material_row(row)
+        result["type"] = str(row.get("type") or row.get("template_resource_type") or "")
+        result["revision"] = int(row["aggregate_version"])
+        return result
+
+    def _resource_template_summary(self, template_uuid: str) -> Dict[str, Any]:
+        row = self.store.query_one(
+            "SELECT uuid,name,display_name,resource_type,icon FROM resource_template "
+            "WHERE uuid=? AND deleted_at IS NULL",
+            (template_uuid,),
+        )
+        if row is None:
+            raise BackendContractError(RESOURCE_TEMPLATE_NOT_FOUND, "Resource template not found")
+        result = {
+            "uuid": row["uuid"],
+            "name": row["name"],
+            "display_name": row["display_name"],
+            "resource_type": row["resource_type"],
+        }
+        if row.get("icon") is not None:
+            result["icon"] = row["icon"]
         return result
 
     @classmethod

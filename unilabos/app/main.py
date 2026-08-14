@@ -185,7 +185,42 @@ def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
     异常：无。
     """
 
-    return args_dict.get("command") not in {"package", "pkg"}
+    return args_dict.get("command") not in {"package", "pkg", "workspace"}
+
+
+def dispatch_workspace_host_command(args_dict: dict[str, Any]) -> bool:
+    """Dispatch the AI-native Workspace Host CLI before product composition.
+
+    The command is a client adapter only: it never imports a laboratory package,
+    creates a scheduler, or owns a component process. The persistent Workspace
+    Host is the single lifecycle authority shared with Workbench.
+    """
+
+    if args_dict.get("command") != "workspace":
+        return False
+    from unilabos.workspace_host.cli import dispatch_workspace_command
+
+    return dispatch_workspace_command(args_dict)
+
+
+def dispatch_workflow_domain_command(args_dict: dict[str, Any]) -> bool:
+    """Dispatch Agent-safe Workflow Domain commands before OS composition."""
+
+    if args_dict.get("command") != "workflow":
+        return False
+    from unilabos.app.cli.workflow import dispatch_workflow_domain_command as dispatch
+
+    return dispatch(args_dict)
+
+
+def dispatch_material_renderer_command(args_dict: dict[str, Any]) -> bool:
+    """Dispatch attached Material renderer commands before OS composition."""
+
+    if args_dict.get("command") != "material":
+        return False
+    from unilabos.app.cli.material import dispatch_material_scene_command
+
+    return dispatch_material_scene_command(args_dict)
 
 
 def dispatch_local_package_command(args_dict: dict[str, Any]) -> bool:
@@ -274,6 +309,15 @@ def parse_args():
         help=(
             "控制面权威：local 启动调试用嵌入式 Scheduler；backend 仅连接正式 "
             "Backend/Scheduler，不创建本地调度数据库。"
+        ),
+    )
+    parser.add_argument(
+        "--process_role",
+        choices=["combined", "workspace_backend", "edge_runtime"],
+        default="combined",
+        help=(
+            "进程职责：combined 保持历史单进程；workspace_backend 常驻提供 "
+            "Authoring/Local Domain API；edge_runtime 只承载设备运行时。"
         ),
     )
     parser.add_argument(
@@ -555,6 +599,11 @@ def parse_args():
 
     register_package_subcommands(subparsers)
 
+    # AIW-02: the CLI and Workbench share one per-workspace lifecycle authority.
+    from unilabos.workspace_host.cli import register_workspace_subcommands
+
+    register_workspace_subcommands(subparsers)
+
     # HTTP 客户端子命令（与现有 --ak/--sk/--addr 复用）。输出格式只属于真正
     # 产生客户端输出的叶子命令，不再污染常驻 OS 根启动合同。
     def _add_json_output_argument(command_parser: argparse.ArgumentParser) -> None:
@@ -616,6 +665,10 @@ def parse_args():
     )
     _add_json_output_argument(material_list_parser)
 
+    from unilabos.app.cli.material import register_material_scene_subcommands
+
+    register_material_scene_subcommands(material_grp_subparsers)
+
     # workflow 命令组
     workflow_grp_parser = subparsers.add_parser("workflow", help="Workflow management")
     workflow_grp_subparsers = workflow_grp_parser.add_subparsers(
@@ -641,6 +694,10 @@ def parse_args():
     )
     _add_json_output_argument(wf_upload_parser)
 
+    from unilabos.app.cli.workflow import register_workflow_domain_subcommands
+
+    register_workflow_domain_subcommands(workflow_grp_subparsers)
+
     return parser
 
 
@@ -661,12 +718,22 @@ def main():
     args = parser.parse_args()
     args_dict = vars(args)
 
-    from unilabos.app.control_plane import validate_control_plane_arguments
+    # Workspace Host commands are deliberately dispatched before runtime topology
+    # validation and before any device/package product composition.
+    if dispatch_workspace_host_command(args_dict):
+        return
+    if dispatch_workflow_domain_command(args_dict):
+        return
+    if dispatch_material_renderer_command(args_dict):
+        return
+
+    from unilabos.app.runtime_topology import resolve_runtime_process_plan
 
     try:
-        control_plane_mode = validate_control_plane_arguments(args_dict)
+        runtime_process_plan = resolve_runtime_process_plan(args_dict)
     except ValueError as error:
         parser.error(str(error))
+    control_plane_mode = runtime_process_plan.control_plane
 
     # doctor 子命令：组网诊断，不加载完整环境（net 甚至不 import rclpy），提前处理并退出
     if args_dict.get("command") == "doctor":
@@ -782,15 +849,16 @@ def main():
     # 同时持有包目录（PackageCatalog）、注册表快照（Registry
     # Snapshot）、有限激活与工作流源码（Workflow Source）计划。
     from unilabos.package_manager import (
+        AuthoringWorkerError,
         PackageCompileError,
         PackageDependencyError,
         WorkspaceGenerationChangedError,
-        prepare_stable_workspace_product_generation,
+        prepare_stable_workspace_product_generation_in_worker,
     )
 
     try:
         prepared_workspace_generation = (
-            prepare_stable_workspace_product_generation(args_dict)
+            prepare_stable_workspace_product_generation_in_worker(args_dict)
             if should_prepare_workspace_product_runtime(args_dict)
             else None
         )
@@ -802,6 +870,7 @@ def main():
     except (
         PackageCompileError,
         PackageDependencyError,
+        AuthoringWorkerError,
         TypeError,
         ValueError,
         WorkspaceGenerationChangedError,
@@ -810,7 +879,9 @@ def main():
     if workspace_registry_runtime is not None:
         print_status(
             "已编译工作区（Workspace）注册表运行时: "
-            f"{workspace_registry_runtime.catalog.import_package}",
+            f"{workspace_registry_runtime.catalog.import_package} "
+            f"(Authoring Worker PID "
+            f"{prepared_workspace_generation.authoring_worker_pid})",
             "info",
         )
 
@@ -985,6 +1056,7 @@ def main():
             report = run_template_sync_command(
                 args_dict,
                 backend_address=HTTPConfig.remote_addr,
+                workspace_runtime=workspace_registry_runtime,
             )
         except TemplateSyncError as exc:
             print_status(f"模板同步失败: {exc}", "error")
@@ -1024,6 +1096,7 @@ def main():
 
     BasicConfig.port = args_dict["port"] if args_dict["port"] else BasicConfig.port
     BasicConfig.control_plane = control_plane_mode.value
+    BasicConfig.process_role = runtime_process_plan.role.value
     BasicConfig.is_host_mode = not args_dict.get("is_slave", False)
     if BasicConfig.is_host_mode:
         if control_plane_mode.value == "local":
@@ -1369,7 +1442,42 @@ def main():
 
     if should_attach_legacy_http_bridge(args_dict):
         args_dict["bridges"].append(http_client)
-    if BasicConfig.is_host_mode:
+    if runtime_process_plan.role.value == "edge_runtime":
+        from unilabos.app.control_plane import ControlPlaneRuntimeContext
+        from unilabos.app.edge_control.runtime import start_backend_control_runtime
+
+        edge_control_runtime = start_backend_control_runtime(
+            ControlPlaneRuntimeContext(
+                arguments=args_dict,
+                working_dir=working_dir,
+                resource_tree_set=resource_tree_set,
+                registry=lab_registry,
+                graph_source_id=str(file_path or "remote-startup.json"),
+                material_shapes=workspace_material_shapes,
+                material_model_catalog=workspace_material_models,
+            )
+        )
+        args_dict["bridges"].extend(edge_control_runtime.bridges)
+        install_host_shutdown_handlers(
+            edge_control_runtime.communication_clients,
+            runtime_shutdown=edge_control_runtime.shutdown_services,
+        )
+        print_status(
+            "Edge Runtime 使用生产形态 HTTP/WebSocket 协议连接控制面",
+            "info",
+        )
+    elif (
+        runtime_process_plan.role.value == "workspace_backend"
+        and runtime_process_plan.control_plane.value == "backend"
+    ):
+        # Local Backend remains the stable Workspace Authoring service while
+        # Canvas/Runtime facts live in the Go Backend.  It must not create a
+        # second Scheduler/Inventory authority or connect as a device Edge.
+        print_status(
+            "Workspace Backend 使用 Backend Authority；仅保留 Authoring Projection",
+            "info",
+        )
+    elif BasicConfig.is_host_mode:
         from unilabos.app.control_plane import (
             ControlPlaneRuntimeContext,
             start_control_plane_runtime,
@@ -1399,6 +1507,32 @@ def main():
 
     args_dict["resources_mesh_config"] = {}
     args_dict["resources_edge_config"] = resource_edge_info
+    if not runtime_process_plan.starts_web_server:
+        print_status(
+            "Edge Runtime 已与 Workspace Backend 分离；当前进程不启动 HTTP/Authoring 服务",
+            "info",
+        )
+        edge_backend_thread = start_backend(**args_dict)
+        edge_backend_thread.join()
+        raise RuntimeError(
+            "Edge Runtime backend thread terminated unexpectedly"
+        )
+
+    if runtime_process_plan.role.value == "workspace_backend":
+        print_status(
+            "Workspace Backend 常驻提供 Authoring/Inventory/Scheduler；不启动 ROS 或设备驱动",
+            "info",
+        )
+        restart_requested = start_server(
+            open_browser=not BasicConfig.disable_browser,
+            port=BasicConfig.port,
+        )
+        if restart_requested:
+            print_status("[Main] Restart requested, cleaning up...", "info")
+            cleanup_for_restart()
+            os._exit(RESTART_EXIT_CODE)
+        return
+
     # web visiualize 2D
     if args_dict["visual"] != "disable":
         enable_rviz = args_dict["visual"] == "rviz"

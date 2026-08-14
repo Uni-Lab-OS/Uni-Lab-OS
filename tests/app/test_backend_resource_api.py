@@ -181,6 +181,69 @@ def test_material_routes_use_backend_envelope_and_soft_delete(tmp_path):
     store.close()
 
 
+def test_material_graph_matches_backend_type_revision_and_template_summary(tmp_path):
+    """Local 物料图必须与 Go Backend 使用同一权威节点读模型。"""
+
+    client, store = _client(tmp_path)
+    template_uuid = _sync_template(client)
+    created = client.post(
+        "/api/v1/materials",
+        json={
+            "resource_template_uuid": template_uuid,
+            "barcode": "GRAPH-CONTRACT-001",
+            "name": "Graph contract material",
+        },
+    ).json()["data"]
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE material SET type=? WHERE uuid=?",
+            ("device", created["uuid"]),
+        )
+        connection.execute(
+            "UPDATE material_inventory SET aggregate_version=? WHERE material_uuid=?",
+            (7, created["uuid"]),
+        )
+
+    node = client.get("/api/v1/materials/graph").json()["data"]["nodes"][0]
+
+    assert node["material"]["type"] == "device"
+    assert node["material"]["revision"] == 7
+    assert node["resource_template"] == {
+        "uuid": template_uuid,
+        "name": "device.pump",
+        "display_name": "Pump",
+        "resource_type": "device",
+    }
+    store.close()
+
+
+def test_resource_template_list_uses_backend_page_more_contract(tmp_path) -> None:
+    """Local 资源模板目录必须使用 Go Backend 的页码摘要合同。"""
+
+    client, store = _client(tmp_path)
+    template_uuid = _sync_template(client)
+
+    data = client.get(
+        "/api/v1/resource-templates",
+        params={"page": 1, "page_size": 1, "keyword": "pump"},
+    ).json()["data"]
+
+    assert set(data) == {"items", "has_more", "page", "page_size"}
+    assert data["has_more"] is False
+    assert data["page"] == 1
+    assert data["page_size"] == 1
+    assert data["items"] == [
+        {
+            "uuid": template_uuid,
+            "name": "device.pump",
+            "display_name": "Pump",
+            "resource_type": "device",
+            "tags": [],
+        }
+    ]
+    store.close()
+
+
 def test_created_material_is_immediately_reservable_by_stable_uuid(tmp_path):
     """HTTP 创建的固定物料应立即进入同一库存权威的预留路径。
 
