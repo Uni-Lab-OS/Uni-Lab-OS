@@ -14,6 +14,7 @@ from unilabos.registry.action_template_projection import (
     ActionTemplateProjectionError,
     compile_backend_action_handles,
 )
+from unilabos.resources.site_definition import normalize_available_sites
 from unilabos.utils.tools import normalize_json
 
 _CONTROL_ACTION_PARAMETERS = frozenset({"unilabos_device_id"})
@@ -117,13 +118,21 @@ def _template_definition(
     """把一个 Registry 资源定义映射为 Backend 模板 DTO。
 
     参数说明：``raw_definition`` 是原始定义，``expected_type`` 固定资源种类；返回
-    去除本地路径和运行态字段的规范 JSON 对象。
+    去除本地路径和运行态字段的规范 JSON 对象；业务身份或库位（Site）模板非法时
+    抛出 ``RegistryTemplateSnapshotError``。
     """
 
     source = normalize_json(dict(raw_definition))
     name = str(source.get("id") or "").strip()
     if not name:
         raise RegistryTemplateSnapshotError(f"{expected_type} 模板业务名不能为空")
+    try:
+        # ``available_sites`` 只承载模板静态定义；实例 UUID 与占用事实不进入快照。
+        available_sites = normalize_available_sites(source.get("available_sites"))
+    except ValueError as error:
+        raise RegistryTemplateSnapshotError(
+            f"{expected_type} 模板 {name} 的 available_sites 无效: {error}"
+        ) from error
     resource_class = source.get("class")
     if not isinstance(resource_class, Mapping):
         resource_class = {}
@@ -151,6 +160,7 @@ def _template_definition(
         ],
         "category": _array(source.get("category")),
         "config_info": _array(source.get("config_info")),
+        "available_sites": available_sites,
         "scene": _array(source.get("scene")),
         "device_params": _object(source.get("device_params")),
     }

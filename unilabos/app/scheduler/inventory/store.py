@@ -13,7 +13,7 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class InvalidCursorAdvance(ValueError):
@@ -886,6 +886,14 @@ COMMIT;
 # material_inventory.aggregate_version 为唯一权威，不复制第二份版本列。
 _SCHEMA_V6_MATERIAL_TYPE = "ALTER TABLE material ADD COLUMN type TEXT NOT NULL DEFAULT ''"
 
+# v7：资源模板（ResourceTemplate）直接保存 Edge Registry 上报的库位（Site）
+# 固定定义；运行时库位实例与库位占用仍由 site 表承载，不写入本列。
+_SCHEMA_V7_RESOURCE_TEMPLATE_AVAILABLE_SITES = (
+    "ALTER TABLE resource_template ADD COLUMN available_sites TEXT NOT NULL "
+    "DEFAULT '[]' CHECK (json_valid(available_sites) "
+    "AND json_type(available_sites) = 'array')"
+)
+
 # v2：实验室操作系统布局层（元信息 / 分区 / 2D 摆放）。
 # 只增表不改旧表，v1 库可原地升级。
 _SCHEMA_V2 = """
@@ -938,6 +946,12 @@ class InventoryStore:
         self._migrate()
 
     def _migrate(self) -> None:
+        """把库存（Inventory）数据库串行迁移到当前结构版本。
+
+        参数：无。返回：无；迁移在当前连接上幂等补列并提交，SQLite 结构或数据
+        约束失败时原样抛出异常，调用方不得在部分结构上继续启动。
+        """
+
         with self._lock:
             current = self._conn.execute("PRAGMA user_version").fetchone()[0]
             compatibility_object = self._conn.execute(
@@ -1007,6 +1021,17 @@ class InventoryStore:
                 }
                 if "type" not in material_columns:
                     self._conn.execute(_SCHEMA_V6_MATERIAL_TYPE)
+            if current < 7:
+                template_columns = {
+                    row[1]
+                    for row in self._conn.execute(
+                        "PRAGMA table_info(resource_template)"
+                    ).fetchall()
+                }
+                if "available_sites" not in template_columns:
+                    self._conn.execute(
+                        _SCHEMA_V7_RESOURCE_TEMPLATE_AVAILABLE_SITES
+                    )
             if current >= 5:
                 # A development build may have added the v6 column before the
                 # deterministic backfill was introduced; keep this idempotent.

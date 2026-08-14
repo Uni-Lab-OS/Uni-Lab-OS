@@ -122,11 +122,48 @@ class HeatingStation:
     heating_progress: float = 0.0
 
 
+# ``VIRTUAL_WORKBENCH_AVAILABLE_SITES`` 是随资源模板上报的固定库位定义；
+# 工作流运行中的占用状态仍由库存（Inventory）库位实例维护。
+VIRTUAL_WORKBENCH_AVAILABLE_SITES = [
+    {
+        "index": 1,
+        "label": "heating_station_1",
+        "position": {"x": 100.0, "y": 100.0, "z": 0.0},
+        "size": {"width": 100.0, "height": 100.0, "depth": 20.0},
+        "content_type": ["workbench_material"],
+        "parent_link": "heating_station_1",
+        "description": "虚拟工作台加热位 1",
+        "meta_data": {"station_id": 1, "role": "heating"},
+    },
+    {
+        "index": 2,
+        "label": "heating_station_2",
+        "position": {"x": 250.0, "y": 100.0, "z": 0.0},
+        "size": {"width": 100.0, "height": 100.0, "depth": 20.0},
+        "content_type": ["workbench_material"],
+        "parent_link": "heating_station_2",
+        "description": "虚拟工作台加热位 2",
+        "meta_data": {"station_id": 2, "role": "heating"},
+    },
+    {
+        "index": 3,
+        "label": "heating_station_3",
+        "position": {"x": 400.0, "y": 100.0, "z": 0.0},
+        "size": {"width": 100.0, "height": 100.0, "depth": 20.0},
+        "content_type": ["workbench_material"],
+        "parent_link": "heating_station_3",
+        "description": "虚拟工作台加热位 3",
+        "meta_data": {"station_id": 3, "role": "heating"},
+    },
+]
+
+
 @device(
     id="virtual_workbench",
     displayname="虚拟工作台",
     category=["virtual_device"],
     description="Virtual Workbench with 1 robotic arm and 3 heating stations for concurrent material processing",
+    available_sites=VIRTUAL_WORKBENCH_AVAILABLE_SITES,
 )
 class VirtualWorkbench:
     """

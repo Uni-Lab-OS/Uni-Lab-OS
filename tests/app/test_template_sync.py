@@ -117,6 +117,15 @@ class FakeRegistry:
                 },
                 "handles": [],
                 "category": ["pump"],
+                "available_sites": [
+                    {
+                        "index": "A1",
+                        "label": "泵头放置位",
+                        "position": {"x": 1, "y": 2, "z": 3},
+                        "size": {"width": 4, "height": 5, "depth": 6},
+                        "content_type": ["tube"],
+                    }
+                ],
                 "init_param_schema": {
                     "config": {
                         "type": "object",
@@ -284,6 +293,26 @@ def test_sync_merges_device_and_resource_templates_into_one_transaction() -> Non
     }
     assert device["init_param_schema"] == {
         "config": {"properties": {"port": {"type": "string"}}}
+    }
+    assert device["available_sites"][0] == {
+        "schema_version": 1,
+        "index": "A1",
+        "label": "泵头放置位",
+        "visible": True,
+        "position_x": 1.0,
+        "position_y": 2.0,
+        "position_z": 3.0,
+        "width": 4.0,
+        "length": 5.0,
+        "depth": 6.0,
+        "rotation_x": 0.0,
+        "rotation_y": 0.0,
+        "rotation_z": 0.0,
+        "content_type": ["tube"],
+        "allowed_resource_template_uuids": [],
+        "parent_link": "",
+        "description": "",
+        "meta_data": {},
     }
     assert "file_path" not in device
     assert "status_types" not in device["class"]
