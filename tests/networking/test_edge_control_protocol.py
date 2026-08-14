@@ -139,6 +139,16 @@ class FakeRegistrationResourcesWithoutBarcode:
         return [[{"id": "robot-01", "name": "Robot 01"}]]
 
 
+class FakeRegistrationResourcesWithClass:
+    def dump(self) -> List[List[Dict[str, Any]]]:
+        return [[{
+            "id": "robot-01",
+            "name": "Robot 01",
+            "barcode": "ROBOT-01",
+            "class": "community.test.robot",
+        }]]
+
+
 class FakeRegistrationHostNode:
     def __init__(self) -> None:
         self.resources_config = FakeRegistrationResources()
@@ -285,6 +295,41 @@ def test_registration_uses_the_shared_graph_barcode_fallback(
     client.store.close()
 
 
+def test_registration_falls_back_to_registry_actions_during_discovery_race(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    from unilabos.registry.registry import lab_registry
+
+    host_node = FakeRegistrationHostNode()
+    host_node.resources_config = FakeRegistrationResourcesWithClass()
+    host_node._action_value_mappings["robot-01"] = {}
+    monkeypatch.setitem(
+        lab_registry.device_type_registry,
+        "community.test.robot",
+        {
+            "class": {
+                "action_value_mappings": {
+                    "_execute_driver_command": {"type": "StrSingleInput"},
+                    "submit_pick_from_s06": {"type": "UniLabJsonCommand"},
+                }
+            }
+        },
+    )
+    client = EdgeControlClient(
+        _settings(tmp_path / "runtime.db"),
+        data_plane=FakeRegistrationDataPlane(),  # type: ignore[arg-type]
+        host_node_provider=lambda: host_node,
+    )
+
+    devices = client._registration_devices()
+
+    assert devices[0]["actions"] == [
+        {"name": "submit_pick_from_s06", "type": "UniLabJsonCommand"}
+    ]
+    client.store.close()
+
+
 def test_registration_includes_host_node_as_default_system_device(
     tmp_path: Path,
 ) -> None:
@@ -419,6 +464,51 @@ def test_explicit_local_reset_preserves_identity_and_clears_protocol_work(
     assert store.get_job(job_uuid) is None
     assert store.command_status(command_uuid) == ""
     assert store.pending_events(float("inf")) == []
+    store.close()
+
+
+def test_store_resets_protocol_state_when_backend_edge_identity_changes(
+    tmp_path: Path,
+) -> None:
+    store = EdgeControlStore(str(tmp_path / "runtime.db"))
+    instance_uuid = store.get_or_create_instance_uuid()
+    first_edge_uuid = str(uuid.uuid4())
+    second_edge_uuid = str(uuid.uuid4())
+    command_uuid = str(uuid.uuid4())
+    job_uuid = str(uuid.uuid4())
+
+    assert store.adopt_authority_edge_uuid(first_edge_uuid) is False
+    assert store.record_command(
+        {
+            "message_uuid": command_uuid,
+            "sequence": 7,
+            "type": "job.start",
+            "payload": {"job_uuid": job_uuid},
+        }
+    )
+    store.mark_command_completed(command_uuid)
+    assert store.save_job_start(
+        {
+            "job_uuid": job_uuid,
+            "task_uuid": str(uuid.uuid4()),
+            "node_uuid": str(uuid.uuid4()),
+            "job_access_token": "test-token",
+        },
+        command_uuid,
+    )
+    store.set_job_status(job_uuid, "running")
+    store.enqueue_event("job.started", {"job_uuid": job_uuid})
+
+    assert store.adopt_authority_edge_uuid(first_edge_uuid) is False
+    assert store.last_ack_command_sequence() == 7
+    assert store.get_job(job_uuid) is not None
+
+    assert store.adopt_authority_edge_uuid(second_edge_uuid) is True
+    assert store.last_ack_command_sequence() == 0
+    assert store.get_job(job_uuid) is None
+    assert store.pending_events(float("inf")) == []
+    assert store.get_or_create_instance_uuid() == instance_uuid
+    assert store.get_meta("authority_edge_uuid") == second_edge_uuid
     store.close()
 
 
