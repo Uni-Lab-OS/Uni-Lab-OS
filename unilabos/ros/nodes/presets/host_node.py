@@ -48,6 +48,7 @@ from unilabos.registry.decorators import (
     device,
     legacy_action,
 )
+from unilabos.registry.annotations import JSONValue
 from unilabos.registry.placeholder_type import (
     ResourceSlot,
     DeviceSlot,
@@ -137,6 +138,25 @@ class TransferResourceReturn:
     mount_resource: ResourceSlot
     site: str
     result: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MaterialStateRecordReturn:
+    """物料低频状态写入结果的类型化工作流合同。
+
+    ``resource`` 继续发布为同一个物料占位符（ResourceSlot），其余字段是已持久化
+    ``material_state_history`` 行的稳定身份和公共状态字段。运行时使用 JSON-safe
+    字典，并沿用 HostNode 物料动作的扁平资源树返回形状。
+    """
+
+    resource: ResourceSlot
+    state_uuid: str
+    material_uuid: str
+    status: Optional[str]
+    state_data: Dict[str, JSONValue]
+    source: Optional[str]
+    observed_at: str
+    description: Optional[str]
 
 
 class TransferManualReturn(TypedDict):
@@ -2476,6 +2496,111 @@ class HostNode(BaseROS2DeviceNode):
             "device_id": edge_id,
             "status": discarded.get("status"),
             "version": discarded.get("version"),
+        }
+
+    @action(
+        description=(
+            "记录物料低频状态：追加到权威 material_state_history，并透传同一物料供下游继续连接"
+        ),
+        always_free=True,
+    )
+    async def record_material_state(
+        self,
+        resource: ResourceSlot,
+        state_data: Dict[str, JSONValue],
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> MaterialStateRecordReturn:
+        """把一次设备工艺结果追加到物料状态时序，并透传同一物料。
+
+        本动作只记录低频工艺状态；``material_state_history`` 是权威时序记录。
+        库存后端会按既有合同同步更新 Material ``data`` 的 latest projection，本动作
+        不额外写 ``data``、``extra`` 或新增 Material 顶层字段。动作只执行一次本地
+        SQLite 事务，不占用设备执行队列，因此声明 ``always_free``；ResourceSlot
+        仍沿 canonical typed action 合同获得默认物料锁。
+
+        Args:
+            resource[物料]: 要记录状态的单个物料，必须带稳定 Material UUID。
+            state_data[状态数据]: 本次观测的非空 JSON 对象。
+            status[状态]: 可选状态标签。
+            source[来源]: 可选观测来源或工艺动作身份。
+            description[说明]: 可选人类可读说明。
+        Returns:
+            JSON-safe 字典；``resource`` 保留同一 UUID 并继续作为 ResourceSlot
+            输出，其他字段来自刚写入的 material_state_history 行。
+
+        Raises:
+            ValueError: resource 缺失、没有稳定 UUID，或 state_data 不是非空对象。
+            TypeError: 可选文本字段不是字符串。
+            RuntimeError: OS 本地库存权威尚未初始化。
+            BackendContractError: Material 不存在或库存合同拒绝写入。
+        """
+        if resource is None:
+            raise ValueError("记录物料状态失败：未接收到物料")
+        if isinstance(resource, dict):
+            nested_data = resource.get("data")
+            material_uuid = str(
+                resource.get("uuid")
+                or resource.get("unilabos_uuid")
+                or (
+                    nested_data.get("unilabos_uuid")
+                    if isinstance(nested_data, dict)
+                    else ""
+                )
+                or ""
+            ).strip()
+        else:
+            material_uuid = str(
+                getattr(resource, "unilabos_uuid", None)
+                or getattr(resource, "uuid", None)
+                or ""
+            ).strip()
+        try:
+            material_uuid = str(uuid.UUID(material_uuid))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("记录物料状态失败：物料缺少稳定 UUID")
+        if not isinstance(state_data, dict) or not state_data:
+            raise ValueError("记录物料状态失败：state_data 必须是非空对象")
+        optional_text = {
+            "status": status,
+            "source": source,
+            "description": description,
+        }
+        invalid_text_fields = [
+            name
+            for name, value in optional_text.items()
+            if value is not None and not isinstance(value, str)
+        ]
+        if invalid_text_fields:
+            raise TypeError(
+                "记录物料状态失败：可选字段必须是字符串："
+                + ", ".join(invalid_text_fields)
+            )
+
+        from unilabos.app.scheduler.integration import get_inventory_service
+
+        inventory = get_inventory_service()
+        if inventory is None:
+            raise RuntimeError("记录物料状态失败：OS 本地库存权威尚未初始化")
+        state = inventory.append_material_state(
+            material_uuid,
+            {
+                "state_data": dict(state_data),
+                "status": status,
+                "source": source,
+                "description": description,
+            },
+        )
+        return {
+            "resource": _dump_resource_slot(resource),
+            "state_uuid": str(state["uuid"]),
+            "material_uuid": str(state["material_uuid"]),
+            "status": state.get("status"),
+            "state_data": dict(state["state_data"]),
+            "source": state.get("source"),
+            "observed_at": str(state["observed_at"]),
+            "description": state.get("description"),
         }
 
     async def _do_transfer_resource(
