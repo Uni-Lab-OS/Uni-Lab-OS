@@ -581,6 +581,7 @@ def test_backend_restart_reconnects_an_existing_edge_to_the_new_dynamic_port(
 
 def test_local_reset_state_clears_edge_work_but_preserves_identity(
     workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()
@@ -620,6 +621,10 @@ def test_local_reset_state_clears_edge_work_but_preserves_identity(
         database.with_name(f"{database.name}-wal").write_bytes(b"stale-wal")
 
     host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    monkeypatch.setattr(
+        "unilabos.workspace_host.host.inspect_local_reset_blockers",
+        lambda _paths: [],
+    )
     stopped: list[str] = []
     host._stop_component = lambda name: stopped.append(name) or {}  # type: ignore[method-assign]
     host._start_backend = lambda parameters: {"parameters": parameters}  # type: ignore[method-assign]

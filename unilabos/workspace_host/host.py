@@ -41,6 +41,7 @@ from .model import (
     read_json,
     utc_timestamp,
 )
+from .reset_safety import LocalResetInspectionError, inspect_local_reset_blockers
 
 _STOP_TIMEOUT_SECONDS = 10.0
 _READINESS_TIMEOUT_SECONDS = 90.0
@@ -277,11 +278,7 @@ class WorkspaceHost:
             self._stop_component("edge")
             return self._start_edge()
         if command == "local.reset-state":
-            self._stop_component("edge")
-            self._stop_component("backend")
-            self._reset_local_edge_protocol_state()
-            self._reset_local_domain_state()
-            return self._start_backend(parameters)
+            return self._reset_local_state(parameters)
         if command == "plc.start":
             return self._start_plc()
         if command == "plc.stop":
@@ -606,6 +603,55 @@ class WorkspaceHost:
             store.reset_transient_state()
         finally:
             store.close()
+
+    def _reset_local_state(self, parameters: dict[str, object]) -> object:
+        """Rebuild Local Domain state only after durable facts are quiescent."""
+
+        with self._lock:
+            backend_was_ready = self._components["backend"].get("phase") == "ready"
+            edge_was_ready = self._components["edge"].get("phase") == "ready"
+        self._assert_local_reset_safe("before-stop")
+        self._stop_component("edge")
+        self._stop_component("backend")
+        try:
+            self._assert_local_reset_safe("after-stop")
+        except WorkspaceHostError:
+            if backend_was_ready:
+                self._start_backend(parameters)
+            if edge_was_ready:
+                self._start_edge()
+            raise
+        self._reset_local_edge_protocol_state()
+        self._reset_local_domain_state()
+        return self._start_backend(parameters)
+
+    def _assert_local_reset_safe(self, stage: str) -> None:
+        try:
+            blockers = inspect_local_reset_blockers(self.paths)
+        except LocalResetInspectionError as error:
+            with self._lock:
+                self._audit_locked(
+                    "local.reset-state.preflight-failed",
+                    {"stage": stage, "message": str(error)},
+                )
+            raise WorkspaceHostError(
+                "local_reset_state_preflight_failed",
+                "无法证明本地状态可以安全重建；未修改任何持久数据",
+                details={"stage": stage, "message": str(error)},
+            ) from error
+        if not blockers:
+            return
+        details = {
+            "stage": stage,
+            "blockers": [blocker.as_dict() for blocker in blockers],
+        }
+        with self._lock:
+            self._audit_locked("local.reset-state.blocked", details)
+        raise WorkspaceHostError(
+            "local_reset_state_blocked",
+            "存在活动工作流或尚未收敛的 Edge 事实；本地状态未重建",
+            details=details,
+        )
 
     def _reset_local_domain_state(self) -> None:
         """Delete only the audited Local Domain databases and their journals."""
