@@ -20,6 +20,13 @@ class OpenCommissioningSessionRequest(BaseModel):
     requested_deployment_mode: Literal["simulation", "maintenance"]
 
 
+class ReviseAuthoredTargetRequest(BaseModel):
+    """把当前关节 SI 写回活动 PointSet 的作者层目标。"""
+
+    target_ref: str = Field(min_length=1, max_length=256)
+    joint_positions_si: list[float]
+
+
 class CommissioningCommandRequest(BaseModel):
     """网页使用的最小调试命令；安全身份由 OS 会话注入。"""
 
@@ -197,6 +204,34 @@ class RobotCommissioningService:
             "result": _json_value(result),
         }
 
+    def revise_authored_target(
+        self,
+        device_id: str,
+        session_id: str,
+        target_ref: str,
+        joint_positions_si: list[float],
+    ) -> dict[str, Any]:
+        """在独占维护会话中把作者层关节目标写回活动 PointSet。"""
+
+        with self._lock:
+            entry, binding = self._entry(device_id, session_id)
+            port = binding.commissioning_port
+            reviser = getattr(port, "revise_authored_joint_target", None)
+            if not callable(reviser):
+                raise RuntimeError("当前 Adapter 不支持示教写回 PointSet")
+            snapshot = entry.session.snapshot()
+        if (
+            getattr(snapshot, "idle", None) is not True
+            or getattr(snapshot, "execution_fenced", False)
+        ):
+            raise RuntimeError("机械臂忙碌或存在 Fence，禁止写回 PointSet")
+        return _json_value(
+            reviser(
+                _required_text(target_ref, "target_ref"),
+                _required_joint_positions(joint_positions_si),
+            )
+        )
+
     def close_session(self, device_id: str, session_id: str) -> None:
         """在没有未知执行 Fence 时释放维护端点。"""
 
@@ -236,6 +271,7 @@ class RobotCommissioningService:
             "hardware_profile_digest": hardware_digest,
             "tool_context_digest": tool_digest,
             "commissioning_limits": commissioning_limits,
+            "target_catalog": _target_catalog(port),
             "interaction_modes": {
                 "step": True,
                 "continuous_hold": False,
@@ -288,6 +324,44 @@ def _required_commissioning_limits(port: Any) -> dict[str, float]:
             )
         limits[wire_name] = value
     return limits
+
+
+def _target_catalog(port: Any) -> list[Any]:
+    """投影 Adapter 提供的作者层点位目录；缺失时返回空列表。"""
+
+    raw = getattr(port, "commissioning_target_catalog", None)
+    if callable(raw):
+        raw = raw()
+    if raw is None:
+        return []
+    if isinstance(raw, (str, bytes)):
+        raise ValueError("commissioning_target_catalog 必须是目标列表")
+    try:
+        items = list(raw)
+    except TypeError as error:
+        raise ValueError("commissioning_target_catalog 必须是目标列表") from error
+    return [_json_value(item) for item in items]
+
+
+def _required_joint_positions(value: object) -> list[float]:
+    """校验示教写回的型号顺序 SI 关节数组，不假设关节数量。"""
+
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError("joint_positions_si 必须是有限数列表")
+    positions: list[float] = []
+    for item in value:
+        if isinstance(item, bool):
+            raise ValueError("joint_positions_si 必须是有限数列表")
+        try:
+            number = float(item)
+        except (TypeError, ValueError) as error:
+            raise ValueError("joint_positions_si 必须是有限数列表") from error
+        if not math.isfinite(number):
+            raise ValueError("joint_positions_si 必须是有限数列表")
+        positions.append(number)
+    if not positions:
+        raise ValueError("joint_positions_si 不能为空")
+    return positions
 
 
 def _deployment_mode(binding: Any) -> str:
@@ -533,6 +607,22 @@ def create_robot_commissioning_router(
 
         return _http_call(service.execute, device_id, session_id, request)
 
+    @router.post("/{device_id}/sessions/{session_id}/targets")
+    def revise_target(
+        device_id: str,
+        session_id: str,
+        request: ReviseAuthoredTargetRequest,
+    ) -> dict[str, Any]:
+        """把当前关节写回活动 PointSet 的作者层目标。"""
+
+        return _http_call(
+            service.revise_authored_target,
+            device_id,
+            session_id,
+            request.target_ref,
+            request.joint_positions_si,
+        )
+
     @router.delete("/{device_id}/sessions/{session_id}", status_code=204)
     def close_session(device_id: str, session_id: str) -> Response:
         """释放维护会话；存在 Fence 时失败关闭。"""
@@ -580,6 +670,7 @@ def unregister_robot_commissioning_runtime(device_id: str) -> None:
 __all__ = [
     "CommissioningCommandRequest",
     "OpenCommissioningSessionRequest",
+    "ReviseAuthoredTargetRequest",
     "RobotCommissioningService",
     "create_robot_commissioning_router",
     "get_robot_commissioning_service",

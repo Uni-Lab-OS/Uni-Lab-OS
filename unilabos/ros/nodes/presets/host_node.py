@@ -426,9 +426,9 @@ class HostNode(BaseROS2DeviceNode):
         # 首次发现网络中的设备
         self._discover_devices()
 
-        # 初始化所有本机设备节点，多一次过滤，防止重复初始化
+        # 初始化所有本机设备节点（含挂在导轨等布局父节点下的 type=device 子设备）
         local_machine = BasicConfig.machine_name
-        for device_config in devices_config.root_nodes:
+        for device_config in devices_config.device_nodes:
             device_id = device_config.res_content.id
             if device_config.res_content.type != "device":
                 continue

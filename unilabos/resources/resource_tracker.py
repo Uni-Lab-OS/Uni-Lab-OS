@@ -299,19 +299,33 @@ class ResourceDictInstance(object):
                 content[state_key] = state_val
         if "position" in content:
             pose = content.get("pose", {})
+            if not isinstance(pose, dict):
+                pose = {}
+            raw_position = content["position"]
+            nested = (
+                raw_position
+                if isinstance(raw_position, dict) and isinstance(raw_position.get("position"), dict)
+                else None
+            )
             if "position" not in pose:
                 # noinspection PyTypedDict
-                if "position" in content["position"]:
-                    # noinspection PyTypedDict
-                    pose["position"] = content["position"]["position"]
+                if nested is not None:
+                    pose["position"] = nested["position"]
+                elif isinstance(raw_position, dict):
+                    pose["position"] = raw_position
                 else:
                     pose["position"] = ResourceDictPositionObjectType(x=0, y=0, z=0)
+            if "rotation" not in pose and nested is not None and isinstance(nested.get("rotation"), dict):
+                pose["rotation"] = nested["rotation"]
             if "size" not in pose:
-                pose["size"] = ResourceDictPositionSizeType(
-                    width= content["config"].get("size_x", 0),
-                    height= content["config"].get("size_y", 0),
-                    depth= content["config"].get("size_z", 0),
-                )
+                if nested is not None and isinstance(nested.get("size"), dict):
+                    pose["size"] = nested["size"]
+                else:
+                    pose["size"] = ResourceDictPositionSizeType(
+                        width= content["config"].get("size_x", 0),
+                        height= content["config"].get("size_y", 0),
+                        depth= content["config"].get("size_z", 0),
+                    )
             content["pose"] = pose
         try:
             res_dict = ResourceDict.model_validate(content)
@@ -901,6 +915,16 @@ class ResourceTreeSet(object):
             所有节点的资源实例列表
         """
         return [node for tree in self.trees for node in tree.get_all_nodes()]
+
+    @property
+    def device_nodes(self) -> List[ResourceDictInstance]:
+        """Return every device instance, including layout children of other devices.
+
+        Root-only startup would skip a robot mounted on a rail.  Device-typed
+        children still own their own ROS node; they are not parent resources.
+        """
+
+        return [node for node in self.all_nodes if node.res_content.type == "device"]
 
     @property
     def all_nodes_uuid(self) -> List[str]:

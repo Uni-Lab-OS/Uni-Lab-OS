@@ -20,9 +20,13 @@ from lxml import etree
 
 from unilabos.device_mesh.motion_runtime_plan import node_requests_moveit
 from unilabos.device_mesh.package_moveit_model import (
+    apply_graph_world_mount,
     get_ros_model_type,
     load_package_moveit_model,
     merge_package_moveit_parameters,
+)
+from unilabos.device_mesh.package_static_model import (
+    instantiate_package_static_model,
 )
 from unilabos.registry.registry import lab_registry
 
@@ -160,7 +164,7 @@ class ResourceVisualization:
         self.launch_description = LaunchDescription()
         self.resource_dict = resource
         self.resource_model = {}
-        self.resource_type = ['deck', 'plate', 'container', 'tip_rack']
+        self.resource_type = ['deck', 'plate', 'container', 'tip_rack', 'warehouse', 'resource']
         self.mesh_path = Path(__file__).parent.absolute()
         self.enable_rviz = enable_rviz
         self.required_moveit_device_ids = tuple(required_moveit_device_ids)
@@ -233,8 +237,11 @@ class ResourceVisualization:
                         self._add_package_moveit_model(
                             node,
                             model_config,
+                            graph_nodes=device,
                             enable_motion=node_requests_moveit(node),
                         )
+                    elif model_type == 'package_static':
+                        self._add_package_static_model(node, model_config, device)
                     elif model_type == 'resource':
                         self.resource_model[node['id']] = {
                             'mesh': f"{str(self.mesh_path)}/resources/{model_config['mesh']}",
@@ -342,16 +349,21 @@ class ResourceVisualization:
         node: dict,
         model_config: dict,
         *,
+        graph_nodes: dict,
         enable_motion: bool,
     ) -> None:
         """把 distribution Provider 的六轴模型并入本进程唯一 Launch 描述。
 
         参数：``node`` 是 Graph Device；``model_config`` 是已发布 Catalog 模型
-        声明。返回：无。异常：Provider 摘要、XML 或控制器形状无效时传播。
-        安全：Provider 只能贡献型号模型和执行参数；RViz 仍由 OS 独立开关拥有。
+        声明；``graph_nodes`` 用于按 Issue #183 合成世界安装。返回：无。
+        异常：Provider 摘要、XML 或控制器形状无效时传播。安全：Provider 只
+        贡献型号模型和执行参数，不接收导轨轴；RViz 仍由 OS 独立开关拥有。
         """
 
-        bundle = load_package_moveit_model(model_config, node)
+        bundle = load_package_moveit_model(
+            model_config,
+            apply_graph_world_mount(node, graph_nodes),
+        )
         robot = etree.fromstring(bundle.urdf.encode("utf-8"))
         for child in robot:
             self.root.append(child)
@@ -370,6 +382,25 @@ class ResourceVisualization:
             joint_limits=self.moveit_joint_limits,
         )
         self.moveit_nodes[str(node["id"])] = "package_moveit"
+
+    def _add_package_static_model(
+        self,
+        node: dict,
+        model_config: dict,
+        graph_nodes: dict,
+    ) -> None:
+        """把软件包静态 URDF（含 collision）按 Graph 位姿挂到 world，供 MoveIt 规划。
+
+        参数：``node`` 是 Graph 成员；``model_config`` 是 ``package_static``
+        声明；``graph_nodes`` 是整张 Graph，用于父级位姿合成。返回：无。
+        安全：Provider 不得声明执行/控制；碰撞几何必须写在 URDF 里，不走
+        PlanningScene。安装位姿只来自 Graph。
+        """
+
+        fragment = instantiate_package_static_model(model_config, node, graph_nodes)
+        robot = etree.fromstring(fragment.encode("utf-8"))
+        for child in robot:
+            self.root.append(child)
 
 
     def create_launch_description(self) -> LaunchDescription:

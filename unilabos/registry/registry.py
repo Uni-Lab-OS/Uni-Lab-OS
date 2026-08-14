@@ -189,6 +189,16 @@ class Registry:
 
         return self._package_generation.snapshot_projection()
 
+    def published_registry_snapshot(self) -> Any | None:
+        """读取当前已发布的软件包注册表快照（Registry Snapshot）。
+
+        参数：无。
+        返回：已发布快照对象；软件包代尚未发布时为 ``None``，不从实时映射猜测。
+        异常：无。
+        """
+
+        return self._package_generation.published_snapshot()
+
     # ------------------------------------------------------------------
     # 统一入口
     # ------------------------------------------------------------------

@@ -265,3 +265,142 @@ def test_device_locked_motion_profile_cannot_be_replaced_by_web() -> None:
     )
     with pytest.raises(ValueError, match="活动维护 Profile 不一致"):
         commissioning_api._motion_profile_ref(port, "web-defined", "joint_jog")
+
+
+def test_open_session_includes_empty_target_catalog_when_port_omits_it() -> None:
+    """没有目录的 Adapter 必须返回空列表，而不是省略字段或猜测点位。"""
+
+    service = commissioning_api.RobotCommissioningService()
+    service.register("robot", _Binding())
+    client = _client(service)
+    opened = client.post(
+        "/api/v1/robot-commissioning/robot/sessions",
+        json={
+            "owner_id": "operator-a",
+            "requested_deployment_mode": "simulation",
+        },
+    )
+
+    assert opened.status_code == 201
+    assert opened.json()["target_catalog"] == []
+
+
+class _CatalogPort(_Port):
+    """带作者层目录和示教写回的测试端口。"""
+
+    commissioning_target_catalog = (
+        {
+            "target_ref": "global.arm.home",
+            "source_point": "P1",
+            "kind": "joint_positions",
+            "editable": True,
+            "joint_positions_si": [-2.6, -0.8],
+            "rail_position_si": None,
+            "group_ref": "global.arm",
+        },
+    )
+    revised: tuple[str, list[float]] | None = None
+
+    def revise_authored_joint_target(
+        self,
+        target_ref: str,
+        joint_positions_si: list[float],
+    ) -> dict[str, object]:
+        """记录写回并提升测试 revision。"""
+
+        self.revised = (target_ref, list(joint_positions_si))
+        self.commissioning_target_revision = "ptlc-points@3.0.1"
+        return {
+            "target_ref": target_ref,
+            "target_revision": self.commissioning_target_revision,
+            "target_catalog": [
+                {
+                    **self.commissioning_target_catalog[0],
+                    "joint_positions_si": list(joint_positions_si),
+                }
+            ],
+        }
+
+
+class _CatalogBinding(_Binding):
+    """使用带目录端口的测试绑定。"""
+
+    def __init__(self, deployment_mode: str = "simulation") -> None:
+        super().__init__(deployment_mode)
+        self.commissioning_port = _CatalogPort()
+
+
+def test_open_session_projects_adapter_target_catalog() -> None:
+    """打开会话时必须把 Adapter 的作者层目录交给网页。"""
+
+    service = commissioning_api.RobotCommissioningService()
+    service.register("robot", _CatalogBinding())
+    client = _client(service)
+    opened = client.post(
+        "/api/v1/robot-commissioning/robot/sessions",
+        json={
+            "owner_id": "operator-a",
+            "requested_deployment_mode": "simulation",
+        },
+    )
+
+    assert opened.status_code == 201
+    catalog = opened.json()["target_catalog"]
+    assert catalog[0]["target_ref"] == "global.arm.home"
+    assert catalog[0]["source_point"] == "P1"
+    assert catalog[0]["joint_positions_si"] == [-2.6, -0.8]
+
+
+def test_revise_authored_target_writes_through_port_and_returns_new_revision() -> None:
+    """示教写回必须走 Adapter，并由 OS 返回新的 PointSet revision。"""
+
+    service = commissioning_api.RobotCommissioningService()
+    binding = _CatalogBinding()
+    service.register("robot", binding)
+    client = _client(service)
+    opened = client.post(
+        "/api/v1/robot-commissioning/robot/sessions",
+        json={
+            "owner_id": "operator-a",
+            "requested_deployment_mode": "simulation",
+        },
+    )
+    session_id = opened.json()["session_id"]
+    revised = client.post(
+        f"/api/v1/robot-commissioning/robot/sessions/{session_id}/targets",
+        json={
+            "target_ref": "global.arm.home",
+            "joint_positions_si": [-1.5, -0.2],
+        },
+    )
+
+    assert revised.status_code == 200
+    assert revised.json()["target_revision"] == "ptlc-points@3.0.1"
+    assert binding.commissioning_port.revised == (
+        "global.arm.home",
+        [-1.5, -0.2],
+    )
+
+
+def test_revise_authored_target_rejects_empty_joints() -> None:
+    """OS 不得把空关节数组交给 Adapter。"""
+
+    service = commissioning_api.RobotCommissioningService()
+    service.register("robot", _CatalogBinding())
+    client = _client(service)
+    opened = client.post(
+        "/api/v1/robot-commissioning/robot/sessions",
+        json={
+            "owner_id": "operator-a",
+            "requested_deployment_mode": "simulation",
+        },
+    )
+    session_id = opened.json()["session_id"]
+    revised = client.post(
+        f"/api/v1/robot-commissioning/robot/sessions/{session_id}/targets",
+        json={"target_ref": "global.arm.home", "joint_positions_si": []},
+    )
+
+    assert revised.status_code == 422
+    assert "joint_positions_si" in revised.json()["detail"]
+

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from unilabos.device_mesh.package_moveit_model import (
+    apply_graph_world_mount,
     collect_package_joint_state_owners,
     create_package_moveit_client,
     get_package_render_mesh,
@@ -119,6 +121,85 @@ def test_package_model_provider_receives_only_instance_pose(monkeypatch) -> None
     assert bundle.qualified_joint_names == ("robot_joint_1",)
     assert bundle.topology_digest == "b" * 64
     assert bundle.rviz_required is False
+
+
+def test_apply_graph_world_mount_composes_rail_parent_pose() -> None:
+    """机械臂相对导轨的毫米位姿必须合成回原来的世界安装。"""
+
+    graph = {
+        "rail": {
+            "id": "rail",
+            "parent": None,
+            "position": {"x": -500, "y": 0, "z": 850},
+        },
+        "robot": {
+            "id": "robot",
+            "parent": "rail",
+            "position": {
+                "position": {"x": 681.301, "y": 0, "z": 150},
+                "rotation": {"x": 0, "y": 0, "z": 180},
+            },
+            "config": {"rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
+        },
+    }
+
+    mounted = apply_graph_world_mount(graph["robot"], graph)
+
+    assert mounted["position"]["x"] == pytest.approx(181.301)
+    assert mounted["position"]["y"] == pytest.approx(0.0)
+    assert mounted["position"]["z"] == pytest.approx(1000.0)
+    assert mounted["config"]["rotation"]["x"] == pytest.approx(0.0)
+    assert mounted["config"]["rotation"]["y"] == pytest.approx(0.0)
+    assert mounted["config"]["rotation"]["z"] == pytest.approx(math.pi)
+
+
+def test_apply_graph_world_mount_follows_os_runtime_graph_dump() -> None:
+    """canonicalize 之后 parent 变成 parent_uuid，MoveIt 安装仍要落在导轨世界位姿。"""
+
+    import networkx as nx
+
+    from unilabos.resources.graphio import canonicalize_nodes_data, dict_from_graph
+
+    tree = canonicalize_nodes_data(
+        [
+            {
+                "id": "rail",
+                "name": "rail",
+                "type": "device",
+                "class": "community.ptlc_station.rail",
+                "parent": None,
+                "children": ["robot"],
+                "position": {"x": -500, "y": 0, "z": 850},
+                "config": {},
+            },
+            {
+                "id": "robot",
+                "name": "robot",
+                "type": "device",
+                "class": "community.ptlc_station.robot",
+                "parent": "rail",
+                "children": [],
+                "position": {
+                    "position": {"x": 681.301, "y": 0, "z": 150},
+                    "rotation": {"x": 0, "y": 0, "z": 180},
+                },
+                "config": {"rotation": {"x": 0.0, "y": 0.0, "z": 0.0}},
+            },
+        ]
+    )
+    assert [node.res_content.id for node in tree.root_nodes] == ["rail"]
+    assert [node.res_content.id for node in tree.device_nodes] == ["rail", "robot"]
+    dumped = [node.res_content.model_dump(by_alias=True) for node in tree.all_nodes]
+    robot_dump = next(node for node in dumped if node["id"] == "robot")
+    assert robot_dump.get("parent") in (None, "")
+    assert robot_dump["parent_uuid"]
+    runtime = dict_from_graph(
+        nx.node_link_graph({"nodes": dumped, "links": []}, edges="links", multigraph=False)
+    )
+    mounted = apply_graph_world_mount(runtime["robot"], runtime)
+    assert mounted["position"]["x"] == pytest.approx(181.301)
+    assert mounted["position"]["z"] == pytest.approx(1000.0)
+    assert mounted["config"]["rotation"]["z"] == pytest.approx(math.pi)
 
 
 def test_graph_freezes_two_same_model_instances_without_joint_cross_talk(

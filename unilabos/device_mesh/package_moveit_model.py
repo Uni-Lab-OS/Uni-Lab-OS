@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from unilabos.device_mesh.joint_state_projector import JointStateOwner
+from unilabos.device_mesh.package_static_model import resolve_graph_world_pose
 
 _PROVIDER_REF = re.compile(
     r"^(?P<module>[A-Za-z_][A-Za-z0-9_.]*):(?P<symbol>[A-Za-z_][A-Za-z0-9_]*)$"
@@ -79,6 +80,34 @@ def get_ros_model_type(model_config: object) -> str | None:
         return None
     model_type = model_config.get("type")
     return model_type if isinstance(model_type, str) else None
+
+
+def apply_graph_world_mount(
+    node: Mapping[str, Any],
+    graph_nodes: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """把 Graph 父子位姿合成后的世界安装写进型号 Provider 入参。
+
+    参数：``node`` 是 Graph Device；``graph_nodes`` 是整张 Graph。返回：只
+    覆盖 ``position``（毫米）和 ``config.rotation``（弧度）的浅拷贝。型号包
+    仍然只收世界安装，不创建导轨轴。
+    """
+
+    xyz_m, rpy_rad = resolve_graph_world_pose(node, graph_nodes)
+    mounted = dict(node)
+    config = node.get("config")
+    mounted["config"] = dict(config) if isinstance(config, Mapping) else {}
+    mounted["position"] = {
+        "x": xyz_m[0] * 1000.0,
+        "y": xyz_m[1] * 1000.0,
+        "z": xyz_m[2] * 1000.0,
+    }
+    mounted["config"]["rotation"] = {
+        "x": rpy_rad[0],
+        "y": rpy_rad[1],
+        "z": rpy_rad[2],
+    }
+    return mounted
 
 
 def load_package_moveit_model(
@@ -437,6 +466,7 @@ __all__ = [
     "collect_package_joint_state_owners",
     "get_package_render_mesh",
     "get_package_render_model",
+    "apply_graph_world_mount",
     "get_ros_model_type",
     "load_package_moveit_model",
     "merge_package_moveit_parameters",

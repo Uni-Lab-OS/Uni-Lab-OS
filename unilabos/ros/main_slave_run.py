@@ -281,7 +281,7 @@ def slave(
 
     # 4. 初始化所有设备实例（此时 resources_config 的 UUID 已更新）
     devices_instances = {}
-    for device_config in devices_config.root_nodes:
+    for device_config in devices_config.device_nodes:
         device_id = device_config.res_content.id
         if device_config.res_content.type == "device":
             d = initialize_device_from_dict(device_id, device_config)

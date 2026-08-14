@@ -121,3 +121,14 @@ class PackageRegistryGeneration:
             if not isinstance(snapshot_projection, dict):
                 raise TypeError("软件包注册表快照查询投影必须是字典")
             return copy.deepcopy(snapshot_projection)
+
+    def published_snapshot(self) -> Any | None:
+        """读取当前已发布的注册表快照对象；尚未发布时返回 None。
+
+        参数：无。
+        返回：当前权威 ``RegistrySnapshot`` 或 ``None``；调用方不得修改返回对象。
+        异常：无。
+        """
+
+        with self._lock:
+            return self._snapshot

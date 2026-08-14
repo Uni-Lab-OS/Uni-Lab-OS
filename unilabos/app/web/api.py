@@ -1302,12 +1302,15 @@ def get_devices():
         if inventory_store is not None
         else lambda _device_id: None
     )
+    published_snapshot = getattr(lab_registry, "published_registry_snapshot", None)
+    registry_snapshot = published_snapshot() if callable(published_snapshot) else None
     return Resp(
         data=project_device_catalog(
             resources=data,
             registry_devices=lab_registry.obtain_registry_device_info(),
             online_devices=online_devices,
             material_identity_resolver=material_identity_resolver,
+            registry_snapshot=registry_snapshot,
         )
     )
 
