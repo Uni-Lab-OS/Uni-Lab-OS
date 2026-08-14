@@ -943,8 +943,21 @@ class WorkspaceHost:
             return self._snapshot_locked()
 
     def _update_configuration(self, parameters: dict[str, object]) -> dict[str, object]:
+        """校验并持久化工作区配置更新，返回包含新配置的 Host 快照。
+
+        Args:
+            parameters: 前端请求更新的配置字段和值。
+
+        Returns:
+            配置写入后发布的完整 Workspace Host 快照。
+
+        Raises:
+            WorkspaceHostError: 配置包含未知字段或外部设备包范围不是布尔值。
+        """
+
         allowed = {
             "graphPath",
+            "externalDevicesOnly",
             "runtimeMode",
             "plcSimulatorProjectPath",
             "plcVariableTablePath",
@@ -958,6 +971,14 @@ class WorkspaceHost:
             raise WorkspaceHostError(
                 "configuration_invalid",
                 f"未知配置字段：{', '.join(unknown)}",
+            )
+        if (
+            "externalDevicesOnly" in parameters
+            and not isinstance(parameters["externalDevicesOnly"], bool)
+        ):
+            raise WorkspaceHostError(
+                "configuration_invalid",
+                "externalDevicesOnly 必须是布尔值",
             )
         with self._lock:
             self._configuration.update(parameters)
@@ -1669,11 +1690,21 @@ class WorkspaceHost:
                 self._recovery_pending.setdefault(name, time.monotonic())
 
     def _initial_configuration(self) -> dict[str, object]:
+        """读取持久化配置并补齐安全默认值，返回 Host 的初始配置状态。
+
+        Returns:
+            不含 schemaVersion、且外部设备包范围始终为布尔值的配置字典。
+
+        Raises:
+            WorkspaceHostError: 已持久化的 externalDevicesOnly 不是布尔值。
+        """
+
         try:
             payload = json.loads(self.paths.environment.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
             return {
                 "graphPath": None,
+                "externalDevicesOnly": True,
                 "runtimeMode": "normal",
                 "domainMode": "local",
                 "backendUrl": None,
@@ -1681,6 +1712,7 @@ class WorkspaceHost:
         if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
             return {
                 "graphPath": None,
+                "externalDevicesOnly": True,
                 "runtimeMode": "normal",
                 "domainMode": "local",
                 "backendUrl": None,
@@ -1688,6 +1720,12 @@ class WorkspaceHost:
         configuration = {
             key: value for key, value in payload.items() if key != "schemaVersion"
         }
+        configuration.setdefault("externalDevicesOnly", True)
+        if not isinstance(configuration["externalDevicesOnly"], bool):
+            raise WorkspaceHostError(
+                "configuration_invalid",
+                "externalDevicesOnly 必须是布尔值",
+            )
         configuration.setdefault("domainMode", "local")
         configuration.setdefault("backendUrl", None)
         return configuration

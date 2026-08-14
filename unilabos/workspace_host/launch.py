@@ -61,6 +61,22 @@ def resolve_backend_launch(
     backend_port: int | None = None,
     hostlink_port: int | None = None,
 ) -> LaunchPlan:
+    """解析 Workspace Backend 的可复现启动计划。
+
+    Args:
+        paths: 当前工作区的标准路径集合。
+        graph_path: 可选的显式工作流图路径。
+        runtime_mode: 可选的显式 OS 运行模式。
+        backend_port: 可选的 Backend 监听端口。
+        hostlink_port: 可选的 HostLink 监听端口。
+
+    Returns:
+        包含命令、环境、身份代次与配置元数据的 Backend 启动计划。
+
+    Raises:
+        WorkspaceHostError: 工作区文件、端口、模式或设备包范围配置无效。
+    """
+
     config = load_environment_configuration(paths)
     selected_graph = graph_path or _optional_text(config.get("graphPath"))
     selected_graph = selected_graph or "deployment/graphs/szlab-local-debug.json"
@@ -79,6 +95,11 @@ def resolve_backend_launch(
     if domain_mode not in {"local", "backend"}:
         raise WorkspaceHostError(
             "domain_mode_invalid", f"无效 Domain Authority：{domain_mode}"
+        )
+    external_devices_only = config.get("externalDevicesOnly", True)
+    if not isinstance(external_devices_only, bool):
+        raise WorkspaceHostError(
+            "environment_invalid", "externalDevicesOnly 必须是布尔值"
         )
     generation = str(uuid.uuid4())
     runtime_directory = paths.runtime / "backend" / generation
@@ -145,7 +166,7 @@ def resolve_backend_launch(
         "--disable_browser",
         "--action_mode",
         "real" if mode == "normal" else "simulate",
-        "--external_devices_only",
+        *(("--external_devices_only",) if external_devices_only else ()),
         "--ros_discovery_server",
         "off",
     )
@@ -162,6 +183,7 @@ def resolve_backend_launch(
             "graphPath": str(graph),
             "graphFingerprint": _sha256(graph),
             "runtimeMode": mode,
+            "externalDevicesOnly": external_devices_only,
             "domainMode": domain_mode,
             "backendUrl": _optional_text(config.get("backendUrl")),
             "hostLinkPort": hostlink_port,
@@ -181,6 +203,19 @@ def resolve_backend_launch(
 def resolve_edge_launch(
     paths: WorkspacePaths, backend: dict[str, object]
 ) -> LaunchPlan:
+    """从 Backend 元数据解析共享配置的 Edge 启动计划。
+
+    Args:
+        paths: 当前工作区的标准路径集合。
+        backend: 已就绪 Backend 的地址与启动元数据投影。
+
+    Returns:
+        与 Backend 使用相同设备包范围和领域权威的 Edge 启动计划。
+
+    Raises:
+        WorkspaceHostError: Backend 地址、元数据、领域权威或设备包范围无效。
+    """
+
     metadata = backend.get("metadata")
     if not isinstance(metadata, dict):
         raise WorkspaceHostError("backend_not_ready", "Backend 缺少启动元数据")
@@ -189,6 +224,11 @@ def resolve_edge_launch(
     runtime_directory.mkdir(parents=True, exist_ok=False)
     ready_file = runtime_directory / "ready.json"
     mode = str(metadata.get("runtimeMode") or "normal")
+    external_devices_only = metadata.get("externalDevicesOnly", True)
+    if not isinstance(external_devices_only, bool):
+        raise WorkspaceHostError(
+            "backend_not_ready", "Backend 外部设备包范围元数据无效"
+        )
     local_backend_address = str(backend.get("address") or "").strip()
     if not local_backend_address:
         raise WorkspaceHostError("backend_not_ready", "Backend 缺少服务地址")
@@ -275,7 +315,7 @@ def resolve_edge_launch(
         "--disable_browser",
         "--action_mode",
         "real" if mode == "normal" else "simulate",
-        "--external_devices_only",
+        *(("--external_devices_only",) if external_devices_only else ()),
         "--ros_discovery_server",
         "off",
     )
@@ -291,6 +331,7 @@ def resolve_edge_launch(
         metadata={
             "graphPath": metadata["graphPath"],
             "runtimeMode": mode,
+            "externalDevicesOnly": external_devices_only,
             "domainMode": domain_mode,
             "authorityAddress": authority_address,
             "protocolStatePath": str(state_db),
