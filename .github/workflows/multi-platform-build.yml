@@ -69,7 +69,10 @@ jobs:
           - os: macos-latest # ARM64
             platform: osx-arm64
             env_file: unilabos-osx-arm64.yaml
-          - os: windows-latest
+          # RoboStack's Windows toolchain currently targets Visual Studio 2022.
+          # Pin the runner so a future `windows-latest` image upgrade does not
+          # make CMake select an unavailable generator.
+          - os: windows-2022
             platform: win-64
             env_file: unilabos-win64.yaml
 
