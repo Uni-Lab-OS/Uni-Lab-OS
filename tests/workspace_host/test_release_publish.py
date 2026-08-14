@@ -275,7 +275,9 @@ def test_publish_fails_closed_and_does_not_record_unverified_release(
     assert not list(tmp_path.iterdir())
 
 
-def test_restore_authoring_params_preserves_composite_contract_and_private_nodes() -> None:
+def test_restore_authoring_params_preserves_composite_contract_and_private_nodes() -> (
+    None
+):
     current = {
         "workflow": {"uuid": "target-workflow", "revision": 9},
         "nodes": [
@@ -294,9 +296,7 @@ def test_restore_authoring_params_preserves_composite_contract_and_private_nodes
                 "parent_uuid": "invocation",
                 "type": "action",
                 "param": {"resource": {"uuid": "temporary"}},
-                "meta_data": {
-                    "unilab_release": {"source_node_uuid": "source-child"}
-                },
+                "meta_data": {"unilab_release": {"source_node_uuid": "source-child"}},
             },
         ],
         "edges": [{"uuid": "private-edge"}],
@@ -315,9 +315,7 @@ def test_restore_authoring_params_preserves_composite_contract_and_private_nodes
                 "uuid": "private-child",
                 "parent_uuid": "invocation",
                 "param": {},
-                "meta_data": {
-                    "unilab_release": {"source_node_uuid": "source-child"}
-                },
+                "meta_data": {"unilab_release": {"source_node_uuid": "source-child"}},
             },
         ]
     }
@@ -351,9 +349,7 @@ def test_restore_authoring_params_keeps_workflow_input_defaults() -> None:
                 "meta_data": {
                     "unilab": {
                         "input_bindings": {
-                            "target-volume-handle": {
-                                "parameter": "volume_pump_1"
-                            }
+                            "target-volume-handle": {"parameter": "volume_pump_1"}
                         }
                     },
                     "unilab_release": {"source_node_uuid": "source-node"},
@@ -380,9 +376,7 @@ def test_restore_authoring_params_keeps_workflow_input_defaults() -> None:
                 "uuid": "source-node",
                 "parent_uuid": None,
                 "param": {},
-                "meta_data": {
-                    "unilab_release": {"source_node_uuid": "source-node"}
-                },
+                "meta_data": {"unilab_release": {"source_node_uuid": "source-node"}},
             }
         ],
     }
@@ -442,9 +436,7 @@ def test_repair_public_metadata_remaps_composite_boundary_only() -> None:
                 "type": "workflow",
                 "meta_data": {
                     "changed": True,
-                    "unilab_release": {
-                        "source_node_uuid": "source-invocation"
-                    },
+                    "unilab_release": {"source_node_uuid": "source-invocation"},
                 },
             },
             {
@@ -458,7 +450,9 @@ def test_repair_public_metadata_remaps_composite_boundary_only() -> None:
 
     repaired = _repair_public_node_metadata(current, remapped)
 
-    assert "target-handle" in repaired["nodes"][0]["meta_data"]["unilab"]["input_bindings"]
+    assert (
+        "target-handle" in repaired["nodes"][0]["meta_data"]["unilab"]["input_bindings"]
+    )
     assert repaired["nodes"][1]["meta_data"] == {
         "changed": True,
         "unilab_release": {"source_node_uuid": "source-invocation"},
@@ -486,9 +480,7 @@ def test_repair_public_metadata_remaps_composite_boundary_only() -> None:
             {
                 "meta_data": {
                     "changed": True,
-                    "unilab_release": {
-                        "source_node_uuid": "source-invocation"
-                    },
+                    "unilab_release": {"source_node_uuid": "source-invocation"},
                 }
             },
         ),
@@ -540,18 +532,14 @@ def test_imported_composite_metadata_uses_backend_child_identities() -> None:
                             },
                         }
                     },
-                    "unilab_release": {
-                        "source_node_uuid": "source-invocation"
-                    },
+                    "unilab_release": {"source_node_uuid": "source-invocation"},
                 },
             },
             {
                 "uuid": "target-child",
                 "parent_uuid": "target-invocation",
                 "type": "device_action",
-                "meta_data": {
-                    "unilab_release": {"source_node_uuid": "source-child"}
-                },
+                "meta_data": {"unilab_release": {"source_node_uuid": "source-child"}},
             },
         ],
         "handle_templates": [],
@@ -578,12 +566,14 @@ def test_imported_composite_metadata_uses_backend_child_identities() -> None:
         node for node in remapped["nodes"] if node["uuid"] == "target-invocation"
     )
     composite = invocation["meta_data"]["unilab"]["composite"]
-    assert composite["target_mappings"]["boundary-handle"][0][
-        "workflow_node_uuid"
-    ] == "target-child"
-    assert composite["source_mappings"]["output-handle"][
-        "workflow_node_uuid"
-    ] == "target-child"
+    assert (
+        composite["target_mappings"]["boundary-handle"][0]["workflow_node_uuid"]
+        == "target-child"
+    )
+    assert (
+        composite["source_mappings"]["output-handle"]["workflow_node_uuid"]
+        == "target-child"
+    )
     assert invocation["meta_data"]["unilab_release"] == {
         "release_id": "sha256:release-composite-identities",
         "source_node_uuid": "source-invocation",
@@ -828,9 +818,7 @@ def test_imported_workflow_metadata_uses_backend_node_and_handle_identities() ->
                 "uuid": "target-node",
                 "workflow_node_template_uuid": "target-node-template",
                 "param": {},
-                "meta_data": {
-                    "unilab_release": {"source_node_uuid": "source-node"}
-                },
+                "meta_data": {"unilab_release": {"source_node_uuid": "source-node"}},
             }
         ],
         "handle_templates": [
@@ -917,9 +905,7 @@ def test_imported_workflow_can_preserve_temporary_publication_scaffold() -> None
                 "uuid": "target-node",
                 "workflow_node_template_uuid": "target-node-template",
                 "param": {"required_input": "temporary-publication-value"},
-                "meta_data": {
-                    "unilab_release": {"source_node_uuid": "source-node"}
-                },
+                "meta_data": {"unilab_release": {"source_node_uuid": "source-node"}},
             }
         ],
         "handle_templates": [],
@@ -957,7 +943,9 @@ def test_imported_workflow_can_preserve_temporary_publication_scaffold() -> None
     assert authoring_graph["nodes"][0]["param"] == {}
 
 
-def test_workflow_import_maps_known_domain_identities_before_backend_validation() -> None:
+def test_workflow_import_maps_known_domain_identities_before_backend_validation() -> (
+    None
+):
     release = WorkspaceRelease(
         release_id="sha256:release-preimport",
         source_workspace="/workspace",
@@ -990,9 +978,7 @@ def test_workflow_import_maps_known_domain_identities_before_backend_validation(
                     "resource_template_uuid": "source-resource-template",
                     "resource": {"uuid": "source-material"},
                 },
-                "meta_data": {
-                    "resource_template_uuid": "source-resource-template"
-                },
+                "meta_data": {"resource_template_uuid": "source-resource-template"},
             }
         ],
         "edges": [],
@@ -1001,9 +987,7 @@ def test_workflow_import_maps_known_domain_identities_before_backend_validation(
     payload = _workflow_import_payload(
         graph,
         release=release,
-        workflow_identities={
-            "source-child-workflow": "target-child-workflow"
-        },
+        workflow_identities={"source-child-workflow": "target-child-workflow"},
         material_identities={"source-material": "target-material"},
         source_template_names={},
         resource_template_identities={
@@ -1069,9 +1053,7 @@ def test_workflow_import_uses_published_composite_template_identity() -> None:
         graph,
         release=release,
         workflow_identities={"source-child": "target-child"},
-        workflow_template_identities={
-            "source-child": "target-published-node-template"
-        },
+        workflow_template_identities={"source-child": "target-published-node-template"},
         material_identities={},
         source_template_names={"source-host-template": "host_node"},
         resource_template_identities={},
@@ -1087,13 +1069,14 @@ def test_workflow_import_uses_published_composite_template_identity() -> None:
         "module": "szlab_poly_studio.workflows.material_transfer",
         "symbol": "s_z_lab_标准物料转运",
         "definition_fqid": (
-            "szlab_poly_studio.workflows.material_transfer."
-            "s_z_lab_标准物料转运"
+            "szlab_poly_studio.workflows.material_transfer.s_z_lab_标准物料转运"
         ),
     }
 
 
-def test_backend_workflow_projection_removes_visual_groups_and_promotes_children() -> None:
+def test_backend_workflow_projection_removes_visual_groups_and_promotes_children() -> (
+    None
+):
     release = WorkspaceRelease(
         release_id="sha256:release-group",
         source_workspace="/workspace",
@@ -1170,7 +1153,9 @@ def test_backend_workflow_projection_rejects_semantic_edges_attached_to_group() 
     assert raised.value.code == "release_source_invalid"
 
 
-def test_backend_workflow_projection_clears_nonexistent_material_source_selection() -> None:
+def test_backend_workflow_projection_clears_nonexistent_material_source_selection() -> (
+    None
+):
     graph = {
         "workflow": {"uuid": "source-workflow", "name": "source"},
         "nodes": [
@@ -1205,7 +1190,9 @@ def test_backend_workflow_projection_clears_nonexistent_material_source_selectio
     assert projected["nodes"][1]["param"]["material_uuid"] == "known-material"
 
 
-def test_backend_material_sources_bind_distinct_inventory_and_derived_templates() -> None:
+def test_backend_material_sources_bind_distinct_inventory_and_derived_templates() -> (
+    None
+):
     graph = {
         "workflow": {"uuid": "workflow-local", "name": "source"},
         "nodes": [
@@ -1398,7 +1385,9 @@ def test_backend_material_source_preserves_unbound_selector_without_inventory() 
     }
 
 
-def test_backend_material_source_remaps_explicit_site_when_inventory_is_unbound() -> None:
+def test_backend_material_source_remaps_explicit_site_when_inventory_is_unbound() -> (
+    None
+):
     graph = {
         "workflow": {"uuid": "workflow-local", "name": "source"},
         "nodes": [
@@ -1422,9 +1411,7 @@ def test_backend_material_source_remaps_explicit_site_when_inventory_is_unbound(
                     "uuid": "mount-local",
                     "resource_template_uuid": "mount-template-local",
                 },
-                "sites": [
-                    {"uuid": "site-2", "name": "L1C2", "sort_order": 2}
-                ],
+                "sites": [{"uuid": "site-2", "name": "L1C2", "sort_order": 2}],
             }
         ]
     }
@@ -1590,17 +1577,13 @@ def test_backend_workflow_projection_promotes_material_passthrough_output() -> N
                 "uuid": "pick-node",
                 "workflow_node_template_uuid": "pick-template",
                 "type": "device_action",
-                "meta_data": {
-                    "unilab": {"authoring_source_order": 0}
-                },
+                "meta_data": {"unilab": {"authoring_source_order": 0}},
             },
             {
                 "uuid": "commit-node",
                 "workflow_node_template_uuid": "commit-template",
                 "type": "device_action",
-                "meta_data": {
-                    "unilab": {"authoring_source_order": 2}
-                },
+                "meta_data": {"unilab": {"authoring_source_order": 2}},
             },
         ],
         "edges": [],
@@ -1683,9 +1666,7 @@ def test_workflow_verification_treats_local_ilab_as_backend_device_action() -> N
                 "name": "act",
                 "type": "device_action",
                 "disabled": False,
-                "meta_data": {
-                    "unilab_release": {"source_node_uuid": "source-node"}
-                },
+                "meta_data": {"unilab_release": {"source_node_uuid": "source-node"}},
             }
         ],
         "edges": [],
@@ -1711,9 +1692,7 @@ def test_workflow_import_materializes_bound_workflow_parameter_default() -> None
             "meta_data": {
                 "unilab": {
                     "input_contract": {
-                        "parameters": [
-                            {"name": "target_mass_g", "default": 1.0}
-                        ]
+                        "parameters": [{"name": "target_mass_g", "default": 1.0}]
                     }
                 }
             },
@@ -1735,9 +1714,7 @@ def test_workflow_import_materializes_bound_workflow_parameter_default() -> None
                 "meta_data": {
                     "unilab": {
                         "input_bindings": {
-                            "target-mass-handle": {
-                                "parameter": "target_mass_g"
-                            }
+                            "target-mass-handle": {"parameter": "target_mass_g"}
                         }
                     }
                 },
@@ -1864,9 +1841,7 @@ def test_workflow_import_scaffolds_required_bound_inputs_for_publication() -> No
                 "meta_data": {
                     "unilab": {
                         "input_bindings": {
-                            "target-device-handle": {
-                                "parameter": "target_device"
-                            },
+                            "target-device-handle": {"parameter": "target_device"},
                             "resource-handle": {"parameter": "resource"},
                         }
                     }
@@ -1939,17 +1914,13 @@ def test_workflow_import_scaffolds_composite_inputs_before_identity_remap() -> N
         graph,
         release=release,
         workflow_identities={"source-child": "target-child"},
-        workflow_template_identities={
-            "source-child": "target-published-node-template"
-        },
+        workflow_template_identities={"source-child": "target-published-node-template"},
         material_identities={"source-material": "target-material"},
         source_template_names={},
         resource_template_identities={},
     )
 
-    assert payload["nodes"][0]["param"] == {
-        "resource": {"uuid": "target-material"}
-    }
+    assert payload["nodes"][0]["param"] == {"resource": {"uuid": "target-material"}}
 
 
 def test_local_action_catalog_is_restored_into_backend_sync_definition() -> None:
@@ -2003,6 +1974,34 @@ def test_local_action_catalog_is_restored_into_backend_sync_definition() -> None
     assert [handle["handler_key"] for handle in action["handles"]["input"]] == [
         "resource"
     ]
+
+
+def test_release_definition_preserves_compiled_material_shape() -> None:
+    """WorkspaceRelease 必须把 Local Backend 已编译 Shape 原样交给 Backend。"""
+
+    compiled_shape = {
+        "entry": "models/shape.yml",
+        "format": "unilab.shape/v1",
+        "schema_version": "unilab.shape/v1",
+        "id": "robot-cell",
+        "bundle": "test-lab",
+        "categories": ["robot"],
+        "categoryTokens": [],
+        "parts": [{"type": "box", "style": "body"}],
+    }
+
+    definition = _deployment_template_definition(
+        {
+            "uuid": "device-template",
+            "name": "device.robot",
+            "display_name": "机械臂",
+            "resource_type": "device",
+            "model": {"shape": compiled_shape},
+        },
+        (),
+    )
+
+    assert definition["model"]["shape"] == compiled_shape
 
 
 def test_workspace_host_release_publish_stages_authority_without_manufacturing_edge(

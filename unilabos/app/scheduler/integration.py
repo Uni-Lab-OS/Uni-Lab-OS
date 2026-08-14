@@ -209,6 +209,7 @@ def setup_edge_inventory(
     resource_graph_source_id: str = "",
     material_shapes: Any = None,
     material_model_catalog: Any = None,
+    material_shapes_by_template: Any = None,
 ) -> Any:
     """启动主机库存服务并可选建立资源图投影（Resource Graph Projection）。
 
@@ -216,7 +217,8 @@ def setup_edge_inventory(
     ``lab_id`` 是库存事件身份；``ws_client`` 和 ``sync_sender`` 分别接入主机链路
     与发件箱（Outbox）；资源树、注册表快照和来源身份共同提供资源图投影；
     ``material_shapes`` 是工作区包资产编译后的静态公共投影；
-    ``material_model_catalog`` 是只通过 OS 公开 HTTP 路由读取的同代模型目录。
+    ``material_model_catalog`` 是只通过 OS 公开 HTTP 路由读取的同代模型目录；
+    ``material_shapes_by_template`` 保留同代编译外形到模板业务身份的精确绑定。
     返回：进程内唯一库存服务。异常：路径切换、外形形状、模型目录换代、
     投影参数不完整或资源图不安全时关闭式失败；
     从节点不调用本函数，因此不会打开此数据库。
@@ -306,6 +308,7 @@ def setup_edge_inventory(
                 if _material_model_catalog is not None
                 else None
             ),
+            material_shapes_by_template=material_shapes_by_template,
         )
         _inventory_resource_tree_set = resource_tree_set
 

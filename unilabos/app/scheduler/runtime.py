@@ -56,6 +56,7 @@ def start_embedded_scheduler_runtime(
         resource_graph_source_id=context.graph_source_id,
         material_shapes=context.material_shapes,
         material_model_catalog=context.material_model_catalog,
+        material_shapes_by_template=context.material_shapes_by_template,
     )
     print_status(
         f"本地调试物料服务已启用 (SQLite WAL: {inventory_db})",
