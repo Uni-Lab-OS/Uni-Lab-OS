@@ -113,6 +113,7 @@ def test_project_device_catalog_joins_resource_online_and_registry_facts() -> No
             {
                 "id": "pump-1",
                 "materialUuid": "30000000-0000-4000-8000-000000000001",
+                "resourceTemplateUuid": "20000000-0000-4000-8000-000000000001",
                 "deviceTypeId": "community.lab.pump",
                 "deviceKey": "/devices/pump-1/pump-1",
                 "namespace": "/devices/pump-1",
@@ -208,4 +209,5 @@ def test_device_route_reads_stable_material_identity_from_inventory(
 
     assert resolved_ids == ["pump-1"]
     assert response.data["items"][0]["materialUuid"] == stable_uuid
+    assert response.data["items"][0]["resourceTemplateUuid"] == "template-1"
     assert response.data["items"][0]["materialUuid"] != runtime_uuid

@@ -67,10 +67,16 @@ def project_device_catalog(
             if isinstance(material_identity, Mapping)
             else ""
         )
+        resource_template_uuid = (
+            str(material_identity.get("resource_template_uuid") or "")
+            if isinstance(material_identity, Mapping)
+            else ""
+        )
         items.append(
             {
                 "id": device_id,
                 "materialUuid": material_uuid,
+                "resourceTemplateUuid": resource_template_uuid,
                 "deviceTypeId": device_type_id,
                 "deviceKey": str(
                     online_fact.get("device_key")
