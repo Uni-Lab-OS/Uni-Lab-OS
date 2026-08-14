@@ -1056,6 +1056,7 @@ def main():
             report = run_template_sync_command(
                 args_dict,
                 backend_address=HTTPConfig.remote_addr,
+                workspace_runtime=workspace_registry_runtime,
             )
         except TemplateSyncError as exc:
             print_status(f"模板同步失败: {exc}", "error")

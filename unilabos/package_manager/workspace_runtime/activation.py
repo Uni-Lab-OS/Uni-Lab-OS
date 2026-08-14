@@ -42,7 +42,7 @@ from .discovery import (
 )
 from .package_source import (
     PackageCatalogSource,
-    compile_generation_material_shapes,
+    compile_material_shape_generation,
     selected_package_import_roots,
 )
 
@@ -129,6 +129,10 @@ class WorkspaceRegistryRuntime:
     startup_plan: WorkspaceStartupPlan | None = None
     package_catalog_sources: tuple[PackageCatalogSource, ...] = ()
     material_shapes: tuple[dict[str, object], ...] = ()
+    # ``material_shapes_by_template`` 保留云端模板同步所需的同代精确归属。
+    material_shapes_by_template: Mapping[str, dict[str, object]] = field(
+        default_factory=dict
+    )
     dependency_revision: str = ""
     _published: bool = field(default=False, init=False, repr=False, compare=False)
     _import_path_active: bool = field(
@@ -139,12 +143,12 @@ class WorkspaceRegistryRuntime:
     )
 
     def __post_init__(self) -> None:
-        """补齐只含主包的遗留候选构造形状。
+        """补齐只含主包的遗留候选并冻结模板外形归属。
 
-        参数：无；读取 ``source``、``catalog`` 和 ``package_catalog_sources``。
-        返回：无；正式完整候选保持原配对，旧测试或 Adapter 省略配对时只补入
-        已有主包来源和目录（PackageCatalog），绝不发现外部依赖。
-        异常：主包来源或目录类型无效时由 ``PackageCatalogSource`` 抛出
+        参数：无；读取 ``source``、``catalog``、``package_catalog_sources`` 和
+        ``material_shapes_by_template``。返回：无；正式完整候选保持原配对，旧
+        Adapter 省略配对时只补入已有主包来源和目录（PackageCatalog），并将模板
+        外形根映射冻结。异常：主包来源、目录或外形绑定类型无效时抛出
         ``TypeError``；不会根据 ``sys.path`` 猜测缺失来源。
         """
 
@@ -154,6 +158,24 @@ class WorkspaceRegistryRuntime:
                 "package_catalog_sources",
                 (PackageCatalogSource(source=self.source, catalog=self.catalog),),
             )
+        if not isinstance(self.material_shapes_by_template, Mapping):
+            raise TypeError("模板物料外形绑定必须是对象映射")
+        # ``shape_bindings`` 与构造者容器隔离并按模板 FQID 固定顺序；运行代公开
+        # 后调用方不能增删模板归属，原始构造者后续修改也不会产生跨代漂移。
+        shape_bindings: dict[str, dict[str, object]] = {}
+        for template_fqid, shape in self.material_shapes_by_template.items():
+            if (
+                not isinstance(template_fqid, str)
+                or not template_fqid.strip()
+                or not isinstance(shape, Mapping)
+            ):
+                raise TypeError("模板物料外形绑定结构无效")
+            shape_bindings[template_fqid] = copy.deepcopy(dict(shape))
+        object.__setattr__(
+            self,
+            "material_shapes_by_template",
+            MappingProxyType(dict(sorted(shape_bindings.items()))),
+        )
 
     def publish(self, registry: Any) -> None:
         """先完整发布注册表快照，再开放作者模块导入资格。
@@ -298,8 +320,11 @@ def prepare_workspace_registry_runtime(
         source=workspace_source,
         catalog=catalog,
     )
-    # ``material_shapes`` 与设备、资源、显式工作流和资产消费同一完整候选代。
-    material_shapes = compile_generation_material_shapes(package_catalog_sources)
+    # ``material_shape_generation`` 与设备、资源、显式工作流和资产消费同一完整
+    # 候选代，同时保留公共查询清单和资源模板（ResourceTemplate）精确归属。
+    material_shape_generation = compile_material_shape_generation(
+        package_catalog_sources
+    )
     # ``arguments`` 只接收不会开启第二套扫描权威的稳定路径事实。
     arguments["_workspace_root"] = str(workspace_source.root)
     arguments["graph"] = str(graph_path)
@@ -313,7 +338,8 @@ def prepare_workspace_registry_runtime(
         activation_plan=activation_plan,
         workflow_source_plan=workflow_source_plan,
         package_catalog_sources=package_catalog_sources,
-        material_shapes=material_shapes,
+        material_shapes=material_shape_generation.public_shapes,
+        material_shapes_by_template=material_shape_generation.shapes_by_template,
         dependency_revision=_dependency_files_revision(workspace_source),
     )
 

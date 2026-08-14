@@ -250,7 +250,12 @@ def _apply_argument_patch(arguments: dict[str, Any], raw_patch: Any) -> None:
 
 
 def _encode_generation(prepared: Any) -> dict[str, Any]:
-    """把完整候选转换为不携带实现对象的 JSON wire value。"""
+    """把完整候选转换为不携带实现对象的 JSON wire value。
+
+    参数：``prepared`` 是隔离 Worker 已完成编译和稳定输入复核的产品候选。
+    返回：可由父进程严格解码的 JSON 对象，包含公共物料外形及其模板归属。
+    异常：候选或启动计划类型无效时抛出 ``TypeError``，不返回部分协议。
+    """
 
     candidate = prepared.candidate
     startup_plan = candidate.startup_plan
@@ -272,6 +277,10 @@ def _encode_generation(prepared: Any) -> dict[str, Any]:
                 for item in candidate.package_catalog_sources
             ],
             "material_shapes": list(candidate.material_shapes),
+            "material_shapes_by_template": {
+                template_fqid: dict(shape)
+                for template_fqid, shape in candidate.material_shapes_by_template.items()
+            },
             "dependency_revision": candidate.dependency_revision,
             "startup": {
                 "project_file": _encode_bytes(startup_plan.project_file_bytes),
@@ -294,7 +303,12 @@ def _encode_generation(prepared: Any) -> dict[str, Any]:
 def _decode_generation(
     payload: dict[str, Any],
 ) -> tuple[WorkspaceRegistryRuntime, WorkspaceInputGeneration]:
-    """验证并复原 Worker 返回的完整静态候选。"""
+    """验证并复原 Worker 返回的完整静态候选。
+
+    参数：``payload`` 是 Authoring Worker 返回的可疑 JSON 对象。返回：父进程
+    重建的工作区注册表运行时及对应稳定输入代。异常：字段缺失、类型错误、目录
+    摘要不一致或模板外形绑定无效时抛出 ``AuthoringWorkerError``，候选不发布。
+    """
 
     try:
         raw_candidate = payload["candidate"]
@@ -365,6 +379,16 @@ def _decode_generation(
             not isinstance(item, dict) for item in material_shapes
         ):
             raise ValueError("候选物料外形必须是对象列表")
+        # ``material_shapes_by_template`` 是模板同步使用的精确归属；父进程只接受
+        # 非空模板 FQID 到严格 JSON 对象的一对一映射。
+        material_shapes_by_template = raw_candidate["material_shapes_by_template"]
+        if not isinstance(material_shapes_by_template, dict) or any(
+            not isinstance(template_fqid, str)
+            or not template_fqid.strip()
+            or not isinstance(shape, dict)
+            for template_fqid, shape in material_shapes_by_template.items()
+        ):
+            raise ValueError("候选模板物料外形绑定必须是对象映射")
         dependency_revision = raw_candidate["dependency_revision"]
         if not isinstance(dependency_revision, str):
             raise ValueError("候选依赖修订无效")
@@ -379,6 +403,10 @@ def _decode_generation(
             startup_plan=startup_plan,
             package_catalog_sources=packages,
             material_shapes=tuple(dict(item) for item in material_shapes),
+            material_shapes_by_template={
+                template_fqid: dict(shape)
+                for template_fqid, shape in material_shapes_by_template.items()
+            },
             dependency_revision=dependency_revision,
         )
         input_generation = WorkspaceInputGeneration(
