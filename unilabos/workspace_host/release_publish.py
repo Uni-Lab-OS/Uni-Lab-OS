@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,10 +153,15 @@ class LocalBackendReleaseBuilder:
         self.timeout = timeout
 
     def build(self) -> WorkspaceRelease:
-        templates = tuple(
+        templates = list(
             self._get(f"/resource-templates/{item['uuid']}")
             for item in self._paged("/resource-templates")
         )
+        _embed_release_material_shapes(
+            templates,
+            _compile_workspace_material_shapes(self.source_workspace),
+        )
+        frozen_templates = tuple(templates)
         material_graph = self._get("/materials/graph")
         workflows = tuple(
             {
@@ -170,7 +176,7 @@ class LocalBackendReleaseBuilder:
         )
         detached = {
             "sourceWorkspace": self.source_workspace,
-            "templates": templates,
+            "templates": frozen_templates,
             "materialGraph": material_graph,
             "workflows": workflows,
             "workflowNodeTemplates": workflow_node_templates,
@@ -186,7 +192,7 @@ class LocalBackendReleaseBuilder:
         return WorkspaceRelease(
             release_id=f"sha256:{digest}",
             source_workspace=self.source_workspace,
-            templates=tuple(deepcopy(list(templates))),
+            templates=tuple(deepcopy(list(frozen_templates))),
             material_graph=deepcopy(material_graph),
             workflows=tuple(deepcopy(list(workflows))),
             workflow_node_templates=tuple(
@@ -215,6 +221,59 @@ class LocalBackendReleaseBuilder:
         )
         return _release_response(response, f"读取 Local Backend {path}")
 
+
+def _compile_workspace_material_shapes(
+    source_workspace: str,
+) -> Mapping[str, Mapping[str, Any]]:
+    """Compile exact template-to-Shape bindings from the editable package."""
+
+    from unilabos.package_manager import WorkspaceSource, compile_package_source
+    from unilabos.package_manager.workspace_runtime.package_source import (
+        PackageCatalogSource,
+        compile_material_shape_generation,
+    )
+
+    source = WorkspaceSource(Path(source_workspace))
+    catalog = compile_package_source(source)
+    generation = compile_material_shape_generation(
+        (PackageCatalogSource(source=source, catalog=catalog),)
+    )
+    return generation.shapes_by_template
+
+
+def _embed_release_material_shapes(
+    templates: list[dict[str, Any]],
+    shapes_by_template: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Embed compiled Shapes into detached Local Backend template DTOs."""
+
+    templates_by_name = {
+        str(template.get("name") or ""): template for template in templates
+    }
+    missing = sorted(set(shapes_by_template) - set(templates_by_name))
+    if missing:
+        raise WorkspaceHostError(
+            "release_source_invalid",
+            "Workspace Shape 找不到对应资源模板",
+            details={"templates": missing},
+        )
+    for template_name, raw_shape in shapes_by_template.items():
+        shape = deepcopy(dict(raw_shape))
+        if (
+            shape.get("schema_version") != "unilab.shape/v1"
+            or not isinstance(shape.get("parts"), list)
+            or not shape["parts"]
+        ):
+            raise WorkspaceHostError(
+                "release_source_invalid",
+                f"Workspace Shape 无效：{template_name}",
+            )
+        template = templates_by_name[template_name]
+        model = deepcopy(_mapping_or_empty(template.get("model")))
+        binding = deepcopy(_mapping_or_empty(model.get("shape")))
+        binding.update(shape)
+        model["shape"] = binding
+        template["model"] = model
 
 class ExistingBackendDeploymentTarget:
     """First-stage Adapter for a dedicated/clean existing Go Backend."""
@@ -663,6 +722,7 @@ class ExistingBackendDeploymentTarget:
             "handle_templates": [],
         }
         try:
+            temporary_root_identities: dict[str, str] = {}
             for root in sorted(roots, key=lambda item: str(item.get("uuid") or "")):
                 source_template = source_templates.get(
                     str(root.get("workflow_node_template_uuid") or "")
@@ -748,6 +808,16 @@ class ExistingBackendDeploymentTarget:
                         material_identities=material_identities,
                         parameter_name=name,
                     )
+                # Composite invocation UUIDs are globally unique in Backend.
+                # The source UUID may already belong to an imported workflow,
+                # so the temporary expansion must use an isolated identity.
+                temporary_root_uuid = str(
+                    uuid.uuid5(
+                        uuid.UUID(temporary_uuid),
+                        f"unilab-release-prepare:{root_uuid}",
+                    )
+                )
+                temporary_root_identities[temporary_root_uuid] = root_uuid
                 temporary_graph = self._request(
                     "POST",
                     f"/workflows/{temporary_uuid}/composite-invocations",
@@ -762,14 +832,17 @@ class ExistingBackendDeploymentTarget:
                         "contract_uuid": _required_identity(
                             published, "published workflow contract"
                         ),
-                        "invocation_uuid": root_uuid,
+                        "invocation_uuid": temporary_root_uuid,
                         "device_bindings": device_bindings,
                         "pose": deepcopy(_mapping_or_empty(root.get("pose"))),
                         "param": param,
                     },
                 )
             return _merge_backend_composite_expansions(
-                graph, temporary_graph, roots=roots
+                graph,
+                temporary_graph,
+                roots=roots,
+                backend_root_identities=temporary_root_identities,
             )
         finally:
             self._request("DELETE", f"/workflows/{temporary_uuid}")
@@ -1279,6 +1352,7 @@ def _merge_backend_composite_expansions(
     backend_graph: Mapping[str, Any],
     *,
     roots: Sequence[Mapping[str, Any]],
+    backend_root_identities: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Replace Local composite snapshots with Backend-native expansions."""
 
@@ -1303,9 +1377,16 @@ def _merge_backend_composite_expansions(
             int(order) if isinstance(order, int) else -1,
         )
 
-    backend_to_source: dict[str, str] = {root_uuid: root_uuid for root_uuid in root_uuids}
+    backend_to_source: dict[str, str] = dict(
+        backend_root_identities
+        or {root_uuid: root_uuid for root_uuid in root_uuids}
+    )
+    if set(backend_to_source.values()) != root_uuids:
+        raise WorkspaceHostError(
+            "release_apply_failed", "Backend 组合根节点身份无法对应 Local"
+        )
     source_private: set[str] = set()
-    for root_uuid in sorted(root_uuids):
+    for backend_root_uuid, root_uuid in sorted(backend_to_source.items()):
         source_children = sorted(
             (
                 node
@@ -1318,7 +1399,7 @@ def _merge_backend_composite_expansions(
             (
                 node
                 for node in backend_nodes.values()
-                if str(node.get("parent_uuid") or "") == root_uuid
+                if str(node.get("parent_uuid") or "") == backend_root_uuid
             ),
             key=child_key,
         )

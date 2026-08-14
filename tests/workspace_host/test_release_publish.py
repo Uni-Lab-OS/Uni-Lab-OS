@@ -22,6 +22,8 @@ from unilabos.workspace_host.release_publish import (
     WorkspaceRelease,
     WorkspaceReleasePublisher,
     _deployment_template_definition,
+    _embed_release_material_shapes,
+    _merge_backend_composite_expansions,
     _backend_workflow_projection,
     _prepare_deployment_templates,
     _repair_public_node_metadata,
@@ -43,6 +45,75 @@ def test_release_target_inspection_returns_service_origin() -> None:
     inspection = target.inspect()
 
     assert inspection["targetAddress"] == "http://127.0.0.1:8080"
+
+
+def test_release_embeds_compiled_material_shape_into_template_model() -> None:
+    templates = [{
+        "name": "community.example.beaker",
+        "model": {"shape": {"format": "unilab.shape/v1", "entry": "shape.yml"}},
+    }]
+    shape = {
+        "schema_version": "unilab.shape/v1",
+        "id": "beaker",
+        "bundle": "example",
+        "categories": ["beaker"],
+        "parts": [{"type": "lathe"}],
+    }
+
+    _embed_release_material_shapes(
+        templates,
+        {"community.example.beaker": shape},
+    )
+
+    assert templates[0]["model"]["shape"] == {
+        "format": "unilab.shape/v1",
+        "entry": "shape.yml",
+        **shape,
+    }
+
+
+def test_composite_expansion_maps_temporary_root_identity_back_to_source() -> None:
+    source = {
+        "workflow": {"uuid": "source-workflow"},
+        "nodes": [
+            {"uuid": "source-root", "type": "workflow", "name": "child"},
+            {
+                "uuid": "source-private",
+                "parent_uuid": "source-root",
+                "type": "device_action",
+                "name": "pick",
+            },
+        ],
+        "edges": [],
+        "node_templates": [],
+        "handle_templates": [],
+    }
+    backend = {
+        "workflow": {"uuid": "temporary-workflow"},
+        "nodes": [
+            {"uuid": "temporary-root", "type": "workflow", "name": "child"},
+            {
+                "uuid": "temporary-private",
+                "parent_uuid": "temporary-root",
+                "type": "device_action",
+                "name": "pick",
+            },
+        ],
+        "edges": [],
+        "node_templates": [],
+        "handle_templates": [],
+    }
+
+    merged = _merge_backend_composite_expansions(
+        source,
+        backend,
+        roots=(source["nodes"][0],),
+        backend_root_identities={"temporary-root": "source-root"},
+    )
+
+    nodes = {node["uuid"]: node for node in merged["nodes"]}
+    assert set(nodes) == {"source-root", "source-private"}
+    assert nodes["source-private"]["parent_uuid"] == "source-root"
 
 
 def _release() -> WorkspaceRelease:
