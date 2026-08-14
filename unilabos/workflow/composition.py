@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -299,6 +299,7 @@ def compose_local_workflow_template_runtime(
     inventory_store: Any,
     registry: Any,
     scheduler: Optional[Any] = None,
+    material_shapes_by_template: Optional[Mapping[str, Mapping[str, Any]]] = None,
     editable_package_roots: Iterable[str | Path] = (),
     editable_source_discovery_plan: Optional[EditableSourceDiscoveryPlan] = None,
     start_source_monitor: bool = True,
@@ -309,6 +310,7 @@ def compose_local_workflow_template_runtime(
     ``inventory_store`` 是同步并持有资源模板身份的 ``inventory.db`` 权威；
     ``registry`` 是原始注册表（Registry）或不可变注册表快照（Registry Snapshot）；
     ``scheduler`` 是仅在本地调度模式装配的既有调度器（EdgeScheduler）；
+    ``material_shapes_by_template`` 是与注册表快照同代的完整 2.5D 外形绑定；
     ``editable_package_roots`` 是本次进程唯一授权的工作流源码（Workflow
     Source）目录 tuple；``editable_source_discovery_plan`` 是与注册表快照
     （Registry Snapshot）同代的预编译来源计划，存在时禁止再读
@@ -351,6 +353,7 @@ def compose_local_workflow_template_runtime(
         resolve_resource_template_identity = synchronize_local_template_identities(
             inventory_store=inventory_store,
             registry_snapshot=registry_snapshot,
+            material_shapes_by_template=material_shapes_by_template,
         )
 
         def resolve_material_identity(

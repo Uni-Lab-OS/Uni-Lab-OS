@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Optional, Tuple
 
@@ -38,6 +39,7 @@ _inventory_resource_tree_set: Optional[Any] = None
 _outbox_worker: Optional[Any] = None
 # 工作区物料外形是包资产编译结果，不属于库存数据库私有事实。
 _material_shapes: tuple[dict[str, Any], ...] = ()
+_material_shapes_by_template: dict[str, dict[str, Any]] = {}
 # 工作区模型目录仅授权 OS 公开 HTTP 路由，不经过 local_bridge。
 _material_model_catalog: Optional[Any] = None
 
@@ -92,6 +94,12 @@ def get_material_shapes() -> list[dict[str, Any]]:
     """
 
     return deepcopy(list(_material_shapes))
+
+
+def get_material_shapes_by_template() -> dict[str, dict[str, Any]]:
+    """返回当前启动代际中完整 2.5D 外形到模板业务身份的精确绑定。"""
+
+    return deepcopy(_material_shapes_by_template)
 
 
 def get_material_model_catalog() -> Optional[Any]:
@@ -225,7 +233,8 @@ def setup_edge_inventory(
     """
 
     global _inventory, _inventory_resource_tree_set
-    global _material_model_catalog, _material_shapes, _outbox_worker
+    global _material_model_catalog, _material_shapes, _material_shapes_by_template
+    global _outbox_worker
     path = str(inventory_db_path or "").strip()
     if not path:
         raise ValueError("inventory_db_path is required")
@@ -239,6 +248,24 @@ def setup_edge_inventory(
         if _inventory is not None and _material_shapes != compiled_shapes:
             raise RuntimeError("库存服务启动后不得切换工作区物料外形代际")
         _material_shapes = compiled_shapes
+    if material_shapes_by_template is not None:
+        if not isinstance(material_shapes_by_template, Mapping) or any(
+            not isinstance(template_name, str)
+            or not template_name.strip()
+            or not isinstance(shape, Mapping)
+            for template_name, shape in material_shapes_by_template.items()
+        ):
+            raise TypeError("material_shapes_by_template 必须是模板身份到外形对象的映射")
+        compiled_shape_bindings = {
+            template_name: deepcopy(dict(shape))
+            for template_name, shape in material_shapes_by_template.items()
+        }
+        if (
+            _inventory is not None
+            and _material_shapes_by_template != compiled_shape_bindings
+        ):
+            raise RuntimeError("库存服务启动后不得切换模板物料外形绑定代际")
+        _material_shapes_by_template = compiled_shape_bindings
     if material_model_catalog is not None:
         models_by_template = getattr(
             material_model_catalog,
@@ -492,7 +519,8 @@ def shutdown_edge_services() -> None:
     """
 
     global _scheduler, _backend, _inventory, _inventory_resource_tree_set
-    global _material_model_catalog, _material_shapes, _outbox_worker
+    global _material_model_catalog, _material_shapes, _material_shapes_by_template
+    global _outbox_worker
     from unilabos.app.scheduler.host_network import shutdown_network_services
 
     # 先拒绝新 Slave/物料请求，再关闭请求会触达的调度与存储组件。
@@ -516,6 +544,7 @@ def shutdown_edge_services() -> None:
     _inventory_resource_tree_set = None
     _material_model_catalog = None
     _material_shapes = ()
+    _material_shapes_by_template = {}
     _outbox_worker = None
 
 
@@ -533,6 +562,7 @@ __all__ = [
     "get_inventory_resource_tree_set",
     "get_material_model_catalog",
     "get_material_shapes",
+    "get_material_shapes_by_template",
     "make_http_snapshot_sender",
     "make_http_sync_sender",
     "report_http_inventory_command_result",
