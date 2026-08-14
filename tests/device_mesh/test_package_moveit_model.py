@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -10,11 +11,13 @@ import pytest
 
 from unilabos.device_mesh.package_moveit_model import (
     collect_package_joint_state_owners,
+    create_package_moveit_client,
     get_package_render_mesh,
     get_package_render_model,
     get_ros_model_type,
     load_package_moveit_model,
     merge_package_moveit_parameters,
+    package_moveit_client_spec,
 )
 
 _DIGEST = "a" * 64
@@ -274,3 +277,59 @@ def test_package_model_parameters_merge_into_one_launch_owner(monkeypatch) -> No
         "ros__parameters"
     ]
     assert "robot_arm" in kinematics
+
+
+def test_package_model_exposes_exact_moveit_client_spec(monkeypatch) -> None:
+    """Device 驱动创建客户端时必须复用 Bundle 的 group/chain/joint 身份。"""
+
+    provider = _provider_module()
+    monkeypatch.setitem(sys.modules, provider.__name__, provider)
+    bundle = load_package_moveit_model(
+        {
+            "type": "package_moveit",
+            "provider": "test_moveit_provider:build_moveit_model",
+            "source_digest": _DIGEST,
+        },
+        {"id": "robot", "config": {}},
+    )
+    bundle = replace(
+        bundle,
+        srdf=(
+            "<robot name='test'><group name='robot_arm'>"
+            "<chain base_link='robot_base' tip_link='robot_tip'/>"
+            "</group></robot>"
+        ),
+    )
+
+    spec = package_moveit_client_spec(bundle)
+
+    assert spec.group_name == "robot_arm"
+    assert spec.base_link_name == "robot_base"
+    assert spec.end_effector_name == "robot_tip"
+    assert spec.joint_names == ("robot_joint_1",)
+
+    captured = {}
+
+    def client_factory(**kwargs):
+        captured.update(kwargs)
+        return "client"
+
+    ros_node = SimpleNamespace(callback_group="device-callback-group")
+    assert (
+        create_package_moveit_client(
+            ros_node,
+            bundle,
+            client_factory=client_factory,
+        )
+        == "client"
+    )
+    assert captured == {
+        "node": ros_node,
+        "joint_names": ["robot_joint_1"],
+        "base_link_name": "robot_base",
+        "end_effector_name": "robot_tip",
+        "group_name": "robot_arm",
+        "callback_group": "device-callback-group",
+        "use_move_group_action": True,
+        "ignore_new_calls_while_executing": True,
+    }

@@ -1505,6 +1505,7 @@ def main():
                 [n.res_content for n in args_dict["resources_config"].all_nodes],  # type: ignore  # FIXME
                 enable_rviz=motion_plan.enable_rviz,
                 required_moveit_device_ids=motion_plan.moveit_device_ids,
+                simulated_moveit_device_ids=motion_plan.simulated_moveit_device_ids,
             )
             # 先准备并校验 ROS/MoveIt，再启动任何设备；必需的运动运行时缺失时
             # 关闭失败，不能把它降级成“跳过可视化”。

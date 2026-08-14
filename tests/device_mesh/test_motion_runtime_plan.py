@@ -29,6 +29,7 @@ def test_moveit_motion_runtime_does_not_depend_on_visual_mode() -> None:
     rviz = plan_motion_runtime(_robot("moveit_sim"), visual="rviz")
 
     assert disabled.moveit_device_ids == ("robot",)
+    assert disabled.simulated_moveit_device_ids == ("robot",)
     assert web.moveit_device_ids == disabled.moveit_device_ids
     assert rviz.moveit_device_ids == disabled.moveit_device_ids
     assert disabled.motion_runtime_required is True
@@ -47,6 +48,7 @@ def test_plc_robot_does_not_start_moveit_merely_for_rviz() -> None:
 
     assert plan.motion_runtime_required is False
     assert plan.moveit_device_ids == ()
+    assert plan.simulated_moveit_device_ids == ()
     assert plan.visualization_enabled is True
     assert plan.enable_rviz is True
 
@@ -70,6 +72,7 @@ def test_legacy_moveit_class_remains_headless_compatible() -> None:
     plan = plan_motion_runtime(robot, visual="disable")
 
     assert plan.moveit_device_ids == ("robot",)
+    assert plan.simulated_moveit_device_ids == ()
     assert plan.motion_runtime_required is True
     assert plan.enable_rviz is False
 
@@ -81,3 +84,18 @@ def test_non_device_nodes_never_request_motion_runtime() -> None:
     resource["robot"]["type"] = "resource"
 
     assert plan_motion_runtime(resource, visual="disable").moveit_device_ids == ()
+
+
+def test_nested_moveit_simulation_mode_selects_builtin_simulation_candidate() -> None:
+    """显式 moveit + simulation 与 moveit_sim 使用同一仿真语义。"""
+
+    robot = _robot("moveit")
+    robot["robot"]["config"]["robot_execution"] = {
+        "backend": "moveit",
+        "mode": "simulation",
+    }
+
+    plan = plan_motion_runtime(robot, visual="web")
+
+    assert plan.moveit_device_ids == ("robot",)
+    assert plan.simulated_moveit_device_ids == ("robot",)

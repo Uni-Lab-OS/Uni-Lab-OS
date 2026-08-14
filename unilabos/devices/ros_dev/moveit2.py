@@ -100,6 +100,16 @@ class MoveIt2:
         self._node = node
         self._callback_group = callback_group
 
+        # 这些字段会被 /joint_states 回调读取。ROS executor 可能在
+        # create_subscription 返回前就投递首帧，因此必须先完成初始化。
+        self.__joint_names = joint_names
+        self.__base_link_name = base_link_name
+        self.__end_effector_name = end_effector_name
+        self.__group_name = group_name
+        self.__joint_state_mutex = threading.Lock()
+        self.__joint_state = None
+        self.__new_joint_state_available = False
+
         # Check for deprecated parameters
         if execute_via_moveit:
             self._node.get_logger().warn(
@@ -270,9 +280,6 @@ class MoveIt2:
             String, "/trajectory_execution_event", 1
         )
 
-        self.__joint_state_mutex = threading.Lock()
-        self.__joint_state = None
-        self.__new_joint_state_available = False
         self.__move_action_goal = self.__init_move_action_goal(
             frame_id=base_link_name,
             group_name=group_name,
@@ -286,12 +293,6 @@ class MoveIt2:
 
         # Flag that determines whether a new goal can be sent while the previous one is being executed
         self.__ignore_new_calls_while_executing = ignore_new_calls_while_executing
-
-        # Store additional variables for later use
-        self.__joint_names = joint_names
-        self.__base_link_name = base_link_name
-        self.__end_effector_name = end_effector_name
-        self.__group_name = group_name
 
         # Internal states that monitor the current motion requests and execution
         self.__is_motion_requested = False

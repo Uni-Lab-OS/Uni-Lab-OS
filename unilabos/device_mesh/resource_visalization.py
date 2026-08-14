@@ -1,6 +1,8 @@
+import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import weakref
 from pathlib import Path
@@ -9,6 +11,8 @@ import xacro
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription, LaunchService
+from launch.actions import ExecuteProcess, RegisterEventHandler, Shutdown
+from launch.event_handlers import OnProcessExit
 from launch_param_builder import load_yaml
 from launch_ros.actions import Node as nd
 from launch_ros.parameter_descriptions import ParameterFile
@@ -21,6 +25,86 @@ from unilabos.device_mesh.package_moveit_model import (
     merge_package_moveit_parameters,
 )
 from unilabos.registry.registry import lab_registry
+
+
+def controller_spawn_order(controller_names) -> tuple[str, ...]:
+    """Return the deterministic ros2_control activation order.
+
+    The state broadcaster owns the first activation slot.  Motion controllers
+    follow in the exact model-declared order, with duplicates removed.  Keeping
+    activation serialized also makes failure ownership deterministic and avoids
+    overlapping ``switch_controller`` requests during startup.
+    """
+
+    ordered = ["joint_state_broadcaster", *controller_names]
+    return tuple(dict.fromkeys(str(name) for name in ordered if str(name)))
+
+
+def should_use_builtin_simulation_controller(
+    *,
+    platform_name: str,
+    moveit_device_ids: tuple[str, ...],
+    simulated_moveit_device_ids: tuple[str, ...],
+) -> bool:
+    """仅为 macOS 上的纯仿真 MoveIt 图选择内置轨迹 Action 后端。
+
+    ros2_control 2.51 的 ControllerManager 在 libc++ 上激活控制器时会把未持锁的
+    ``unique_lock`` 交给 ``condition_variable::wait_for`` 并终止进程。该兼容
+    后端只替换无硬件 simulation 的控制器传输；Live、混合图和非 macOS 平台仍
+    使用标准 ros2_control。
+    """
+
+    moveit = tuple(dict.fromkeys(str(value) for value in moveit_device_ids))
+    simulated = set(str(value) for value in simulated_moveit_device_ids)
+    return bool(moveit) and platform_name == "darwin" and set(moveit) == simulated
+
+
+def simulation_controller_specs(moveit_controllers: dict) -> tuple[dict, ...]:
+    """从 MoveItSimpleControllerManager 配置派生仿真 Action 合同。"""
+
+    manager = moveit_controllers.get("moveit_simple_controller_manager")
+    if not isinstance(manager, dict):
+        raise TypeError("MoveIt 仿真缺少 moveit_simple_controller_manager")
+    specs: list[dict] = []
+    for raw_name in manager.get("controller_names", ()):
+        name = str(raw_name).strip().strip("/")
+        config = manager.get(raw_name)
+        if not name or not isinstance(config, dict):
+            raise ValueError("MoveIt 仿真 controller 声明无效")
+        if str(config.get("type") or "") != "FollowJointTrajectory":
+            raise ValueError(f"MoveIt 仿真不支持 controller 类型: {name}")
+        action_ns = str(config.get("action_ns") or "").strip().strip("/")
+        joints = [str(value).strip() for value in config.get("joints", ())]
+        if not action_ns or not joints or any(not value for value in joints):
+            raise ValueError(f"MoveIt 仿真 controller 缺少 Action 或关节: {name}")
+        specs.append(
+            {
+                "name": name,
+                "action": f"/{name}/{action_ns}",
+                "joints": joints,
+            }
+        )
+    if not specs:
+        raise ValueError("MoveIt 仿真没有可执行 controller")
+    return tuple(specs)
+
+
+def _start_next_controller_on_success(next_spawner, controller_name: str):
+    """Create an OnProcessExit callback that fails the MoveIt launch closed."""
+
+    def _on_exit(event, _context):
+        if event.returncode == 0:
+            return [next_spawner]
+        return [
+            Shutdown(
+                reason=(
+                    "ros2_control controller activation failed before "
+                    f"{controller_name} (exit={event.returncode})"
+                )
+            )
+        ]
+
+    return _on_exit
 
 
 def get_pattern_matches(folder, pattern):
@@ -50,6 +134,7 @@ class ResourceVisualization:
         resource: dict,
         enable_rviz: bool = True,
         required_moveit_device_ids: tuple[str, ...] = (),
+        simulated_moveit_device_ids: tuple[str, ...] = (),
     ):
         """初始化资源 ROS Launch 组合器。
         
@@ -79,6 +164,7 @@ class ResourceVisualization:
         self.mesh_path = Path(__file__).parent.absolute()
         self.enable_rviz = enable_rviz
         self.required_moveit_device_ids = tuple(required_moveit_device_ids)
+        self.simulated_moveit_device_ids = tuple(simulated_moveit_device_ids)
         self.runtime_dir = Path(tempfile.mkdtemp(prefix="unilab-resource-runtime-"))
         self._runtime_finalizer = weakref.finalize(
             self,
@@ -371,39 +457,94 @@ class ResourceVisualization:
         if self.moveit_nodes:
 
             controllers = []
-            ros2_controllers = ParameterFile(str(controllers_path), allow_substs=True)
-
-            controllers.append(
-                nd(
-                    package="controller_manager",
-                    executable="ros2_control_node",
-                    output='screen',
-                    parameters=[
-                        {"robot_description": robot_description},
-                        ros2_controllers,
-                    ],
-                    env=dict(os.environ)
-                )
+            use_builtin_simulation = should_use_builtin_simulation_controller(
+                platform_name=sys.platform,
+                moveit_device_ids=tuple(self.moveit_nodes),
+                simulated_moveit_device_ids=self.simulated_moveit_device_ids,
             )
-            for controller in self.moveit_controllers_yaml['moveit_simple_controller_manager']['controller_names']:
+            if use_builtin_simulation:
+                specs_path = self.runtime_dir / "simulation_controllers.json"
+                specs_path.write_text(
+                    json.dumps(
+                        {
+                            "controllers": simulation_controller_specs(
+                                self.moveit_controllers_yaml
+                            )
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                controllers.append(
+                    ExecuteProcess(
+                        cmd=[
+                            sys.executable,
+                            str(
+                                Path(__file__).with_name(
+                                    "simulated_trajectory_controller.py"
+                                )
+                            ),
+                            "--config",
+                            str(specs_path),
+                        ],
+                        output="screen",
+                        additional_env=dict(os.environ),
+                    )
+                )
+            else:
+                ros2_controllers = ParameterFile(
+                    str(controllers_path), allow_substs=True
+                )
                 controllers.append(
                     nd(
                         package="controller_manager",
-                        executable="spawner",
-                        arguments=[f"{controller}", "--controller-manager", "controller_manager"],
-                        output="screen",
+                        executable="ros2_control_node",
+                        output='screen',
+                        parameters=[
+                            {"robot_description": robot_description},
+                            ros2_controllers,
+                        ],
                         env=dict(os.environ)
                     )
                 )
-            controllers.append(
-                nd(
+                spawn_order = controller_spawn_order(
+                    self.moveit_controllers_yaml[
+                        "moveit_simple_controller_manager"
+                    ]["controller_names"]
+                )
+                spawners = [
+                    nd(
                         package="controller_manager",
                         executable="spawner",
-                        arguments=["joint_state_broadcaster", "--controller-manager", "controller_manager"],
+                        arguments=[
+                            name,
+                            "--controller-manager",
+                            "controller_manager",
+                        ],
                         output="screen",
-                        env=dict(os.environ)
-                )
-            )
+                        env=dict(os.environ),
+                    )
+                    for name in spawn_order
+                ]
+                if spawners:
+                    controllers.append(spawners[0])
+                    for current, following, following_name in zip(
+                        spawners[:-1],
+                        spawners[1:],
+                        spawn_order[1:],
+                        strict=True,
+                    ):
+                        controllers.append(
+                            RegisterEventHandler(
+                                OnProcessExit(
+                                    target_action=current,
+                                    on_exit=_start_next_controller_on_success(
+                                        following,
+                                        following_name,
+                                    ),
+                                )
+                            )
+                        )
             for i in controllers:
                 self.launch_description.add_action(i)
         else:

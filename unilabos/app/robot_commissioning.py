@@ -9,14 +9,15 @@ from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 
 class OpenCommissioningSessionRequest(BaseModel):
-    """打开独占维护会话所需的操作员身份。"""
+    """打开独占调试会话所需的操作员身份与可信部署模式。"""
 
     owner_id: str = Field(min_length=1, max_length=128)
+    requested_deployment_mode: Literal["simulation", "maintenance"]
 
 
 class CommissioningCommandRequest(BaseModel):
@@ -122,7 +123,12 @@ class RobotCommissioningService:
             ]
         return items
 
-    def open_session(self, device_id: str, owner_id: str) -> dict[str, Any]:
+    def open_session(
+        self,
+        device_id: str,
+        owner_id: str,
+        requested_deployment_mode: str,
+    ) -> dict[str, Any]:
         """取得设备端点独占权并返回网页调用上下文。"""
 
         normalized = str(device_id).strip()
@@ -130,6 +136,13 @@ class RobotCommissioningService:
             binding = self._bindings.get(normalized)
             if binding is None:
                 raise KeyError(f"机械臂调试设备不存在: {normalized}")
+            actual_mode = _deployment_mode(binding)
+            requested_mode = str(requested_deployment_mode).strip()
+            if requested_mode != actual_mode:
+                raise RuntimeError(
+                    "机械臂部署模式不匹配: "
+                    f"请求 {requested_mode}，当前为 {actual_mode}"
+                )
             if normalized in self._session_by_device:
                 raise RuntimeError("机械臂已被另一个维护会话占用")
             session = binding.open_maintenance_session(str(owner_id).strip())
@@ -209,9 +222,11 @@ class RobotCommissioningService:
 
         port = binding.commissioning_port
         hardware_digest, tool_digest = _required_context(port)
+        commissioning_limits = _required_commissioning_limits(port)
         return {
             "device_id": device_id,
             "schema_version": 2,
+            "deployment_mode": _deployment_mode(binding),
             "capabilities": _json_value(port.commissioning_capabilities),
             "target_revision": port.commissioning_target_revision,
             "motion_profile_ref": (
@@ -220,6 +235,7 @@ class RobotCommissioningService:
             ),
             "hardware_profile_digest": hardware_digest,
             "tool_context_digest": tool_digest,
+            "commissioning_limits": commissioning_limits,
             "interaction_modes": {
                 "step": True,
                 "continuous_hold": False,
@@ -247,6 +263,41 @@ def _required_context(port: Any) -> tuple[str, str]:
     if not hardware or not tool:
         raise ValueError("RobotCommissioningPort 缺少活动部署或工具摘要")
     return hardware, tool
+
+
+def _required_commissioning_limits(port: Any) -> dict[str, float]:
+    """投影活动 HardwareProfile 的维护限速，缺失或非法时失败关闭。"""
+
+    limits: dict[str, float] = {}
+    for wire_name, attribute_name in (
+        ("velocity_scale_max", "commissioning_velocity_limit"),
+        ("acceleration_scale_max", "commissioning_acceleration_limit"),
+    ):
+        raw_value = getattr(port, attribute_name, None)
+        if isinstance(raw_value, bool):
+            raise ValueError(f"RobotCommissioningPort.{attribute_name} 必须为有限数")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"RobotCommissioningPort.{attribute_name} 必须为有限数"
+            ) from error
+        if not math.isfinite(value) or not 0.0 < value <= 0.30:
+            raise ValueError(
+                f"RobotCommissioningPort.{attribute_name} 必须位于 (0, 0.30]"
+            )
+        limits[wire_name] = value
+    return limits
+
+
+def _deployment_mode(binding: Any) -> str:
+    """读取 RuntimeBinding 已验证的部署模式，不从前端或后端类型推断。"""
+
+    mode = getattr(binding, "deployment_mode", None)
+    normalized = str(getattr(mode, "value", mode) or "").strip()
+    if normalized not in {"simulation", "maintenance"}:
+        raise ValueError("Robot RuntimeBinding 缺少 simulation/maintenance 部署模式")
+    return normalized
 
 
 def _build_command(
@@ -453,7 +504,12 @@ def create_robot_commissioning_router(
     ) -> dict[str, Any]:
         """打开独占维护会话。"""
 
-        return _http_call(service.open_session, device_id, request.owner_id)
+        return _http_call(
+            service.open_session,
+            device_id,
+            request.owner_id,
+            request.requested_deployment_mode,
+        )
 
     @router.get("/{device_id}/sessions/{session_id}")
     def session_context(device_id: str, session_id: str) -> dict[str, Any]:
@@ -478,10 +534,11 @@ def create_robot_commissioning_router(
         return _http_call(service.execute, device_id, session_id, request)
 
     @router.delete("/{device_id}/sessions/{session_id}", status_code=204)
-    def close_session(device_id: str, session_id: str) -> None:
+    def close_session(device_id: str, session_id: str) -> Response:
         """释放维护会话；存在 Fence 时失败关闭。"""
 
         _http_call(service.close_session, device_id, session_id)
+        return Response(status_code=204)
 
     return router
 
@@ -514,6 +571,12 @@ def register_robot_commissioning_runtime(device_id: str, binding: Any) -> None:
     _SERVICE.register(device_id, binding)
 
 
+def unregister_robot_commissioning_runtime(device_id: str) -> None:
+    """供领域设备包正常关闭时注销并释放 RuntimeBinding。"""
+
+    _SERVICE.unregister(device_id)
+
+
 __all__ = [
     "CommissioningCommandRequest",
     "OpenCommissioningSessionRequest",
@@ -521,4 +584,5 @@ __all__ = [
     "create_robot_commissioning_router",
     "get_robot_commissioning_service",
     "register_robot_commissioning_runtime",
+    "unregister_robot_commissioning_runtime",
 ]

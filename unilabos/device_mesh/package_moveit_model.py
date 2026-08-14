@@ -54,6 +54,16 @@ class PackageRenderModel:
     mesh_paths: tuple[Path, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PackageMoveItClientSpec:
+    """从已验证 Bundle 派生的精确 MoveGroup 客户端身份。"""
+
+    joint_names: tuple[str, ...]
+    base_link_name: str
+    end_effector_name: str
+    group_name: str
+
+
 _render_models: dict[str, PackageRenderModel] = {}
 
 
@@ -161,6 +171,68 @@ def load_package_moveit_model(
         qualified_joint_names=qualified_joint_names,
         topology_digest=topology_digest,
         rviz_required=False,
+    )
+
+
+def package_moveit_client_spec(
+    bundle: PackageMoveItModelBundle,
+) -> PackageMoveItClientSpec:
+    """从 SRDF 的唯一 chain 和 Bundle 关节所有权生成客户端参数。
+
+    Device 驱动不得重新拼接 group/base/tip 或关节前缀；否则同型号多实例时会
+    把命令发往错误 MoveGroup。当前 Interface 有意只接受单 chain Arm。
+    """
+
+    root = ET.fromstring(bundle.srdf)
+    candidates: list[tuple[str, str, str]] = []
+    for group in root.findall("group"):
+        chains = group.findall("chain")
+        if len(chains) != 1:
+            continue
+        chain = chains[0]
+        group_name = str(group.attrib.get("name", "")).strip()
+        base_link = str(chain.attrib.get("base_link", "")).strip()
+        tip_link = str(chain.attrib.get("tip_link", "")).strip()
+        if group_name and base_link and tip_link:
+            candidates.append((group_name, base_link, tip_link))
+    if len(candidates) != 1:
+        raise ValueError("package_moveit SRDF 必须且只能声明一个完整 chain group")
+    group_name, base_link, tip_link = candidates[0]
+    return PackageMoveItClientSpec(
+        joint_names=bundle.qualified_joint_names,
+        base_link_name=base_link,
+        end_effector_name=tip_link,
+        group_name=group_name,
+    )
+
+
+def create_package_moveit_client(
+    ros_node: Any,
+    bundle: PackageMoveItModelBundle,
+    *,
+    client_factory: Any = None,
+) -> Any:
+    """在现有 Device ROS 节点上创建与启动 Bundle 同源的 MoveIt2 客户端。
+
+    该函数只创建 action/service 客户端，不启动 ``move_group``、controller、
+    RViz 或 ROS context；这些生命周期仍由 ResourceVisualization 单一拥有。
+    ``client_factory`` 仅作为测试注入点。
+    """
+
+    if client_factory is None:
+        from unilabos.devices.ros_dev.moveit2 import MoveIt2
+
+        client_factory = MoveIt2
+    spec = package_moveit_client_spec(bundle)
+    return client_factory(
+        node=ros_node,
+        joint_names=list(spec.joint_names),
+        base_link_name=spec.base_link_name,
+        end_effector_name=spec.end_effector_name,
+        group_name=spec.group_name,
+        callback_group=getattr(ros_node, "callback_group", None),
+        use_move_group_action=True,
+        ignore_new_calls_while_executing=True,
     )
 
 

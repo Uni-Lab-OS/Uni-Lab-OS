@@ -70,6 +70,8 @@ class _Port:
 
     hardware_profile_digest = "a" * 64
     tool_context_digest = "b" * 64
+    commissioning_velocity_limit = 0.25
+    commissioning_acceleration_limit = 0.20
     commissioning_capabilities = _Capabilities()
     commissioning_target_revision = "ptlc-points@3.0.0"
     commissioning_motion_profile_ref = "ptlc-cr5-manual-step@1.0.0"
@@ -105,8 +107,9 @@ class _Session:
 class _Binding:
     """模拟 Robotics RuntimeBinding 的最小公共面。"""
 
-    def __init__(self) -> None:
+    def __init__(self, deployment_mode: str = "simulation") -> None:
         self.commissioning_port = _Port()
+        self.deployment_mode = deployment_mode
         self.session: _Session | None = None
 
     def open_maintenance_session(self, owner_id: str) -> _Session:
@@ -161,10 +164,18 @@ def test_robot_commissioning_api_opens_executes_and_closes(
         catalog["devices"][0]["motion_profile_ref"]
         == "ptlc-cr5-manual-step@1.0.0"
     )
+    assert catalog["devices"][0]["deployment_mode"] == "simulation"
+    assert catalog["devices"][0]["commissioning_limits"] == {
+        "velocity_scale_max": 0.25,
+        "acceleration_scale_max": 0.20,
+    }
 
     opened = client.post(
         "/api/v1/robot-commissioning/robot/sessions",
-        json={"owner_id": "workbench:operator-a"},
+        json={
+            "owner_id": "workbench:operator-a",
+            "requested_deployment_mode": "simulation",
+        },
     )
     assert opened.status_code == 201
     session_id = opened.json()["session_id"]
@@ -198,6 +209,27 @@ def test_robot_commissioning_api_opens_executes_and_closes(
     assert binding.session is not None and binding.session.closed is True
 
 
+def test_mock_session_cannot_open_maintenance_runtime() -> None:
+    """Mock Host 必须由 OS 拒绝连接真实维护部署。"""
+
+    service = commissioning_api.RobotCommissioningService()
+    binding = _Binding(deployment_mode="maintenance")
+    service.register("robot", binding)
+    client = _client(service)
+
+    response = client.post(
+        "/api/v1/robot-commissioning/robot/sessions",
+        json={
+            "owner_id": "device-card:mock",
+            "requested_deployment_mode": "simulation",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "simulation" in response.json()["detail"]
+    assert binding.session is None
+
+
 def test_robot_commissioning_api_rejects_duplicate_session() -> None:
     """同一机械臂只允许一个维护页面持有端点。"""
 
@@ -206,12 +238,18 @@ def test_robot_commissioning_api_rejects_duplicate_session() -> None:
     client = _client(service)
     first = client.post(
         "/api/v1/robot-commissioning/robot/sessions",
-        json={"owner_id": "operator-a"},
+        json={
+            "owner_id": "operator-a",
+            "requested_deployment_mode": "simulation",
+        },
     )
     assert first.status_code == 201
     second = client.post(
         "/api/v1/robot-commissioning/robot/sessions",
-        json={"owner_id": "operator-b"},
+        json={
+            "owner_id": "operator-b",
+            "requested_deployment_mode": "simulation",
+        },
     )
     assert second.status_code == 409
     assert "占用" in second.json()["detail"]

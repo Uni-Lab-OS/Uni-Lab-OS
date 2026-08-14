@@ -14,6 +14,7 @@ class MotionRuntimePlan:
     """一次启动中互相正交的运动运行时与可视化决定。"""
 
     moveit_device_ids: tuple[str, ...]
+    simulated_moveit_device_ids: tuple[str, ...]
     visualization_enabled: bool
     enable_rviz: bool
 
@@ -64,8 +65,18 @@ def plan_motion_runtime(
             if isinstance(node, Mapping) and node_requests_moveit(node)
         )
     )
+    simulated_moveit_device_ids = tuple(
+        sorted(
+            str(node.get("id") or node_id)
+            for node_id, node in devices.items()
+            if isinstance(node, Mapping)
+            and node_requests_moveit(node)
+            and _node_requests_moveit_simulation(node)
+        )
+    )
     return MotionRuntimePlan(
         moveit_device_ids=moveit_device_ids,
+        simulated_moveit_device_ids=simulated_moveit_device_ids,
         visualization_enabled=normalized_visual != "disable",
         enable_rviz=normalized_visual == "rviz",
     )
@@ -113,6 +124,21 @@ def _selected_backend(config: object) -> str:
     if "moveit" in normalized:
         return "moveit"
     return normalized
+
+
+def _node_requests_moveit_simulation(node: Mapping[str, Any]) -> bool:
+    """返回该 MoveIt Device 是否明确选择无硬件仿真部署。"""
+
+    config = node.get("config")
+    if not isinstance(config, Mapping):
+        return False
+    if _selected_backend(config) == "moveit_sim":
+        return True
+    robot_execution = config.get("robot_execution")
+    return (
+        isinstance(robot_execution, Mapping)
+        and str(robot_execution.get("mode") or "").strip().lower() == "simulation"
+    )
 
 
 __all__ = ["MotionRuntimePlan", "node_requests_moveit", "plan_motion_runtime"]
