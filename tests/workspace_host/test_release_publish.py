@@ -22,6 +22,7 @@ from unilabos.workspace_host.release_publish import (
     WorkspaceReleasePublisher,
     _deployment_template_definition,
     _backend_workflow_projection,
+    _bind_backend_material_sources,
     _prepare_deployment_templates,
     _repair_public_node_metadata,
     _remap_imported_workflow_graph,
@@ -211,7 +212,69 @@ def test_restore_authoring_params_preserves_composite_contract_and_private_nodes
     assert restored["edges"] == current["edges"]
 
 
-def test_repair_public_metadata_keeps_composite_subgraph_immutable() -> None:
+def test_restore_authoring_params_keeps_workflow_input_defaults() -> None:
+    current = {
+        "workflow": {"uuid": "target-workflow"},
+        "handle_templates": [
+            {
+                "uuid": "target-volume-handle",
+                "handle_key": "volume_pump_1",
+                "data_key": "volume_pump_1",
+            }
+        ],
+        "nodes": [
+            {
+                "uuid": "target-node",
+                "parent_uuid": None,
+                "param": {
+                    "volume_pump_1": 10,
+                    "required_without_default": "publication-placeholder",
+                },
+                "meta_data": {
+                    "unilab": {
+                        "input_bindings": {
+                            "target-volume-handle": {
+                                "parameter": "volume_pump_1"
+                            }
+                        }
+                    },
+                    "unilab_release": {"source_node_uuid": "source-node"},
+                },
+            }
+        ],
+    }
+    authoring = {
+        "workflow": {
+            "uuid": "source-workflow",
+            "meta_data": {
+                "unilab": {
+                    "input_contract": {
+                        "parameters": [
+                            {"name": "volume_pump_1", "default": 10},
+                            {"name": "required_without_default", "required": True},
+                        ]
+                    }
+                }
+            },
+        },
+        "nodes": [
+            {
+                "uuid": "source-node",
+                "parent_uuid": None,
+                "param": {},
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-node"}
+                },
+            }
+        ],
+    }
+
+    restored = _restore_public_authoring_params(current, authoring)
+
+    assert restored["nodes"][0]["param"] == {"volume_pump_1": 10}
+
+
+def test_repair_public_metadata_remaps_composite_boundary_only() -> None:
     current = {
         "nodes": [
             {
@@ -259,7 +322,12 @@ def test_repair_public_metadata_keeps_composite_subgraph_immutable() -> None:
                 "uuid": "invocation",
                 "parent_uuid": None,
                 "type": "workflow",
-                "meta_data": {"changed": True},
+                "meta_data": {
+                    "changed": True,
+                    "unilab_release": {
+                        "source_node_uuid": "source-invocation"
+                    },
+                },
             },
             {
                 "uuid": "private",
@@ -273,7 +341,10 @@ def test_repair_public_metadata_keeps_composite_subgraph_immutable() -> None:
     repaired = _repair_public_node_metadata(current, remapped)
 
     assert "target-handle" in repaired["nodes"][0]["meta_data"]["unilab"]["input_bindings"]
-    assert repaired["nodes"][1] == current["nodes"][1]
+    assert repaired["nodes"][1]["meta_data"] == {
+        "changed": True,
+        "unilab_release": {"source_node_uuid": "source-invocation"},
+    }
     assert repaired["nodes"][2] == current["nodes"][2]
     assert repaired["edges"] == current["edges"]
 
@@ -291,8 +362,114 @@ def test_repair_public_metadata_keeps_composite_subgraph_immutable() -> None:
                     "unilab_release": {"source_node_uuid": "source-atomic"},
                 }
             },
-        )
+        ),
+        (
+            "invocation",
+            {
+                "meta_data": {
+                    "changed": True,
+                    "unilab_release": {
+                        "source_node_uuid": "source-invocation"
+                    },
+                }
+            },
+        ),
     ]
+
+
+def test_imported_composite_metadata_uses_backend_child_identities() -> None:
+    source_graph = {
+        "workflow": {"uuid": "source-workflow", "name": "workflow"},
+        "nodes": [
+            {
+                "uuid": "source-invocation",
+                "type": "workflow",
+                "meta_data": {},
+            },
+            {
+                "uuid": "source-child",
+                "parent_uuid": "source-invocation",
+                "type": "device_action",
+                "meta_data": {},
+            },
+        ],
+        "handle_templates": [],
+    }
+    imported_graph = {
+        "workflow": {
+            "uuid": "target-workflow",
+            "name": "workflow",
+            "revision": 1,
+            "meta_data": {},
+        },
+        "nodes": [
+            {
+                "uuid": "target-invocation",
+                "type": "workflow",
+                "meta_data": {
+                    "unilab": {
+                        "composite": {
+                            "target_mappings": {
+                                "boundary-handle": [
+                                    {"workflow_node_uuid": "source-child"}
+                                ]
+                            },
+                            "source_mappings": {
+                                "output-handle": {
+                                    "kind": "node_output",
+                                    "workflow_node_uuid": "source-child",
+                                }
+                            },
+                        }
+                    },
+                    "unilab_release": {
+                        "source_node_uuid": "source-invocation"
+                    },
+                },
+            },
+            {
+                "uuid": "target-child",
+                "parent_uuid": "target-invocation",
+                "type": "device_action",
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-child"}
+                },
+            },
+        ],
+        "handle_templates": [],
+        "edges": [],
+    }
+    release = WorkspaceRelease(
+        release_id="sha256:release-composite-identities",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+
+    remapped = _remap_imported_workflow_graph(
+        source_graph,
+        imported_graph,
+        release=release,
+        workflow_identities={"source-workflow": "target-workflow"},
+        material_identities={},
+        resource_template_identities={},
+    )
+
+    invocation = next(
+        node for node in remapped["nodes"] if node["uuid"] == "target-invocation"
+    )
+    composite = invocation["meta_data"]["unilab"]["composite"]
+    assert composite["target_mappings"]["boundary-handle"][0][
+        "workflow_node_uuid"
+    ] == "target-child"
+    assert composite["source_mappings"]["output-handle"][
+        "workflow_node_uuid"
+    ] == "target-child"
+    assert invocation["meta_data"]["unilab_release"] == {
+        "release_id": "sha256:release-composite-identities",
+        "source_node_uuid": "source-invocation",
+    }
 
 
 def test_instance_owned_sites_use_deterministic_release_only_template() -> None:
@@ -419,6 +596,52 @@ def test_resource_template_root_uses_material_type_for_backend_admission() -> No
 
     assert derived["resource_type"] == "deck"
     assert derived["display_name"] == "实验台"
+
+
+def test_leaf_material_keeps_canonical_template_when_runtime_type_differs() -> None:
+    """Keep scheduler-facing material identity stable for occupied leaf resources."""
+
+    release = WorkspaceRelease(
+        release_id="sha256:release-leaf",
+        source_workspace="/workspace",
+        templates=(
+            {
+                "uuid": "bottle-template",
+                "name": "resource.reagent_bottle",
+                "display_name": "试剂瓶",
+                "resource_type": "resource",
+                "config_info": [],
+            },
+        ),
+        material_graph={
+            "nodes": [
+                {
+                    "material": {
+                        "uuid": "bottle-material",
+                        "resource_template_uuid": "bottle-template",
+                        "parent_uuid": "reagent-stack",
+                        "class": "resource.reagent_bottle",
+                        "type": "container",
+                        "barcode": "BOTTLE-01",
+                        "name": "试剂瓶 R1C1",
+                        "config": {},
+                        "data": {},
+                    },
+                    "sites": [],
+                }
+            ]
+        },
+        workflows=(),
+    )
+
+    prepared = _prepare_deployment_templates(release)
+
+    assert len(prepared.templates) == 1
+    assert prepared.material_template_names["bottle-material"] == (
+        "resource.reagent_bottle"
+    )
+    assert prepared.templates[0]["resource_type"] == "resource"
+    assert prepared.templates[0]["config_info"][0]["type"] == "container"
 
 
 def test_imported_workflow_metadata_uses_backend_node_and_handle_identities() -> None:
@@ -862,6 +1085,342 @@ def test_backend_workflow_projection_clears_nonexistent_material_source_selectio
 
     assert projected["nodes"][0]["param"]["material_uuid"] is None
     assert projected["nodes"][1]["param"]["material_uuid"] == "known-material"
+
+
+def test_backend_material_sources_bind_distinct_inventory_and_derived_templates() -> None:
+    graph = {
+        "workflow": {"uuid": "workflow-local", "name": "source"},
+        "nodes": [
+            {
+                "uuid": "source-2",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": None,
+                    "resource_template_uuid": "template-local",
+                    "mount": {"uuid": "mount-local"},
+                },
+                "meta_data": {"unilab": {"authoring_source_order": 2}},
+            },
+            {
+                "uuid": "source-1",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": None,
+                    "resource_template_uuid": "template-local",
+                    "mount": {"uuid": "mount-local"},
+                },
+                "meta_data": {"unilab": {"authoring_source_order": 1}},
+            },
+        ],
+    }
+    material_graph = {
+        "nodes": [
+            {
+                "material": {
+                    "uuid": "mount-local",
+                    "resource_template_uuid": "mount-template-local",
+                },
+                "sites": [
+                    {"uuid": "site-2", "name": "T2", "sort_order": 2},
+                    {"uuid": "site-1", "name": "T1", "sort_order": 1},
+                ],
+            },
+            {
+                "material": {
+                    "uuid": "material-2",
+                    "resource_template_uuid": "template-local",
+                    "parent_uuid": "mount-local",
+                },
+                "current_site_uuid": "site-2",
+                "sites": [{"uuid": "tip-site-2", "name": "A1"}],
+            },
+            {
+                "material": {
+                    "uuid": "material-1",
+                    "resource_template_uuid": "template-local",
+                    "parent_uuid": "mount-local",
+                },
+                "current_site_uuid": "site-1",
+                "sites": [{"uuid": "tip-site-1", "name": "A1"}],
+            },
+        ]
+    }
+
+    bound = _bind_backend_material_sources(
+        graph,
+        material_graph=material_graph,
+        material_identities={
+            "mount-local": "mount-target",
+            "material-1": "material-target-1",
+            "material-2": "material-target-2",
+        },
+        material_template_names={
+            "mount-local": "mount-template",
+            "material-1": "derived-template-1",
+            "material-2": "derived-template-2",
+        },
+        source_template_names={"template-local": "canonical-template"},
+        target_templates={
+            "mount-template": "mount-template-target",
+            "derived-template-1": "derived-template-target-1",
+            "derived-template-2": "derived-template-target-2",
+            "canonical-template": "canonical-template-target",
+        },
+    )
+
+    by_uuid = {node["uuid"]: node for node in bound["nodes"]}
+    assert by_uuid["source-1"]["param"]["material_uuid"] == "material-target-1"
+    assert by_uuid["source-1"]["param"]["resource_template_uuid"] == (
+        "derived-template-target-1"
+    )
+    assert by_uuid["source-2"]["param"]["material_uuid"] == "material-target-2"
+    assert by_uuid["source-2"]["param"]["resource_template_uuid"] == (
+        "derived-template-target-2"
+    )
+    assert by_uuid["source-1"]["param"]["mount"] == {"uuid": "mount-local"}
+
+
+def test_backend_material_source_preserves_explicit_material_selection() -> None:
+    graph = {
+        "workflow": {"uuid": "workflow-local", "name": "source"},
+        "nodes": [
+            {
+                "uuid": "source",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": "material-local",
+                    "resource_template_uuid": "template-local",
+                    "mount": {"uuid": "mount-local"},
+                },
+            }
+        ],
+    }
+    material_graph = {
+        "nodes": [
+            {
+                "material": {
+                    "uuid": "mount-local",
+                    "resource_template_uuid": "mount-template-local",
+                },
+                "sites": [{"uuid": "site-1", "name": "T1", "sort_order": 1}],
+            },
+            {
+                "material": {
+                    "uuid": "material-local",
+                    "resource_template_uuid": "template-local",
+                    "parent_uuid": "mount-local",
+                },
+                "current_site_uuid": "site-1",
+                "sites": [{"uuid": "tip-site", "name": "A1"}],
+            },
+        ]
+    }
+
+    bound = _bind_backend_material_sources(
+        graph,
+        material_graph=material_graph,
+        material_identities={
+            "mount-local": "mount-target",
+            "material-local": "material-target",
+        },
+        material_template_names={
+            "mount-local": "mount-template",
+            "material-local": "derived-template",
+        },
+        source_template_names={"template-local": "canonical-template"},
+        target_templates={
+            "mount-template": "mount-template-target",
+            "derived-template": "derived-template-target",
+            "canonical-template": "canonical-template-target",
+        },
+    )
+
+    assert bound["nodes"][0]["param"]["material_uuid"] == "material-target"
+    assert bound["nodes"][0]["param"]["resource_template_uuid"] == (
+        "derived-template-target"
+    )
+
+
+def test_backend_material_source_preserves_unbound_selector_without_inventory() -> None:
+    graph = {
+        "workflow": {"uuid": "workflow-local", "name": "source"},
+        "nodes": [
+            {
+                "uuid": "source",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": None,
+                    "resource_template_uuid": "template-local",
+                    "mount": {"uuid": "empty-mount-local"},
+                    "site": None,
+                },
+            }
+        ],
+    }
+
+    bound = _bind_backend_material_sources(
+        graph,
+        material_graph={"nodes": []},
+        material_identities={"empty-mount-local": "empty-mount-target"},
+        material_template_names={},
+        source_template_names={"template-local": "canonical-template"},
+        target_templates={"canonical-template": "canonical-template-target"},
+    )
+
+    assert bound["nodes"][0]["param"] == {
+        "mode": "existing",
+        "material_uuid": None,
+        "resource_template_uuid": "canonical-template-target",
+        "mount": {"uuid": "empty-mount-local"},
+        "site": None,
+    }
+
+
+def test_backend_material_source_remaps_explicit_site_when_inventory_is_unbound() -> None:
+    graph = {
+        "workflow": {"uuid": "workflow-local", "name": "source"},
+        "nodes": [
+            {
+                "uuid": "source",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": None,
+                    "resource_template_uuid": "template-local",
+                    "mount": {"uuid": "mount-local"},
+                    "site": "site-2",
+                },
+            }
+        ],
+    }
+    material_graph = {
+        "nodes": [
+            {
+                "material": {
+                    "uuid": "mount-local",
+                    "resource_template_uuid": "mount-template-local",
+                },
+                "sites": [
+                    {"uuid": "site-2", "name": "L1C2", "sort_order": 2}
+                ],
+            }
+        ]
+    }
+    resolved_sites: list[tuple[str, str]] = []
+
+    def resolve_site(owner_uuid: str, site_name: str) -> str:
+        resolved_sites.append((owner_uuid, site_name))
+        return "target-site-2"
+
+    bound = _bind_backend_material_sources(
+        graph,
+        material_graph=material_graph,
+        material_identities={"mount-local": "mount-target"},
+        material_template_names={"mount-local": "mount-template"},
+        source_template_names={"template-local": "canonical-template"},
+        target_templates={
+            "mount-template": "mount-template-target",
+            "canonical-template": "canonical-template-target",
+        },
+        target_site_resolver=resolve_site,
+    )
+
+    assert bound["nodes"][0]["param"] == {
+        "mode": "existing",
+        "material_uuid": None,
+        "resource_template_uuid": "canonical-template-target",
+        "mount": {"uuid": "mount-local"},
+        "site": "target-site-2",
+    }
+    assert resolved_sites == [("mount-local", "L1C2")]
+
+
+def test_backend_material_source_honors_and_remaps_explicit_site() -> None:
+    graph = {
+        "workflow": {"uuid": "workflow-local", "name": "source"},
+        "nodes": [
+            {
+                "uuid": "source",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": None,
+                    "resource_template_uuid": "template-local",
+                    "mount": {"uuid": "mount-local"},
+                    "site": "site-2",
+                },
+            }
+        ],
+    }
+    material_graph = {
+        "nodes": [
+            {
+                "material": {
+                    "uuid": "mount-local",
+                    "resource_template_uuid": "mount-template-local",
+                },
+                "sites": [
+                    {"uuid": "site-1", "name": "L1C1", "sort_order": 1},
+                    {"uuid": "site-2", "name": "L1C2", "sort_order": 2},
+                ],
+            },
+            {
+                "material": {
+                    "uuid": "material-1",
+                    "resource_template_uuid": "template-local",
+                    "parent_uuid": "mount-local",
+                },
+                "current_site_uuid": "site-1",
+                "sites": [],
+            },
+            {
+                "material": {
+                    "uuid": "material-2",
+                    "resource_template_uuid": "template-local",
+                    "parent_uuid": "mount-local",
+                },
+                "current_site_uuid": "site-2",
+                "sites": [],
+            },
+        ]
+    }
+
+    resolved_sites: list[tuple[str, str]] = []
+
+    def resolve_site(owner_uuid: str, site_name: str) -> str:
+        resolved_sites.append((owner_uuid, site_name))
+        return "target-site-2"
+
+    bound = _bind_backend_material_sources(
+        graph,
+        material_graph=material_graph,
+        material_identities={
+            "mount-local": "mount-target",
+            "material-1": "material-target-1",
+            "material-2": "material-target-2",
+        },
+        material_template_names={
+            "mount-local": "mount-template",
+            "material-1": "derived-template-1",
+            "material-2": "derived-template-2",
+        },
+        source_template_names={"template-local": "canonical-template"},
+        target_templates={
+            "mount-template": "mount-template-target",
+            "derived-template-1": "derived-template-target-1",
+            "derived-template-2": "derived-template-target-2",
+            "canonical-template": "canonical-template-target",
+        },
+        target_site_resolver=resolve_site,
+    )
+
+    assert bound["nodes"][0]["param"]["material_uuid"] == "material-target-2"
+    assert bound["nodes"][0]["param"]["site"] == "target-site-2"
+    assert resolved_sites == [("mount-local", "L1C2")]
 
 
 def test_backend_workflow_projection_promotes_material_passthrough_output() -> None:
@@ -1335,7 +1894,11 @@ def test_workspace_host_release_publish_uses_visible_local_backend_and_can_activ
         {"phase": "ready", "address": "http://127.0.0.1:18003"}
     )
     host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
-    host._switch_authority = lambda values: {"domainMode": values["mode"]}  # type: ignore[method-assign]
+    host._switch_authority = lambda values, **_kwargs: {  # type: ignore[method-assign]
+        "domainMode": values["mode"]
+    }
+    started_edges: list[bool] = []
+    host._start_edge = lambda: started_edges.append(True) or {}  # type: ignore[method-assign]
     captured: dict[str, object] = {}
 
     class Publisher:
@@ -1362,6 +1925,10 @@ def test_workspace_host_release_publish_uses_visible_local_backend_and_can_activ
 
     assert captured["source_address"] == "http://127.0.0.1:18003"
     assert captured["source_workspace"] == workspace
+    before_workflows = captured["before_workflows"]
+    assert callable(before_workflows)
+    before_workflows()
+    assert started_edges == [True]
     assert result["activated"] is True
     assert result["authority"] == {"domainMode": "backend"}
 

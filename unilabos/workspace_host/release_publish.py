@@ -307,6 +307,7 @@ class ExistingBackendDeploymentTarget:
             material_identities,
             source_template_names,
             target_templates,
+            prepared.material_template_names,
         )
         return DeploymentResult(
             release_id=release.release_id,
@@ -429,6 +430,7 @@ class ExistingBackendDeploymentTarget:
         material_identities: Mapping[str, str],
         source_template_names: Mapping[str, str],
         target_templates: Mapping[str, str],
+        material_template_names: Mapping[str, str],
     ) -> dict[str, str]:
         identities: dict[str, str] = {}
         workflow_template_identities: dict[str, str] = {}
@@ -442,6 +444,19 @@ class ExistingBackendDeploymentTarget:
             graph = _backend_workflow_projection(
                 _mapping(item.get("graph"), "workflow graph"),
                 known_material_uuids=set(material_identities),
+            )
+            graph = _bind_backend_material_sources(
+                graph,
+                material_graph=release.material_graph,
+                material_identities=material_identities,
+                material_template_names=material_template_names,
+                source_template_names=source_template_names,
+                target_templates=target_templates,
+                target_site_resolver=lambda owner_uuid, site_name: (
+                    self._target_site_uuid(
+                        material_identities[owner_uuid], site_name
+                    )
+                ),
             )
             import_graph = self._prepare_composite_import_graph(
                 graph,
@@ -955,6 +970,7 @@ def _prepare_deployment_templates(
     ]
     material_template_names: dict[str, str] = {}
     material_types_by_template: dict[str, set[str]] = {}
+    leaf_material_types_by_template: dict[str, set[str]] = {}
     for node in nodes:
         material = _mapping(node.get("material"), "material")
         template_uuid = str(material.get("resource_template_uuid") or "")
@@ -963,6 +979,44 @@ def _prepare_deployment_templates(
             material_types_by_template.setdefault(template_uuid, set()).add(
                 material_type
             )
+            if material.get("parent_uuid") and not _mapping_list(node.get("sites")):
+                leaf_material_types_by_template.setdefault(
+                    template_uuid, set()
+                ).add(material_type)
+    for template in deployment_templates:
+        template_uuid = str(template.get("uuid") or "")
+        leaf_types = leaf_material_types_by_template.get(template_uuid, set())
+        if len(leaf_types) > 1:
+            raise WorkspaceHostError(
+                "release_material_template_type_ambiguous",
+                "同一资源模板的叶子物料具有多个运行类型，无法无损发布",
+                details={
+                    "resource_template_uuid": template_uuid,
+                    "material_types": sorted(leaf_types, key=str.casefold),
+                },
+            )
+        if not leaf_types:
+            continue
+        material_type = next(iter(leaf_types))
+        config_info = [
+            deepcopy(dict(component))
+            for component in _mapping_list(template.get("config_info"))
+        ]
+        if config_info:
+            config_info[0]["type"] = material_type
+        else:
+            template_name = str(template.get("name") or "").strip()
+            config_info = [
+                {
+                    "id": "root",
+                    "name": template.get("display_name") or template_name,
+                    "class": template_name,
+                    "type": material_type,
+                    "config": {},
+                    "data": {},
+                }
+            ]
+        template["config_info"] = config_info
     barcodes: set[str] = set()
     for node in nodes:
         material = _mapping(node.get("material"), "material")
@@ -993,14 +1047,15 @@ def _prepare_deployment_templates(
             not material.get("parent_uuid")
             and str(template.get("resource_type") or "").casefold() == "resource"
         )
-        requires_material_type_override = (
-            str(material.get("type") or "").casefold()
+        root_requires_material_type_override = (
+            not material.get("parent_uuid")
+            and str(material.get("type") or "").casefold()
             != str(template.get("resource_type") or "").casefold()
         )
         if (
             not actual_sites
             and not root_requires_non_resource_template
-            and not requires_material_type_override
+            and not root_requires_material_type_override
         ):
             material_template_names[material_uuid] = template_name
             continue
@@ -1441,6 +1496,230 @@ def _backend_workflow_projection(
     projected["nodes"] = projected_nodes
     _promote_backend_material_passthrough_output(projected)
     return projected
+
+
+def _bind_backend_material_sources(
+    graph: Mapping[str, Any],
+    *,
+    material_graph: Mapping[str, Any],
+    material_identities: Mapping[str, str],
+    material_template_names: Mapping[str, str],
+    source_template_names: Mapping[str, str],
+    target_templates: Mapping[str, str],
+    target_site_resolver: Callable[[str, str], str] | None = None,
+) -> dict[str, Any]:
+    """Translate Local inventory selectors into one Backend release snapshot.
+
+    Backend allocates an existing Material with exact template equality.  A
+    release-only derived template is required when a Local Material owns Sites,
+    so keeping only the canonical ``resource_template_uuid`` makes that
+    material invisible to the allocator.  The release Adapter already has the
+    complete Local inventory graph and both identity maps; bind each resolvable
+    selector deterministically and carry the selected Material's actual target
+    template.  Selectors without current compatible inventory stay unbound so
+    the workflow remains valid authoring content and Backend run admission can
+    resolve it after the inventory changes.
+    """
+
+    bound = deepcopy(dict(graph))
+    material_nodes = _material_nodes(material_graph)
+    materials: dict[str, Mapping[str, Any]] = {}
+    site_owner: dict[str, tuple[str, int, str]] = {}
+    for material_node in material_nodes:
+        material = _mapping(material_node.get("material"), "material")
+        material_uuid = str(material.get("uuid") or "")
+        if material_uuid:
+            materials[material_uuid] = material_node
+        for fallback_order, site in enumerate(_mapping_list(material_node.get("sites"))):
+            site_uuid = str(site.get("uuid") or "")
+            if not site_uuid:
+                continue
+            raw_order = site.get("sort_order", fallback_order)
+            try:
+                order = int(raw_order)
+            except (TypeError, ValueError):
+                order = fallback_order
+            site_owner[site_uuid] = (
+                material_uuid,
+                order,
+                str(site.get("name") or ""),
+            )
+
+    def source_order(node: Mapping[str, Any]) -> tuple[int, str]:
+        unilab = _mapping_or_empty(
+            _mapping_or_empty(node.get("meta_data")).get("unilab")
+        )
+        raw_order = unilab.get("authoring_source_order")
+        return (
+            raw_order if isinstance(raw_order, int) else 2**31 - 1,
+            str(node.get("uuid") or ""),
+        )
+
+    def material_order(material_uuid: str) -> tuple[int, str, str]:
+        material_node = materials[material_uuid]
+        current_site_uuid = str(material_node.get("current_site_uuid") or "")
+        owner = site_owner.get(current_site_uuid)
+        if owner is not None:
+            return owner[1], owner[2].casefold(), material_uuid
+        return 2**31 - 1, "", material_uuid
+
+    source_nodes = sorted(
+        (
+            node
+            for node in _mapping_list(bound.get("nodes"))
+            if str(node.get("type") or "").strip().casefold()
+            == "material_source"
+        ),
+        key=source_order,
+    )
+    selected_materials: set[str] = set()
+    for node in source_nodes:
+        param = deepcopy(dict(_mapping_or_empty(node.get("param"))))
+        mode = str(param.get("mode") or "existing").strip().casefold()
+        if mode != "existing":
+            continue
+        required_template_uuid = str(param.get("resource_template_uuid") or "")
+        mount_uuid = str(
+            _mapping_or_empty(param.get("mount")).get("uuid") or ""
+        )
+        explicit_material_uuid = str(param.get("material_uuid") or "")
+        explicit_site = str(param.get("site") or "").strip()
+
+        if explicit_material_uuid:
+            candidates = [explicit_material_uuid]
+        else:
+            candidates = []
+            for material_uuid, material_node in materials.items():
+                material = _mapping(material_node.get("material"), "material")
+                if (
+                    str(material.get("resource_template_uuid") or "")
+                    != required_template_uuid
+                ):
+                    continue
+                current_site_uuid = str(
+                    material_node.get("current_site_uuid") or ""
+                )
+                owner_uuid = str(
+                    (site_owner.get(current_site_uuid) or ("", 0, ""))[0]
+                )
+                parent_uuid = str(material.get("parent_uuid") or "")
+                if mount_uuid and mount_uuid not in {owner_uuid, parent_uuid}:
+                    continue
+                if explicit_site:
+                    owner = site_owner.get(current_site_uuid)
+                    if owner is None:
+                        continue
+                    if explicit_site not in {
+                        current_site_uuid,
+                        owner[2],
+                    }:
+                        continue
+                candidates.append(material_uuid)
+            candidates.sort(key=material_order)
+
+        selected = next(
+            (
+                material_uuid
+                for material_uuid in candidates
+                if material_uuid in materials
+                and material_uuid in material_identities
+                and material_uuid not in selected_materials
+            ),
+            None,
+        )
+        if selected is None:
+            # A workflow is valid authoring content even when its selector has
+            # no matching inventory in the release snapshot.  Preserve that
+            # unbound selector instead of either rejecting the whole release
+            # or silently selecting material from another mount.  Backend run
+            # admission will resolve it after compatible inventory is placed.
+            target_template_name = str(
+                source_template_names.get(required_template_uuid) or ""
+            )
+            target_template_uuid = str(
+                target_templates.get(target_template_name) or ""
+            )
+            if not target_template_uuid:
+                raise WorkspaceHostError(
+                    "release_apply_failed",
+                    "MaterialSource 的发布模板身份未映射",
+                    details={
+                        "workflow_node_uuid": str(node.get("uuid") or ""),
+                        "resource_template_uuid": required_template_uuid,
+                        "template_name": target_template_name,
+                    },
+                )
+            param["material_uuid"] = None
+            param["resource_template_uuid"] = target_template_uuid
+            if explicit_site:
+                owner = site_owner.get(explicit_site)
+                if owner is None:
+                    owner = next(
+                        (
+                            candidate
+                            for candidate in site_owner.values()
+                            if candidate[0] == mount_uuid
+                            and candidate[2].casefold()
+                            == explicit_site.casefold()
+                        ),
+                        None,
+                    )
+                if owner is None:
+                    raise WorkspaceHostError(
+                        "release_material_source_unresolved",
+                        "MaterialSource 指定的库位不存在",
+                        details={
+                            "workflow_node_uuid": str(node.get("uuid") or ""),
+                            "site": explicit_site,
+                        },
+                    )
+                if target_site_resolver is not None:
+                    param["site"] = target_site_resolver(owner[0], owner[2])
+            node["param"] = param
+            continue
+
+        target_template_name = str(material_template_names.get(selected) or "")
+        target_template_uuid = str(
+            target_templates.get(target_template_name) or ""
+        )
+        if not target_template_uuid:
+            raise WorkspaceHostError(
+                "release_apply_failed",
+                "MaterialSource 的发布模板身份未映射",
+                details={
+                    "workflow_node_uuid": str(node.get("uuid") or ""),
+                    "material_uuid": selected,
+                    "template_name": target_template_name,
+                },
+            )
+        param["material_uuid"] = material_identities[selected]
+        param["resource_template_uuid"] = target_template_uuid
+        if explicit_site:
+            owner = site_owner.get(explicit_site)
+            if owner is None:
+                owner = next(
+                    (
+                        candidate
+                        for candidate in site_owner.values()
+                        if candidate[0] == mount_uuid
+                        and candidate[2].casefold() == explicit_site.casefold()
+                    ),
+                    None,
+                )
+            if owner is None:
+                raise WorkspaceHostError(
+                    "release_material_source_unresolved",
+                    "MaterialSource 指定的库位不存在",
+                    details={
+                        "workflow_node_uuid": str(node.get("uuid") or ""),
+                        "site": explicit_site,
+                    },
+                )
+            if target_site_resolver is not None:
+                param["site"] = target_site_resolver(owner[0], owner[2])
+        node["param"] = param
+        selected_materials.add(selected)
+    return bound
 
 
 def _promote_backend_material_passthrough_output(graph: dict[str, Any]) -> None:
@@ -2046,8 +2325,14 @@ def _remap_imported_workflow_graph(
                 source_param.setdefault(str(key), deepcopy(value))
             remapped_node["param"] = source_param
         if str(source_node.get("type") or "").strip().casefold() == "workflow":
-            remapped_node["meta_data"] = deepcopy(
-                dict(_mapping_or_empty(target_node.get("meta_data")))
+            # The Backend import endpoint regenerates node UUIDs but preserves
+            # composite metadata verbatim.  Rewrite the invocation's private
+            # boundary mappings to the imported child identities before the
+            # graph is published; otherwise execution planning sees Local
+            # child UUIDs crossing the Backend invocation boundary.
+            remapped_node["meta_data"] = _replace_identities(
+                deepcopy(dict(_mapping_or_empty(target_node.get("meta_data")))),
+                replacements,
             )
         else:
             source_meta = deepcopy(
@@ -2133,14 +2418,37 @@ def _restore_public_authoring_params(
     current_graph: Mapping[str, Any],
     authoring_graph: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Remove publication-only input scaffolds without mutating frozen subgraphs.
+    """Remove fake publication scaffolds while retaining declared defaults.
 
     Publishing a composite freezes its invocation contract metadata and all
     private descendants.  The public invocation parameter map remains
     author-editable, so restore only parameters on top-level nodes while using
     the post-publication Backend graph as the authority for every immutable
-    field.
+    field. Backend tasks currently execute the materialized graph directly,
+    so workflow input defaults bound to node handles must remain in that graph;
+    only schema-shaped placeholders for inputs without defaults are removed.
     """
+
+    workflow_unilab = _mapping_or_empty(
+        _mapping_or_empty(
+            _mapping_or_empty(authoring_graph.get("workflow")).get("meta_data")
+        ).get("unilab")
+    )
+    declared_defaults = {
+        str(parameter.get("name") or ""): deepcopy(parameter.get("default"))
+        for parameter in _mapping_list(
+            _mapping_or_empty(workflow_unilab.get("input_contract")).get(
+                "parameters"
+            )
+        )
+        if str(parameter.get("name") or "") and "default" in parameter
+    }
+    current_handles = {
+        str(handle.get("uuid") or ""): str(
+            handle.get("data_key") or handle.get("handle_key") or ""
+        )
+        for handle in _mapping_list(current_graph.get("handle_templates"))
+    }
 
     authoring_by_source: dict[str, Mapping[str, Any]] = {}
     for node in _mapping_list(authoring_graph.get("nodes")):
@@ -2162,9 +2470,28 @@ def _restore_public_authoring_params(
             source_uuid = str(release_meta.get("source_node_uuid") or "")
             authoring_node = authoring_by_source.get(source_uuid)
             if authoring_node is not None:
-                node["param"] = deepcopy(
-                    _mapping_or_empty(authoring_node.get("param"))
+                params = deepcopy(dict(_mapping_or_empty(authoring_node.get("param"))))
+                current_params = _mapping_or_empty(current_node.get("param"))
+                input_bindings = _mapping_or_empty(
+                    _mapping_or_empty(
+                        _mapping_or_empty(current_node.get("meta_data")).get(
+                            "unilab"
+                        )
+                    ).get("input_bindings")
                 )
+                for handle_uuid, raw_binding in input_bindings.items():
+                    parameter_name = str(
+                        _mapping_or_empty(raw_binding).get("parameter") or ""
+                    )
+                    if parameter_name not in declared_defaults:
+                        continue
+                    data_key = current_handles.get(str(handle_uuid), "")
+                    if not data_key or data_key in params:
+                        continue
+                    params[data_key] = deepcopy(
+                        current_params.get(data_key, declared_defaults[parameter_name])
+                    )
+                node["param"] = params
         nodes.append(node)
     restored["nodes"] = nodes
     return restored
@@ -2178,9 +2505,9 @@ def _repair_public_node_metadata(
 
     Legacy import resolves a node template and creates target handles after it
     has persisted node metadata, so metadata keys such as ``input_bindings``
-    still contain Local handle UUIDs.  Composite invocations and their private
-    descendants are immutable; start from the Backend graph and replace only
-    top-level, non-composite metadata with the already remapped equivalent.
+    and composite private-boundary mappings still contain Local identities.
+    Private descendants remain immutable; replace metadata only on top-level
+    public nodes, including the composite invocation boundary itself.
     """
 
     remapped_by_source: dict[str, Mapping[str, Any]] = {}
@@ -2196,11 +2523,7 @@ def _repair_public_node_metadata(
     nodes: list[dict[str, Any]] = []
     for current_node in _mapping_list(current_graph.get("nodes")):
         node = deepcopy(dict(current_node))
-        is_public_atomic = (
-            node.get("parent_uuid") is None
-            and str(node.get("type") or "").strip().casefold() != "workflow"
-        )
-        if is_public_atomic:
+        if node.get("parent_uuid") is None:
             release_meta = _mapping_or_empty(
                 _mapping_or_empty(node.get("meta_data")).get("unilab_release")
             )
