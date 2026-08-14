@@ -46,14 +46,22 @@ def _write_package(workspace_root: Path, *, broken_source: bool = False) -> None
         "from unilabos.registry.decorators import action, device, resource\n"
         "from unilabos.registry.placeholder_type import ResourceSlot\n\n"
         "builtins._package_catalog_source_imported = True\n\n"
+        "AVAILABLE_SITES = [{\n"
+        "    'label': 'A1',\n"
+        "    'position': {'x': 1, 'y': 2, 'z': 3},\n"
+        "    'size': {'width': 4, 'height': 5, 'depth': 6},\n"
+        "    'content_type': ['plate'],\n"
+        "}]\n\n"
         "class Result(TypedDict):\n"
         "    plate: ResourceSlot\n\n"
-        '@device(id="reactor", displayname="反应器", category=["reactor"])\n'
+        '@device(id="reactor", displayname="反应器", category=["reactor"], '
+        "available_sites=AVAILABLE_SITES)\n"
         "class Reactor:\n"
         '    @action(description="处理物料")\n'
         "    def process(self, plate: ResourceSlot) -> Result:\n"
         '        return {"plate": plate}\n\n'
-        '@resource(id="plate", displayname="孔板", category=["container"])\n'
+        '@resource(id="plate", displayname="孔板", category=["container"], '
+        "available_sites=AVAILABLE_SITES)\n"
         "def make_plate(name: str):\n"
         "    return name\n",
         encoding="utf-8",
@@ -111,6 +119,34 @@ def test_compile_package_source_discovers_complete_catalog_without_import(
     assert catalog.definitions.resources[0].details["registry_entry"]["source_uri"] == (
         "package://catalog_lab/definitions.py"
     )
+    expected_site = {
+        "allowed_resource_template_uuids": [],
+        "content_type": ["plate"],
+        "depth": 6.0,
+        "description": "",
+        "index": 0,
+        "label": "A1",
+        "length": 5.0,
+        "meta_data": {},
+        "parent_link": "",
+        "position_x": 1.0,
+        "position_y": 2.0,
+        "position_z": 3.0,
+        "rotation_x": 0.0,
+        "rotation_y": 0.0,
+        "rotation_z": 0.0,
+        "schema_version": 1,
+        "visible": True,
+        "width": 4.0,
+    }
+    device_entry = catalog.definitions.devices[0].to_dict()["details"][
+        "registry_entry"
+    ]
+    resource_entry = catalog.definitions.resources[0].to_dict()["details"][
+        "registry_entry"
+    ]
+    assert device_entry["available_sites"] == [expected_site]
+    assert resource_entry["available_sites"] == [expected_site]
     assert [item.id for item in catalog.definitions.workflows] == ["prepare"]
     assert catalog.definitions.workflows[0].details["workflow_uuid"] == WORKFLOW_UUID
     assert catalog.definitions.workflows[0].details["source_uri"] == (

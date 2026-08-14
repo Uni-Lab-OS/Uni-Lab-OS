@@ -170,6 +170,7 @@ def _resource_definition(
     try:
         # ``registry_entry`` 只保存资源模板静态合同，不包含具体物料（Material）实例。
         registry_entry = {
+            "available_sites": metadata.get("available_sites", []),
             "category": metadata.get("category", []),
             "class": {
                 "module": metadata.get("module", ""),
@@ -311,6 +312,7 @@ def _static_device_entry(
     }
     # ``entry`` 是单个设备定义进入包目录（PackageCatalog）的完整注册表投影。
     entry: dict[str, Any] = {
+        "available_sites": metadata.get("available_sites", []),
         "category": metadata.get("category", []),
         "class": {
             "action_value_mappings": action_mappings,
