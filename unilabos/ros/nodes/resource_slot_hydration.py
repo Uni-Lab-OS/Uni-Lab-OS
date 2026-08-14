@@ -19,6 +19,7 @@ class ResourceSlotHydrationError(ValueError):
 
 _production_resource_lock = threading.RLock()
 _production_resource_nodes: tuple[dict[str, Any], ...] = ()
+PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA = "unilabos_source_runtime_uuid"
 
 
 def install_production_resource_nodes(
@@ -67,6 +68,21 @@ def install_production_resource_nodes(
         projected = deepcopy(node)
         projected["uuid"] = projected_uuid_by_index[index]
         projected.pop("unilabos_uuid", None)
+        local_uuid = str(
+            node.get("uuid") or node.get("unilabos_uuid") or ""
+        ).strip()
+        projected_extra = projected.get("extra")
+        if not isinstance(projected_extra, Mapping):
+            projected_extra = {}
+        else:
+            projected_extra = deepcopy(dict(projected_extra))
+        if local_uuid:
+            # Backend UUID remains authoritative outside the Edge.  Preserve the
+            # runtime UUID only as private projection metadata so the driver
+            # boundary can recover the exact object already owned by the local
+            # device/resource tracker.
+            projected_extra[PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA] = local_uuid
+        projected["extra"] = projected_extra
         parent_uuid = str(node.get("parent_uuid") or "").strip()
         parent_id = str(node.get("parent") or "").strip()
         projected["parent_uuid"] = (
