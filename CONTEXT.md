@@ -16,6 +16,12 @@ The single selected owner allowed to accept changes for an aggregate during a
 given operation; replicas and projections do not become additional owners.
 _Avoid_: Last writer wins, dual truth, nearest database
 
+**Backend Authority**:
+The configured laboratory service that owns shared domain state. It may be a
+central Docker deployment and remains external to Workspace Host lifecycle;
+selecting it never implies that Workbench starts, stops, or restarts it.
+_Avoid_: Managed Local process, workspace child, embedded Backend
+
 **Material UUID**:
 The sole stable identity of a Material, referred to as `material_uuid` by
 relationships and workflow fields.
@@ -60,6 +66,12 @@ The operational lot, reservation, ledger, and diagnostic contract used inside
 the local debug control plane; it is not started by the production Backend
 control plane and is not part of the Shared Interface.
 _Avoid_: Frontend fallback, Backend-compatible route
+
+**Authoring Device Catalog**:
+The Local Backend-only diagnostic projection that joins Driver registry and ROS
+facts for installation, activation, and package acceptance. Normal product UI
+uses the Shared Interface `DeviceOverview` plus `WorkflowNodeTemplate` instead.
+_Avoid_: Public device fallback, Backend device list, production read model
 
 **Control Plane**:
 The single selected owner of workflow scheduling and material facts. `local`

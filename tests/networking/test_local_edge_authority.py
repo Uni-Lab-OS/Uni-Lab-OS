@@ -36,6 +36,49 @@ def _authority(path: Path) -> LocalEdgeControlAuthority:
     )
 
 
+def test_latest_registration_returns_detached_edge_capabilities(
+    tmp_path: Path,
+) -> None:
+    authority = _authority(tmp_path / "authority.db")
+    instance_uuid = str(uuid.uuid4())
+    material_uuid = str(uuid.uuid4())
+    try:
+        registered = authority.store.register_session(
+            {
+                "edge_key": "workspace-edge",
+                "instance_uuid": instance_uuid,
+                "devices": [
+                    {
+                        "local_id": "robot-01",
+                        "name": "Robot",
+                        "material_uuid": material_uuid,
+                        "actions": [{"name": "transfer", "type": "command"}],
+                    }
+                ],
+            }
+        )
+        authority.store.set_session_connected(registered["session_uuid"], True)
+
+        snapshot = authority.store.latest_registration()
+
+        assert snapshot is not None
+        assert snapshot["edge_uuid"] == registered["edge_uuid"]
+        assert snapshot["instance_uuid"] == instance_uuid
+        assert snapshot["connected"] is True
+        assert snapshot["devices"] == [
+            {
+                "local_id": "robot-01",
+                "name": "Robot",
+                "material_uuid": material_uuid,
+                "actions": [{"name": "transfer", "type": "command"}],
+            }
+        ]
+        snapshot["devices"][0]["name"] = "mutated"
+        assert authority.store.latest_registration()["devices"][0]["name"] == "Robot"  # type: ignore[index]
+    finally:
+        authority.stop()
+
+
 def test_dispatch_is_idempotent_and_rejects_changed_identity(tmp_path: Path) -> None:
     authority = _authority(tmp_path / "authority.db")
     payload = _payload()

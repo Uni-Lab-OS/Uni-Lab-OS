@@ -5,6 +5,7 @@ API模块
 """
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 import asyncio
 
 import yaml
@@ -28,7 +29,10 @@ from unilabos.app.model import (
     JobData,
 )
 from unilabos.app.web.utils.host_utils import get_host_node_info
-from unilabos.app.web.device_catalog import project_device_catalog
+from unilabos.app.web.device_catalog import (
+    project_backend_device_overviews,
+    project_device_catalog,
+)
 from unilabos.config.config import BasicConfig
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
@@ -1264,9 +1268,10 @@ def api_health() -> dict[str, str]:
     return {"status": "ok", "scheduler": scheduler_status}
 
 
-@api.get("/devices", summary="Device list", response_model=Resp)
-def get_devices():
-    """获取设备列表"""
+@api.get("/authoring/device-catalog", summary="Authoring device catalog", response_model=Resp)
+def get_authoring_device_catalog():
+    """返回 OS 创作工具使用的富设备目录，而不占用共享 Backend 路由。"""
+
     isok, data = devices()
     if not isok:
         return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
@@ -1283,6 +1288,53 @@ def get_devices():
             registry_devices=lab_registry.obtain_registry_device_info(),
             online_devices=online_devices,
         )
+    )
+
+
+@api.get("/devices", summary="Backend-compatible device list")
+def get_devices() -> JSONResponse:
+    """返回与 Go Backend ``GET /api/v1/devices`` 同形的设备读模型。
+
+    本地运行时只连接已装配的 Local Backend Edge 会话与同进程库存权威；不从
+    注册表或 ROS 图猜测物料身份。未装配或尚未注册时返回成功空数组。
+    """
+
+    from unilabos.app.edge_control.local_authority import LocalEdgeControlAuthority
+    from unilabos.app.scheduler.integration import (
+        get_edge_backend,
+        get_inventory_service,
+    )
+
+    edge_backend = get_edge_backend()
+    inventory_service = get_inventory_service()
+    if (
+        not isinstance(edge_backend, LocalEdgeControlAuthority)
+        or inventory_service is None
+    ):
+        return JSONResponse(content={"code": 0, "data": []})
+    registration = edge_backend.store.latest_registration()
+    # ``type`` 与 ``revision`` 只在本设备读模型中从现有权威表连接；本接口
+    # 不改变 `/materials` 合同或库存 Schema。设备 Material 的实例类型等于
+    # 所属设备模板类型，修订沿用 material_inventory 聚合版本。
+    materials = inventory_service.store.query_all(
+        "SELECT material.*,resource_template.resource_type AS type,"
+        "COALESCE(material_inventory.aggregate_version,1) AS revision "
+        "FROM material "
+        "JOIN resource_template ON resource_template.uuid="
+        "material.resource_template_uuid "
+        "LEFT JOIN material_inventory ON material_inventory.material_uuid="
+        "material.uuid "
+        "WHERE material.deleted_at IS NULL "
+        "ORDER BY material.uuid"
+    )
+    return JSONResponse(
+        content={
+            "code": 0,
+            "data": project_backend_device_overviews(
+                registration=registration,
+                materials=materials,
+            ),
+        }
     )
 
 

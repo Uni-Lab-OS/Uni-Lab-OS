@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from unilabos.app.device_action_capabilities import (
     project_device_action_capabilities,
@@ -82,6 +85,79 @@ def project_device_catalog(
         "generatedAt": time.time() if generated_at is None else generated_at,
         "items": sorted(items, key=lambda item: item["id"]),
     }
+
+
+def project_backend_device_overviews(
+    *,
+    registration: Mapping[str, Any] | None,
+    materials: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """把本地 Edge 注册和库存行投影为 Go Backend ``DeviceOverview`` 数组。
+
+    参数：``registration`` 是 Local Backend 最近一次 Edge 会话的脱离副本；
+    ``materials`` 是规范 ``material`` 表活动行。返回：按设备物料 UUID 排序、与
+    Backend ``GET /api/v1/devices`` 同形的数组。异常：无；不完整注册项和没有
+    权威物料行的绑定不会被猜测或返回。
+    """
+
+    if not isinstance(registration, Mapping):
+        return []
+    edge_uuid = _text(registration.get("edge_uuid"))
+    if not edge_uuid:
+        return []
+    material_by_uuid = {
+        _text(material.get("uuid")): material
+        for material in materials
+        if isinstance(material, Mapping) and _text(material.get("uuid"))
+    }
+    created_at = _timestamp(registration.get("created_at"))
+    updated_at = _timestamp(registration.get("updated_at"))
+    connected = registration.get("connected") is True
+    edge_status = (
+        "online"
+        if connected
+        else "registered"
+        if registration.get("created_at") == registration.get("updated_at")
+        else "offline"
+    )
+    result: list[dict[str, Any]] = []
+    devices = registration.get("devices")
+    if not isinstance(devices, list):
+        return []
+    for raw_device in devices:
+        if not isinstance(raw_device, Mapping):
+            continue
+        local_id = _text(raw_device.get("local_id"))
+        material_uuid = _text(raw_device.get("material_uuid"))
+        material = material_by_uuid.get(material_uuid)
+        if not local_id or material is None:
+            continue
+        binding_uuid = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"unilab:edge-device-binding:{edge_uuid}:{material_uuid}",
+            )
+        )
+        actions = raw_device.get("actions")
+        result.append(
+            {
+                "binding": {
+                    "uuid": binding_uuid,
+                    "create_time": created_at,
+                    "update_time": updated_at,
+                    "meta_data": {},
+                    "edge_uuid": edge_uuid,
+                    "material_uuid": material_uuid,
+                    "local_id": local_id,
+                    "name": _text(raw_device.get("name")) or local_id,
+                },
+                "material": _backend_material(material),
+                "edge_status": edge_status,
+                "dispatchable": connected,
+                "actions": _backend_actions(actions),
+            }
+        )
+    return sorted(result, key=lambda item: item["material"]["uuid"])
 
 
 def _resource_nodes(resources: Any) -> list[dict[str, Any]]:
@@ -167,4 +243,67 @@ def _contract(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-__all__ = ["project_device_catalog"]
+def _backend_material(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """选择并解码 Backend ``Material`` wire 字段。"""
+
+    result = {
+        "uuid": _text(raw.get("uuid")),
+        "create_time": _text(raw.get("create_time")),
+        "update_time": _text(raw.get("update_time")),
+        "meta_data": _json(raw.get("meta_data"), {}),
+        "resource_template_uuid": _text(raw.get("resource_template_uuid")),
+        "class": _text(raw.get("class")),
+        "type": _text(raw.get("type")),
+        "barcode": _text(raw.get("barcode")),
+        "name": _text(raw.get("name")),
+        "config": _json(raw.get("config"), {}),
+        "data": _json(raw.get("data"), {}),
+        "revision": int(raw.get("revision") or 1),
+    }
+    description = raw.get("description")
+    if description is not None:
+        result["description"] = str(description)
+    parent_uuid = _text(raw.get("parent_uuid"))
+    if parent_uuid:
+        result["parent_uuid"] = parent_uuid
+    return result
+
+
+def _backend_actions(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {"name": name, "type": action_type}
+        for item in value
+        if isinstance(item, Mapping)
+        and (name := _text(item.get("name")))
+        and (action_type := _text(item.get("type")))
+    ]
+
+
+def _json(value: Any, fallback: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(str(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _timestamp(value: Any) -> str:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        timestamp = 0.0
+    return (
+        datetime.fromtimestamp(timestamp, timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+__all__ = ["project_backend_device_overviews", "project_device_catalog"]

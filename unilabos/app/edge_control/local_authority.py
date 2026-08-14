@@ -642,6 +642,41 @@ class LocalEdgeAuthorityStore:
             if isinstance(device, dict) and str(device.get("local_id") or "")
         }
 
+    def latest_registration(self) -> dict[str, Any] | None:
+        """返回最近一次 Edge 注册的脱离副本，不把 SQLite 行泄漏给调用方。
+
+        参数：无。返回：尚未注册时为 ``None``，否则包含 Edge/实例身份、连接
+        状态、时间戳和设备声明。异常：持久的设备声明不是对象数组时按空数组
+        失败关闭，数据库错误原样传播。
+        """
+
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT edge_uuid,instance_uuid,edge_key,devices_json,connected,
+                       created_at,updated_at
+                FROM local_edge_session
+                ORDER BY connected DESC,updated_at DESC,created_at DESC LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        decoded = json.loads(str(row["devices_json"]))
+        devices = (
+            [dict(device) for device in decoded if isinstance(device, dict)]
+            if isinstance(decoded, list)
+            else []
+        )
+        return {
+            "edge_uuid": str(row["edge_uuid"]),
+            "instance_uuid": str(row["instance_uuid"]),
+            "edge_key": str(row["edge_key"]),
+            "connected": bool(row["connected"]),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+            "devices": devices,
+        }
+
     def _authorized_job(
         self, job_uuid: str, command_uuid: str, job_token: str
     ) -> sqlite3.Row:
