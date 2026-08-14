@@ -41,13 +41,15 @@ def bootstrap_local_resource_graph(
     registry_snapshot: RegistryTemplateSnapshot,
     source_id: str,
     material_rendering_by_template: Mapping[str, Mapping[str, Any]] | None = None,
+    material_shapes_by_template: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """预校验并原子提交本地资源图的物料（Material）与库位（Site）。
 
     参数：``store`` 是当前主机唯一库存 SQLite；``resource_tree_set`` 提供产品
     ``dump()`` 快照；``registry_snapshot`` 冻结同代资源模板定义；``source_id``
     标识资源图来源；``material_rendering_by_template`` 是工作区编译后、仅指向
-    OS 公开 HTTP 路由的模型快照。返回：``imported`` 或 ``unchanged`` 幂等
+    OS 公开 HTTP 路由的模型快照；``material_shapes_by_template`` 是同代模板
+    业务身份到完整 2.5D 外形的精确绑定。返回：``imported`` 或 ``unchanged`` 幂等
     回执。异常：身份、拓扑、数值、模板、模型路径、既有权威或指纹冲突时
     抛出 ``ResourceGraphBootstrapError``；
     物料、位置、库位与指纹始终在同一事务提交或全部回滚。
@@ -80,6 +82,7 @@ def bootstrap_local_resource_graph(
         resolve_template_uuid = synchronize_local_template_identities(
             inventory_store=store,
             registry_snapshot=registry_snapshot,
+            material_shapes_by_template=material_shapes_by_template,
         )
         _resolve_projection_templates(projection, resolve_template_uuid)
         fingerprint = _fingerprint(source_name, registry_snapshot, projection)
@@ -739,8 +742,7 @@ def _projection_matches_persisted_rows(
     )
     persisted_materials = []
     for row in connection.execute(
-        f"SELECT {','.join(material_fields)} FROM material "
-        "WHERE deleted_at IS NULL"
+        f"SELECT {','.join(material_fields)} FROM material WHERE deleted_at IS NULL"
     ).fetchall():
         normalized = list(row)
         normalized[2] = _stable_projection_meta(normalized[2])
@@ -1039,9 +1041,7 @@ def _stable_projection_meta_object(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     return {
-        str(key): item
-        for key, item in value.items()
-        if key != "source_runtime_uuid"
+        str(key): item for key, item in value.items() if key != "source_runtime_uuid"
     }
 
 

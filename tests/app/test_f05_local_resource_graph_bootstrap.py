@@ -132,6 +132,22 @@ class _RegistryWithChangedAction(_Registry):
         return [device]
 
 
+class _RegistryWithShape(_Registry):
+    """提供仍携带包内入口引用的 2.5D 外形模板。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回带本地 Shape 入口的设备模板定义。"""
+
+        device = super().obtain_registry_device_info()[0]
+        device["model"] = {
+            "shape": {
+                "entry": "models/shape.yml",
+                "format": "unilab.shape/v1",
+            }
+        }
+        return [device]
+
+
 class _RegistryWithConfigSite(_Registry):
     """提供配置式库位（Site）占用所需的父子设备资源模板。"""
 
@@ -157,38 +173,42 @@ class _ConfigSiteResourceTree:
         """返回父子物料与配置式库位声明，不伪造显式库位节点。"""
         owner_runtime_uuid = "64000000-0000-4000-8000-0000000002c0"
         child_runtime_uuid = "64000000-0000-4000-8000-0000000002c1"
-        return [[
-            {
-                "id": "m2b_mount",
-                "uuid": owner_runtime_uuid,
-                "name": "Stacker A",
-                "parent_uuid": None,
-                "type": "device",
-                "class": "m2b_mount",
-                "pose": _pose(0, 0, 0, 360, 300, 720),
-                "config": {
-                    "sites": [{
-                        "label": "Slot 1",
-                        "position": {"x": 10, "y": 20, "z": 30},
-                        "size": {"width": 100, "height": 90, "depth": 80},
-                        "content_type": ["m2b_child"],
-                        "occupied_by": "m2b_child",
-                    }]
+        return [
+            [
+                {
+                    "id": "m2b_mount",
+                    "uuid": owner_runtime_uuid,
+                    "name": "Stacker A",
+                    "parent_uuid": None,
+                    "type": "device",
+                    "class": "m2b_mount",
+                    "pose": _pose(0, 0, 0, 360, 300, 720),
+                    "config": {
+                        "sites": [
+                            {
+                                "label": "Slot 1",
+                                "position": {"x": 10, "y": 20, "z": 30},
+                                "size": {"width": 100, "height": 90, "depth": 80},
+                                "content_type": ["m2b_child"],
+                                "occupied_by": "m2b_child",
+                            }
+                        ]
+                    },
+                    "data": {},
                 },
-                "data": {},
-            },
-            {
-                "id": "m2b_child",
-                "uuid": child_runtime_uuid,
-                "name": "Child A",
-                "parent_uuid": owner_runtime_uuid,
-                "type": "device",
-                "class": "community.m2b_native_e2e.m2b_child",
-                "pose": _pose(10, 20, 30, 100, 90, 80),
-                "config": {},
-                "data": {},
-            },
-        ]]
+                {
+                    "id": "m2b_child",
+                    "uuid": child_runtime_uuid,
+                    "name": "Child A",
+                    "parent_uuid": owner_runtime_uuid,
+                    "type": "device",
+                    "class": "community.m2b_native_e2e.m2b_child",
+                    "pose": _pose(10, 20, 30, 100, 90, 80),
+                    "config": {},
+                    "data": {},
+                },
+            ]
+        ]
 
 
 class _ResourceTree:
@@ -306,6 +326,7 @@ def _bootstrap(
     *,
     registry: _Registry | None = None,
     material_rendering_by_template: dict[str, dict[str, Any]] | None = None,
+    material_shapes_by_template: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """通过正式深模块接口执行一次启动投影。
 
@@ -324,6 +345,7 @@ def _bootstrap(
         registry_snapshot=registry_snapshot,
         source_id="/workspace/m2b-native-workspace/graph.json",
         material_rendering_by_template=material_rendering_by_template,
+        material_shapes_by_template=material_shapes_by_template,
     )
 
 
@@ -351,6 +373,43 @@ def test_first_bootstrap_exposes_stable_device_material_and_ordered_sites() -> N
     ]
     assert [site["sort_order"] for site in sites] == [0, 1]
     assert all(site["material_uuid"] == MOUNT_MATERIAL_UUID for site in sites)
+
+
+def test_bootstrap_exposes_compiled_shape_in_local_template_detail() -> None:
+    """Local Backend 模板详情必须与发布给 Backend 的完整 Shape 合同一致。"""
+
+    compiled_shape = {
+        "schema_version": "unilab.shape/v1",
+        "id": "m2b-mount",
+        "bundle": "m2b-native-e2e",
+        "categories": ["stacker"],
+        "categoryTokens": [],
+        "parts": [{"type": "box", "style": "body"}],
+    }
+    store = InventoryStore(":memory:")
+    try:
+        _bootstrap(
+            store,
+            _ResourceTree(),
+            registry=_RegistryWithShape(),
+            material_shapes_by_template={"m2b_mount": compiled_shape},
+        )
+        service = BackendResourceService(store)
+        template_uuid = service.list_resource_templates(
+            page=1,
+            page_size=20,
+            keyword="m2b_mount",
+            resource_type="device",
+        )["items"][0]["uuid"]
+        detail = service.get_resource_template(template_uuid)
+    finally:
+        store.close()
+
+    assert detail["model"]["shape"] == {
+        "entry": "models/shape.yml",
+        "format": "unilab.shape/v1",
+        **compiled_shape,
+    }
 
 
 def test_bootstrap_projects_public_shape_kind_and_model_url() -> None:
@@ -397,8 +456,12 @@ def test_config_sites_project_ordered_occupied_inventory_sites() -> None:
     finally:
         store.close()
 
-    owner = next(node for node in graph["nodes"] if node["material"]["name"] == "Stacker A")
-    child = next(node for node in graph["nodes"] if node["material"]["name"] == "Child A")
+    owner = next(
+        node for node in graph["nodes"] if node["material"]["name"] == "Stacker A"
+    )
+    child = next(
+        node for node in graph["nodes"] if node["material"]["name"] == "Child A"
+    )
     assert receipt["site_count"] == 1
     assert owner["sites"][0]["name"] == "Slot 1"
     assert owner["sites"][0]["occupied_material_uuid"] == child["material"]["uuid"]
@@ -561,9 +624,7 @@ def test_registry_action_change_does_not_invalidate_identical_inventory_graph(
     database_path = tmp_path / "inventory.db"
     first = InventoryStore(str(database_path))
     try:
-        assert _bootstrap(first, _ResourceTree())[
-            "status"
-        ] == "imported"
+        assert _bootstrap(first, _ResourceTree())["status"] == "imported"
     finally:
         first.close()
     reopened = InventoryStore(str(database_path))

@@ -25,6 +25,7 @@ class ControlPlaneRuntimeContext:
     graph_source_id: str
     material_shapes: Any
     material_model_catalog: Any
+    material_shapes_by_template: Any = None
 
 
 @dataclass(frozen=True)

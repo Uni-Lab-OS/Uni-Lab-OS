@@ -34,11 +34,14 @@ def synchronize_local_template_identities(
     *,
     inventory_store: InventoryStore,
     registry_snapshot: RegistryTemplateSnapshot,
+    material_shapes_by_template: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Callable[[str], str]:
     """原子同步单代本地模板身份并返回关闭式解析器。
 
     参数说明：``inventory_store`` 是本地库存资源模板写权威；
-    ``registry_snapshot`` 是组合根冻结的不可变注册表快照（Registry Snapshot）。
+    ``registry_snapshot`` 是组合根冻结的不可变注册表快照（Registry Snapshot）；
+    ``material_shapes_by_template`` 是工作区候选代中模板业务身份到完整 2.5D
+    外形的精确绑定，与远程模板同步共用同一校验和嵌入规则。
     返回：解析本代注册表（Registry）业务 ID、显式资源 ``source_fqid`` 或唯一
     资源 ``class.module`` 兼容别名的只读函数；未知或实现复用导致歧义的身份返回
     空串供投影层关闭式失败。
@@ -48,6 +51,18 @@ def synchronize_local_template_identities(
 
     # ``template_definitions`` 是本代设备与物料资源模板的完整分离定义。
     template_definitions = registry_snapshot.detached_definitions()
+    if material_shapes_by_template:
+        from unilabos.app.template_sync import TemplateSyncError, _embed_material_shapes
+
+        try:
+            _embed_material_shapes(
+                template_definitions,
+                material_shapes_by_template,
+            )
+        except TemplateSyncError as error:
+            raise RegistryTemplateProjectionError(
+                f"本地资源模板外形同步失败: {error}"
+            ) from error
     # ``template_name_by_alias`` 在任何库存写入前证明业务 ID 和源码别名一一归属。
     template_name_by_alias = _prevalidate_template_aliases(template_definitions)
     _prevalidate_action_resource_template_aliases(

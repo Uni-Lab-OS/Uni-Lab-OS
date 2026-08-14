@@ -53,6 +53,7 @@ from unilabos.utils.banner_print import print_status, print_unilab_banner
 _restart_requested: bool = False
 _restart_reason: str = ""
 
+
 def _request_workspace_restart(reasons: tuple[str, ...]) -> None:
     """把安全工作区待重启原因提交给现有产品重启循环。
 
@@ -132,9 +133,7 @@ def configure_workflow_editable_package_roots(
     return frozen_roots
 
 
-def should_bootstrap_local_resource_graph(
-    *, is_host_mode: bool
-) -> bool:
+def should_bootstrap_local_resource_graph(*, is_host_mode: bool) -> bool:
     """判断当前 OS 节点是否应建立本地资源图投影（Resource Graph Projection）。
 
     参数：``is_host_mode`` 表示当前节点是否为主机。返回：主机承担本地库存权威
@@ -169,11 +168,7 @@ def should_request_remote_startup(
     异常：无；普通 OS 启动始终关闭失败，不隐式连接后端（Backend）。
     """
 
-    return (
-        use_remote_resource
-        and startup_json is None
-        and graph_file_path is None
-    )
+    return use_remote_resource and startup_json is None and graph_file_path is None
 
 
 def should_prepare_workspace_product_runtime(args_dict: dict[str, Any]) -> bool:
@@ -355,7 +350,7 @@ def parse_args():
         default=None,
         help="ROS_DOMAIN_ID for this process. Host: also advertised to slaves via "
         "HostLink handshake (network-wide domain). Slave: local fallback only — "
-            "the value downloaded from host wins once connected.",
+        "the value downloaded from host wins once connected.",
     )
     parser.add_argument(
         "--ros_discovery_port",
@@ -1259,9 +1254,7 @@ def main():
             install_workspace_product_lifecycle(
                 prepared_workspace_generation,
                 registry=lab_registry,
-                restart_mode=(
-                    os.environ.get("UNILABOS_RESTART_SUPERVISED") == "1"
-                ),
+                restart_mode=(os.environ.get("UNILABOS_RESTART_SUPERVISED") == "1"),
                 request_restart=_request_workspace_restart,
             )
 
@@ -1455,6 +1448,11 @@ def main():
                 graph_source_id=str(file_path or "remote-startup.json"),
                 material_shapes=workspace_material_shapes,
                 material_model_catalog=workspace_material_models,
+                material_shapes_by_template=(
+                    workspace_registry_runtime.material_shapes_by_template
+                    if workspace_registry_runtime is not None
+                    else {}
+                ),
             )
         )
         args_dict["bridges"].extend(edge_control_runtime.bridges)
@@ -1492,6 +1490,11 @@ def main():
                 graph_source_id=str(file_path or "remote-startup.json"),
                 material_shapes=workspace_material_shapes,
                 material_model_catalog=workspace_material_models,
+                material_shapes_by_template=(
+                    workspace_registry_runtime.material_shapes_by_template
+                    if workspace_registry_runtime is not None
+                    else {}
+                ),
             ),
         )
         args_dict["bridges"].extend(control_plane_runtime.bridges)
@@ -1514,9 +1517,7 @@ def main():
         )
         edge_backend_thread = start_backend(**args_dict)
         edge_backend_thread.join()
-        raise RuntimeError(
-            "Edge Runtime backend thread terminated unexpectedly"
-        )
+        raise RuntimeError("Edge Runtime backend thread terminated unexpectedly")
 
     if runtime_process_plan.role.value == "workspace_backend":
         print_status(
