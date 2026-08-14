@@ -207,6 +207,7 @@ def _template_definition(template: Mapping[str, Any]) -> dict[str, Any]:
             "config": {"properties": template.get("config_schema") or {}},
         },
         "config_info": template.get("config_info") or [],
+        "available_sites": template.get("available_sites") or [],
         "cover": template.get("cover"),
         "scene": template.get("scene") or [],
         "device_params": template.get("device_params") or {},

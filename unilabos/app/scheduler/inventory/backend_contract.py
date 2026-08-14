@@ -545,12 +545,17 @@ class BackendResourceService:
 
     def material_graph(self) -> Dict[str, Any]:
         materials = self.store.query_all(
-            "SELECT * FROM material WHERE deleted_at IS NULL ORDER BY create_time,uuid"
+            "SELECT material.*,material_inventory.aggregate_version,"
+            "resource_template.resource_type AS template_resource_type "
+            "FROM material "
+            "JOIN material_inventory ON material_inventory.material_uuid=material.uuid "
+            "JOIN resource_template ON resource_template.uuid=material.resource_template_uuid "
+            "WHERE material.deleted_at IS NULL ORDER BY material.create_time,material.uuid"
         )
         return {
             "nodes": [
                 {
-                    "material": self._material_row(material),
+                    "material": self._material_graph_row(material),
                     "relative_position": self._relative_position_for_material(
                         material["uuid"]
                     ),
@@ -565,6 +570,9 @@ class BackendResourceService:
                             (material["resource_template_uuid"],),
                         )
                     ],
+                    "resource_template": self._resource_template_summary(
+                        material["resource_template_uuid"]
+                    ),
                 }
                 for material in materials
             ]
@@ -1003,6 +1011,33 @@ class BackendResourceService:
                 "data": _json(row.get("data"), {}),
             }
         )
+        return result
+
+    @classmethod
+    def _material_graph_row(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Project the authoritative Backend-shaped Material used by graph reads."""
+
+        result = cls._material_row(row)
+        result["type"] = str(row.get("type") or row.get("template_resource_type") or "")
+        result["revision"] = int(row["aggregate_version"])
+        return result
+
+    def _resource_template_summary(self, template_uuid: str) -> Dict[str, Any]:
+        row = self.store.query_one(
+            "SELECT uuid,name,display_name,resource_type,icon FROM resource_template "
+            "WHERE uuid=? AND deleted_at IS NULL",
+            (template_uuid,),
+        )
+        if row is None:
+            raise BackendContractError(RESOURCE_TEMPLATE_NOT_FOUND, "Resource template not found")
+        result = {
+            "uuid": row["uuid"],
+            "name": row["name"],
+            "display_name": row["display_name"],
+            "resource_type": row["resource_type"],
+        }
+        if row.get("icon") is not None:
+            result["icon"] = row["icon"]
         return result
 
     @classmethod

@@ -510,6 +510,45 @@ def test_restart_with_same_source_and_fingerprint_is_idempotent(tmp_path: Path) 
     assert site_count == {"count": 2}
 
 
+def test_v2_fingerprint_upgrade_recovers_material_type_from_same_source_graph(
+    tmp_path: Path,
+) -> None:
+    """旧指纹库存应从同源资源图补齐 Material.type，而不是从模板猜测。"""
+
+    database_path = tmp_path / "inventory.db"
+    first = InventoryStore(str(database_path))
+    try:
+        assert _bootstrap(first, _ResourceTree())["status"] == "imported"
+        with first.transaction() as connection:
+            connection.execute(
+                "UPDATE material SET type='resource' WHERE uuid=?",
+                (MOUNT_MATERIAL_UUID,),
+            )
+            connection.execute(
+                "UPDATE lab_meta SET meta_value='legacy-v2' "
+                "WHERE meta_key='resource_graph_bootstrap_fingerprint'"
+            )
+            connection.execute(
+                "UPDATE lab_meta SET meta_value='2' "
+                "WHERE meta_key='resource_graph_bootstrap_fingerprint_version'"
+            )
+    finally:
+        first.close()
+
+    reopened = InventoryStore(str(database_path))
+    try:
+        receipt = _bootstrap(reopened, _ResourceTree())
+        material = reopened.query_one(
+            "SELECT type FROM material WHERE uuid=?",
+            (MOUNT_MATERIAL_UUID,),
+        )
+    finally:
+        reopened.close()
+
+    assert receipt["status"] == "unchanged"
+    assert material == {"type": "device"}
+
+
 def test_registry_action_change_does_not_invalidate_identical_inventory_graph(
     tmp_path: Path,
 ) -> None:

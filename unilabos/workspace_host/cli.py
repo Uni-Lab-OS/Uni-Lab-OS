@@ -56,6 +56,13 @@ def register_workspace_subcommands(subparsers: Any) -> None:
     authority.add_argument("--operation-id", default=None)
     authority.add_argument("--wait", type=float, default=120.0)
     authority.add_argument("--json", action="store_true", dest="workspace_json")
+    publish = actions.add_parser("publish")
+    publish.add_argument("--backend-url", required=True)
+    publish.add_argument("--workspace", dest="workspace_cli_path", default=None)
+    publish.add_argument("--operation-id", default=None)
+    publish.add_argument("--wait", type=float, default=300.0)
+    publish.add_argument("--activate", action="store_true")
+    publish.add_argument("--json", action="store_true", dest="workspace_json")
 
 
 def dispatch_workspace_command(args: dict[str, Any]) -> bool:
@@ -85,6 +92,18 @@ def dispatch_workspace_command(args: dict[str, Any]) -> bool:
                 },
                 operation_id=args.get("operation_id"),
                 timeout=float(args.get("wait") or 120.0),
+            )
+        elif action == "publish":
+            client = ensure_workspace_host(workspace)
+            result = client.execute(
+                "release.publish",
+                parameters={
+                    "backendUrl": args.get("backend_url"),
+                    "activate": bool(args.get("activate")),
+                    "verify": True,
+                },
+                operation_id=args.get("operation_id"),
+                timeout=float(args.get("wait") or 300.0),
             )
         elif action == "reset-local":
             if not args.get("yes"):

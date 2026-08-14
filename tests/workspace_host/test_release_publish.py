@@ -1,0 +1,1387 @@
+"""AIW WorkspaceRelease Plan/Apply/Verify public seams."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from argparse import ArgumentParser
+
+import pytest
+
+from unilabos.workspace_host.model import WorkspaceHostError
+from unilabos.workspace_host.host import WorkspaceHost
+from unilabos.workspace_host.model import WorkspacePaths
+from unilabos.workspace_host.cli import (
+    dispatch_workspace_command,
+    register_workspace_subcommands,
+)
+from unilabos.workspace_host.release_publish import (
+    DeploymentPlan,
+    DeploymentResult,
+    VerificationReport,
+    WorkspaceRelease,
+    WorkspaceReleasePublisher,
+    _deployment_template_definition,
+    _backend_workflow_projection,
+    _prepare_deployment_templates,
+    _repair_public_node_metadata,
+    _remap_imported_workflow_graph,
+    _restore_public_authoring_params,
+    _workflow_node_patches,
+    _workflow_import_payload,
+    _normalized_workflow,
+)
+
+
+def _release() -> WorkspaceRelease:
+    return WorkspaceRelease(
+        release_id="sha256:release-1",
+        source_workspace="/workspace",
+        templates=({"uuid": "local-template", "name": "device.pump"},),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+
+
+def test_publish_runs_plan_apply_verify_and_records_only_verified_release(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    release = _release()
+
+    class Builder:
+        def build(self) -> WorkspaceRelease:
+            calls.append("build")
+            return release
+
+    class Target:
+        def plan(self, candidate: WorkspaceRelease) -> DeploymentPlan:
+            calls.append("plan")
+            return DeploymentPlan(
+                release=candidate,
+                target_address="https://backend.example/api/v1",
+                template_count=1,
+                material_count=0,
+                workflow_count=0,
+            )
+
+        def apply(self, plan: DeploymentPlan) -> DeploymentResult:
+            calls.append("apply")
+            return DeploymentResult(
+                release_id=plan.release.release_id,
+                target_address=plan.target_address,
+                template_identities={"device.pump": "backend-template"},
+                material_identities={},
+                workflow_identities={},
+            )
+
+    class Verifier:
+        def verify(
+            self,
+            candidate: WorkspaceRelease,
+            result: DeploymentResult,
+        ) -> VerificationReport:
+            calls.append("verify")
+            return VerificationReport(
+                verified=True,
+                template_count=1,
+                material_count=0,
+                workflow_count=0,
+                diagnostics=(),
+            )
+
+    publisher = WorkspaceReleasePublisher(
+        Builder(),
+        Target(),
+        Verifier(),
+        deployment_directory=tmp_path,
+    )
+
+    receipt = publisher.publish()
+
+    assert calls == ["build", "plan", "apply", "verify"]
+    assert receipt["verified"] is True
+    assert receipt["releaseId"] == release.release_id
+    assert (tmp_path / "sha256-release-1.json").is_file()
+
+
+def test_publish_fails_closed_and_does_not_record_unverified_release(
+    tmp_path: Path,
+) -> None:
+    release = _release()
+
+    class Builder:
+        def build(self) -> WorkspaceRelease:
+            return release
+
+    class Target:
+        def plan(self, candidate: WorkspaceRelease) -> DeploymentPlan:
+            return DeploymentPlan(
+                release=candidate,
+                target_address="https://backend.example/api/v1",
+                template_count=1,
+                material_count=0,
+                workflow_count=0,
+            )
+
+        def apply(self, plan: DeploymentPlan) -> DeploymentResult:
+            return DeploymentResult(
+                release_id=plan.release.release_id,
+                target_address=plan.target_address,
+                template_identities={},
+                material_identities={},
+                workflow_identities={},
+            )
+
+    class Verifier:
+        def verify(self, *_args: object) -> VerificationReport:
+            return VerificationReport(
+                verified=False,
+                template_count=0,
+                material_count=0,
+                workflow_count=0,
+                diagnostics=("template device.pump is missing",),
+            )
+
+    publisher = WorkspaceReleasePublisher(
+        Builder(),
+        Target(),
+        Verifier(),
+        deployment_directory=tmp_path,
+    )
+
+    with pytest.raises(WorkspaceHostError) as caught:
+        publisher.publish()
+
+    assert caught.value.code == "release_verification_failed"
+    assert not list(tmp_path.iterdir())
+
+
+def test_restore_authoring_params_preserves_composite_contract_and_private_nodes() -> None:
+    current = {
+        "workflow": {"uuid": "target-workflow", "revision": 9},
+        "nodes": [
+            {
+                "uuid": "invocation",
+                "parent_uuid": None,
+                "type": "workflow",
+                "param": {"resource": {"uuid": "temporary"}},
+                "meta_data": {
+                    "unilab": {"composite": {"contract_uuid": "frozen"}},
+                    "unilab_release": {"source_node_uuid": "source-invocation"},
+                },
+            },
+            {
+                "uuid": "private-child",
+                "parent_uuid": "invocation",
+                "type": "action",
+                "param": {"resource": {"uuid": "temporary"}},
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-child"}
+                },
+            },
+        ],
+        "edges": [{"uuid": "private-edge"}],
+    }
+    authoring = {
+        "nodes": [
+            {
+                "uuid": "invocation",
+                "parent_uuid": None,
+                "param": {},
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-invocation"}
+                },
+            },
+            {
+                "uuid": "private-child",
+                "parent_uuid": "invocation",
+                "param": {},
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-child"}
+                },
+            },
+        ]
+    }
+
+    restored = _restore_public_authoring_params(current, authoring)
+
+    assert restored["nodes"][0]["param"] == {}
+    assert restored["nodes"][0]["meta_data"] == current["nodes"][0]["meta_data"]
+    assert restored["nodes"][1] == current["nodes"][1]
+    assert restored["edges"] == current["edges"]
+
+
+def test_repair_public_metadata_keeps_composite_subgraph_immutable() -> None:
+    current = {
+        "nodes": [
+            {
+                "uuid": "atomic",
+                "parent_uuid": None,
+                "type": "device_action",
+                "meta_data": {
+                    "unilab": {"input_bindings": {"local-handle": {}}},
+                    "unilab_release": {"source_node_uuid": "source-atomic"},
+                },
+            },
+            {
+                "uuid": "invocation",
+                "parent_uuid": None,
+                "type": "workflow",
+                "meta_data": {
+                    "unilab": {"composite": {"contract_uuid": "frozen"}},
+                    "unilab_release": {"source_node_uuid": "source-invocation"},
+                },
+            },
+            {
+                "uuid": "private",
+                "parent_uuid": "invocation",
+                "type": "device_action",
+                "meta_data": {
+                    "unilab": {"input_bindings": {"local-private": {}}},
+                    "unilab_release": {"source_node_uuid": "source-private"},
+                },
+            },
+        ],
+        "edges": [{"uuid": "private-edge"}],
+    }
+    remapped = {
+        "nodes": [
+            {
+                "uuid": "atomic",
+                "parent_uuid": None,
+                "type": "device_action",
+                "meta_data": {
+                    "unilab": {"input_bindings": {"target-handle": {}}},
+                    "unilab_release": {"source_node_uuid": "source-atomic"},
+                },
+            },
+            {
+                "uuid": "invocation",
+                "parent_uuid": None,
+                "type": "workflow",
+                "meta_data": {"changed": True},
+            },
+            {
+                "uuid": "private",
+                "parent_uuid": "invocation",
+                "type": "device_action",
+                "meta_data": {"changed": True},
+            },
+        ]
+    }
+
+    repaired = _repair_public_node_metadata(current, remapped)
+
+    assert "target-handle" in repaired["nodes"][0]["meta_data"]["unilab"]["input_bindings"]
+    assert repaired["nodes"][1] == current["nodes"][1]
+    assert repaired["nodes"][2] == current["nodes"][2]
+    assert repaired["edges"] == current["edges"]
+
+    patches = _workflow_node_patches(
+        current,
+        repaired,
+        fields=("meta_data",),
+    )
+    assert patches == [
+        (
+            "atomic",
+            {
+                "meta_data": {
+                    "unilab": {"input_bindings": {"target-handle": {}}},
+                    "unilab_release": {"source_node_uuid": "source-atomic"},
+                }
+            },
+        )
+    ]
+
+
+def test_instance_owned_sites_use_deterministic_release_only_template() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-with-sites",
+        source_workspace="/workspace",
+        templates=(
+            {
+                "uuid": "local-template",
+                "name": "resource.tip_box",
+                "display_name": "TIP 盒",
+                "resource_type": "resource",
+                "config_info": [],
+            },
+        ),
+        material_graph={
+            "nodes": [
+                {
+                    "material": {
+                        "uuid": "local-material",
+                        "resource_template_uuid": "local-template",
+                        "class": "resource.tip_box",
+                        "type": "container",
+                        "barcode": "TIP-01",
+                        "name": "TIP 盒 01",
+                        "config": {
+                            "sites": [
+                                {
+                                    "label": "tip-101",
+                                    "position": {"x": 1, "y": 2, "z": 3},
+                                    "size": {"width": 4, "height": 5, "depth": 6},
+                                    "content_type": ["tip"],
+                                }
+                            ]
+                        },
+                        "data": {},
+                    },
+                    "sites": [
+                        {
+                            "name": "tip-101",
+                            "position_x": 1,
+                            "position_y": 2,
+                            "position_z": 3,
+                            "width": 4,
+                            "length": 5,
+                            "depth": 6,
+                        }
+                    ],
+                }
+            ]
+        },
+        workflows=(),
+    )
+
+    prepared = _prepare_deployment_templates(release)
+
+    assert len(prepared.templates) == 2
+    derived_name = prepared.material_template_names["local-material"]
+    assert derived_name.startswith("resource.tip_box.__unilab_release__.")
+    derived = next(item for item in prepared.templates if item["name"] == derived_name)
+    assert derived["display_name"] == "TIP 盒"
+    assert derived["config_info"][0]["config"]["sites"][0]["label"] == "tip-101"
+    assert derived["available_sites"] == [
+        {
+            "schema_version": 1,
+            "index": 0,
+            "label": "tip-101",
+            "visible": True,
+            "position_x": 1,
+            "position_y": 2,
+            "position_z": 3,
+            "rotation_x": 0,
+            "rotation_y": 0,
+            "rotation_z": 0,
+            "parent_link": "",
+            "width": 4,
+            "length": 5,
+            "depth": 6,
+            "content_type": ["tip"],
+            "allowed_resource_template_uuids": [],
+            "description": None,
+            "meta_data": {},
+        }
+    ]
+
+
+def test_resource_template_root_uses_material_type_for_backend_admission() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-root",
+        source_workspace="/workspace",
+        templates=(
+            {
+                "uuid": "deck-template",
+                "name": "resource.deck",
+                "display_name": "实验台",
+                "resource_type": "resource",
+                "config_info": [],
+            },
+        ),
+        material_graph={
+            "nodes": [
+                {
+                    "material": {
+                        "uuid": "deck-material",
+                        "resource_template_uuid": "deck-template",
+                        "parent_uuid": None,
+                        "class": "resource.deck",
+                        "type": "deck",
+                        "barcode": "DECK-01",
+                        "name": "实验台",
+                        "config": {},
+                        "data": {},
+                    },
+                    "sites": [],
+                }
+            ]
+        },
+        workflows=(),
+    )
+
+    prepared = _prepare_deployment_templates(release)
+    derived_name = prepared.material_template_names["deck-material"]
+    derived = next(item for item in prepared.templates if item["name"] == derived_name)
+
+    assert derived["resource_type"] == "deck"
+    assert derived["display_name"] == "实验台"
+
+
+def test_imported_workflow_metadata_uses_backend_node_and_handle_identities() -> None:
+    source_graph = {
+        "workflow": {
+            "uuid": "source-workflow",
+            "name": "workflow",
+            "meta_data": {
+                "unilab": {
+                    "output_bindings": {
+                        "result": {
+                            "workflow_node_uuid": "source-node",
+                            "source_handle_uuid": "source-output",
+                        }
+                    }
+                }
+            },
+        },
+        "nodes": [
+            {
+                "uuid": "source-node",
+                "workflow_node_template_uuid": "source-node-template",
+                "param": {
+                    "resource": {"uuid": "source-material"},
+                    "resource_template_uuid": "source-resource-template",
+                },
+                "meta_data": {
+                    "unilab": {
+                        "input_bindings": {
+                            "source-input": {
+                                "workflow_node_uuid": "source-node",
+                                "source_handle_uuid": "source-output",
+                            }
+                        },
+                        "material_passthrough_handles": {
+                            "source-output": "source-input"
+                        },
+                    }
+                },
+            }
+        ],
+        "handle_templates": [
+            {
+                "uuid": "source-input",
+                "workflow_node_template_uuid": "source-node-template",
+                "handle_key": "resource",
+                "io_type": "target",
+            },
+            {
+                "uuid": "source-output",
+                "workflow_node_template_uuid": "source-node-template",
+                "handle_key": "resource",
+                "io_type": "source",
+            },
+        ],
+    }
+    imported_graph = {
+        "workflow": {
+            "uuid": "target-workflow",
+            "name": "workflow",
+            "revision": 1,
+            "meta_data": {},
+        },
+        "nodes": [
+            {
+                "uuid": "target-node",
+                "workflow_node_template_uuid": "target-node-template",
+                "param": {},
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-node"}
+                },
+            }
+        ],
+        "handle_templates": [
+            {
+                "uuid": "target-input",
+                "workflow_node_template_uuid": "target-node-template",
+                "handle_key": "resource",
+                "io_type": "target",
+            },
+            {
+                "uuid": "target-output",
+                "workflow_node_template_uuid": "target-node-template",
+                "handle_key": "resource",
+                "io_type": "source",
+            },
+        ],
+        "edges": [],
+    }
+    release = WorkspaceRelease(
+        release_id="sha256:release-identities",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+
+    remapped = _remap_imported_workflow_graph(
+        source_graph,
+        imported_graph,
+        release=release,
+        workflow_identities={"source-workflow": "target-workflow"},
+        material_identities={"source-material": "target-material"},
+        resource_template_identities={
+            "source-resource-template": "target-resource-template"
+        },
+    )
+
+    workflow_unilab = remapped["workflow"]["meta_data"]["unilab"]
+    assert workflow_unilab["output_bindings"]["result"] == {
+        "workflow_node_uuid": "target-node",
+        "source_handle_uuid": "target-output",
+    }
+    node = remapped["nodes"][0]
+    node_unilab = node["meta_data"]["unilab"]
+    assert node_unilab["input_bindings"]["target-input"] == {
+        "workflow_node_uuid": "target-node",
+        "source_handle_uuid": "target-output",
+    }
+    assert node_unilab["material_passthrough_handles"] == {
+        "target-output": "target-input"
+    }
+    assert node["param"] == {
+        "resource": {"uuid": "target-material"},
+        "resource_template_uuid": "target-resource-template",
+    }
+    assert node["meta_data"]["unilab_release"] == {
+        "release_id": "sha256:release-identities",
+        "source_node_uuid": "source-node",
+    }
+
+
+def test_imported_workflow_can_preserve_temporary_publication_scaffold() -> None:
+    source_graph = {
+        "workflow": {"uuid": "source-workflow", "name": "workflow"},
+        "nodes": [
+            {
+                "uuid": "source-node",
+                "workflow_node_template_uuid": "source-node-template",
+                "param": {},
+                "meta_data": {},
+            }
+        ],
+        "handle_templates": [],
+    }
+    imported_graph = {
+        "workflow": {
+            "uuid": "target-workflow",
+            "name": "workflow",
+            "revision": 1,
+            "meta_data": {},
+        },
+        "nodes": [
+            {
+                "uuid": "target-node",
+                "workflow_node_template_uuid": "target-node-template",
+                "param": {"required_input": "temporary-publication-value"},
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-node"}
+                },
+            }
+        ],
+        "handle_templates": [],
+        "edges": [],
+    }
+    release = WorkspaceRelease(
+        release_id="sha256:release-scaffold",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+
+    publication_graph = _remap_imported_workflow_graph(
+        source_graph,
+        imported_graph,
+        release=release,
+        workflow_identities={"source-workflow": "target-workflow"},
+        material_identities={},
+        resource_template_identities={},
+        preserve_imported_param_defaults=True,
+    )
+    authoring_graph = _remap_imported_workflow_graph(
+        source_graph,
+        imported_graph,
+        release=release,
+        workflow_identities={"source-workflow": "target-workflow"},
+        material_identities={},
+        resource_template_identities={},
+    )
+
+    assert publication_graph["nodes"][0]["param"] == {
+        "required_input": "temporary-publication-value"
+    }
+    assert authoring_graph["nodes"][0]["param"] == {}
+
+
+def test_workflow_import_maps_known_domain_identities_before_backend_validation() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-preimport",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {
+            "uuid": "source-workflow",
+            "name": "source",
+            "meta_data": {
+                "dependency": "source-child-workflow",
+            },
+        },
+        "node_templates": [
+            {
+                "uuid": "material-source-template",
+                "name": "material_source",
+            }
+        ],
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "source-node",
+                "workflow_node_template_uuid": "material-source-template",
+                "name": "source",
+                "type": "material_source",
+                "param": {
+                    "resource_template_uuid": "source-resource-template",
+                    "resource": {"uuid": "source-material"},
+                },
+                "meta_data": {
+                    "resource_template_uuid": "source-resource-template"
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={
+            "source-child-workflow": "target-child-workflow"
+        },
+        material_identities={"source-material": "target-material"},
+        source_template_names={},
+        resource_template_identities={
+            "source-resource-template": "target-resource-template"
+        },
+    )
+
+    assert payload["meta_data"]["dependency"] == "target-child-workflow"
+    assert payload["nodes"][0]["param"] == {
+        "resource_template_uuid": "target-resource-template",
+        "resource": {"uuid": "target-material"},
+    }
+    assert payload["nodes"][0]["meta_data"]["resource_template_uuid"] == (
+        "target-resource-template"
+    )
+
+
+def test_workflow_import_uses_published_composite_template_identity() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-composite-template",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {"uuid": "source-parent", "name": "parent"},
+        "node_templates": [
+            {
+                "uuid": "source-composite-template",
+                "name": "workflow:source-child",
+                "resource_template_uuid": "source-host-template",
+            }
+        ],
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "composite-node",
+                "workflow_node_template_uuid": "source-composite-template",
+                "name": "child",
+                "type": "workflow",
+                "param": {},
+                "meta_data": {},
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={"source-child": "target-child"},
+        workflow_template_identities={
+            "source-child": "target-published-node-template"
+        },
+        material_identities={},
+        source_template_names={"source-host-template": "host_node"},
+        resource_template_identities={},
+    )
+
+    assert payload["nodes"][0]["workflow_node_template_uuid"] == (
+        "target-published-node-template"
+    )
+    assert "template_name" not in payload["nodes"][0]
+    assert "resource_name" not in payload["nodes"][0]
+
+
+def test_backend_workflow_projection_removes_visual_groups_and_promotes_children() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-group",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {"uuid": "source-workflow", "name": "source"},
+        "node_templates": [
+            {
+                "uuid": "group-template",
+                "name": "group",
+                "resource_template_uuid": "host-template",
+            }
+        ],
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "group-node",
+                "workflow_node_template_uuid": "group-template",
+                "name": "group",
+                "type": "Group",
+                "param": {},
+                "meta_data": {},
+            },
+            {
+                "uuid": "nested-group-node",
+                "workflow_node_template_uuid": "group-template",
+                "parent_uuid": "group-node",
+                "name": "nested group",
+                "type": "group",
+                "param": {},
+                "meta_data": {},
+            },
+            {
+                "uuid": "action-node",
+                "workflow_node_template_uuid": "action-template",
+                "parent_uuid": "nested-group-node",
+                "name": "action",
+                "type": "device_action",
+                "param": {},
+                "meta_data": {},
+            },
+        ],
+        "edges": [],
+    }
+
+    projected = _backend_workflow_projection(graph)
+
+    assert [node["uuid"] for node in projected["nodes"]] == ["action-node"]
+    assert projected["nodes"][0]["parent_uuid"] is None
+
+
+def test_backend_workflow_projection_rejects_semantic_edges_attached_to_group() -> None:
+    graph = {
+        "workflow": {"uuid": "source-workflow", "name": "source"},
+        "nodes": [
+            {"uuid": "group-node", "type": "group"},
+            {"uuid": "action-node", "type": "device_action"},
+        ],
+        "edges": [
+            {
+                "uuid": "edge-1",
+                "source_node_uuid": "group-node",
+                "target_node_uuid": "action-node",
+            }
+        ],
+    }
+
+    with pytest.raises(WorkspaceHostError) as raised:
+        _backend_workflow_projection(graph)
+
+    assert raised.value.code == "release_source_invalid"
+
+
+def test_backend_workflow_projection_clears_nonexistent_material_source_selection() -> None:
+    graph = {
+        "workflow": {"uuid": "source-workflow", "name": "source"},
+        "nodes": [
+            {
+                "uuid": "source-node",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": "authoring-placeholder-material",
+                    "mount": {"uuid": "known-mount"},
+                },
+            },
+            {
+                "uuid": "selected-source-node",
+                "type": "material_source",
+                "param": {
+                    "mode": "existing",
+                    "material_uuid": "known-material",
+                    "mount": {"uuid": "known-mount"},
+                },
+            },
+        ],
+        "edges": [],
+    }
+
+    projected = _backend_workflow_projection(
+        graph,
+        known_material_uuids={"known-mount", "known-material"},
+    )
+
+    assert projected["nodes"][0]["param"]["material_uuid"] is None
+    assert projected["nodes"][1]["param"]["material_uuid"] == "known-material"
+
+
+def test_backend_workflow_projection_promotes_material_passthrough_output() -> None:
+    graph = {
+        "workflow": {
+            "uuid": "source-workflow",
+            "name": "transfer",
+            "meta_data": {
+                "unilab": {
+                    "output_contract": {
+                        "version": 1,
+                        "outputs": [
+                            {
+                                "name": "resource",
+                                "implicit": True,
+                                "schema": {"$slot": "ResourceSlot"},
+                            }
+                        ],
+                    },
+                    "output_bindings": {
+                        "resource": {
+                            "kind": "workflow_input",
+                            "parameter": "resource",
+                        }
+                    },
+                }
+            },
+        },
+        "node_templates": [
+            {"uuid": "pick-template", "name": "pick"},
+            {"uuid": "commit-template", "name": "transfer_resource"},
+        ],
+        "handle_templates": [
+            {
+                "uuid": "pick-resource-output",
+                "workflow_node_template_uuid": "pick-template",
+                "handle_key": "resource",
+                "io_type": "source",
+            },
+            {
+                "uuid": "commit-resource-output",
+                "workflow_node_template_uuid": "commit-template",
+                "handle_key": "resource",
+                "io_type": "source",
+            },
+        ],
+        "nodes": [
+            {
+                "uuid": "pick-node",
+                "workflow_node_template_uuid": "pick-template",
+                "type": "device_action",
+                "meta_data": {
+                    "unilab": {"authoring_source_order": 0}
+                },
+            },
+            {
+                "uuid": "commit-node",
+                "workflow_node_template_uuid": "commit-template",
+                "type": "device_action",
+                "meta_data": {
+                    "unilab": {"authoring_source_order": 2}
+                },
+            },
+        ],
+        "edges": [],
+    }
+
+    projected = _backend_workflow_projection(graph)
+    unilab = projected["workflow"]["meta_data"]["unilab"]
+
+    assert unilab["output_contract"]["outputs"][0]["implicit"] is False
+    assert unilab["output_bindings"]["resource"] == {
+        "kind": "node_output",
+        "workflow_node_uuid": "commit-node",
+        "source_handle_uuid": "commit-resource-output",
+    }
+
+
+def test_workflow_import_omits_visual_group_nodes() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-group",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {"uuid": "source-workflow", "name": "source"},
+        "node_templates": [
+            {
+                "uuid": "group-template",
+                "name": "group",
+                "resource_template_uuid": "host-template",
+            }
+        ],
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "group-node",
+                "workflow_node_template_uuid": "group-template",
+                "name": "group",
+                "type": "Group",
+                "param": {},
+                "meta_data": {},
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        _backend_workflow_projection(graph),
+        release=release,
+        workflow_identities={},
+        material_identities={},
+        source_template_names={"host-template": "host_node"},
+        resource_template_identities={"host-template": "target-host-template"},
+    )
+
+    assert payload["nodes"] == []
+
+
+def test_workflow_verification_treats_local_ilab_as_backend_device_action() -> None:
+    source = {
+        "workflow": {"name": "source"},
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "source-node",
+                "name": "act",
+                "type": "ILab",
+                "disabled": False,
+            }
+        ],
+        "edges": [],
+    }
+    target = {
+        "workflow": {"name": "source"},
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "target-node",
+                "name": "act",
+                "type": "device_action",
+                "disabled": False,
+                "meta_data": {
+                    "unilab_release": {"source_node_uuid": "source-node"}
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    assert _normalized_workflow(source, source=True) == _normalized_workflow(
+        target, source=False
+    )
+
+
+def test_workflow_import_materializes_bound_workflow_parameter_default() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-input-default",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {
+            "uuid": "source-workflow",
+            "name": "source",
+            "meta_data": {
+                "unilab": {
+                    "input_contract": {
+                        "parameters": [
+                            {"name": "target_mass_g", "default": 1.0}
+                        ]
+                    }
+                }
+            },
+        },
+        "node_templates": [],
+        "handle_templates": [
+            {
+                "uuid": "target-mass-handle",
+                "handle_key": "target_mass_g",
+                "data_key": "target_mass_g",
+            }
+        ],
+        "nodes": [
+            {
+                "uuid": "action-node",
+                "name": "dose",
+                "type": "device_action",
+                "param": {"powder_site": "P01"},
+                "meta_data": {
+                    "unilab": {
+                        "input_bindings": {
+                            "target-mass-handle": {
+                                "parameter": "target_mass_g"
+                            }
+                        }
+                    }
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={},
+        material_identities={},
+        source_template_names={},
+        resource_template_identities={},
+    )
+
+    assert payload["nodes"][0]["param"] == {
+        "powder_site": "P01",
+        "target_mass_g": 1.0,
+    }
+
+
+def test_workflow_import_scaffolds_required_connected_action_inputs() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-connected-input",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {"uuid": "source-workflow", "name": "source"},
+        "node_templates": [],
+        "handle_templates": [
+            {
+                "uuid": "material-input",
+                "workflow_node_template_uuid": "action-template",
+                "handle_key": "coarse_powder_cartridge",
+                "data_key": "coarse_powder_cartridge",
+                "io_type": "target",
+                "type": "ResourceSlot",
+                "required": True,
+                "meta_data": {"unilab": {"value_schema": {"type": "object"}}},
+            }
+        ],
+        "nodes": [
+            {
+                "uuid": "action-node",
+                "workflow_node_template_uuid": "action-template",
+                "name": "dose",
+                "type": "device_action",
+                "param": {},
+                "meta_data": {},
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={},
+        material_identities={"source-material": "target-material"},
+        source_template_names={},
+        resource_template_identities={},
+    )
+
+    assert payload["nodes"][0]["param"] == {
+        "coarse_powder_cartridge": {"uuid": "target-material"}
+    }
+
+
+def test_workflow_import_scaffolds_required_bound_inputs_for_publication() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-required-input",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {
+            "uuid": "source-workflow",
+            "name": "source",
+            "meta_data": {
+                "unilab": {
+                    "input_contract": {
+                        "parameters": [
+                            {
+                                "name": "target_device",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "resource",
+                                "required": True,
+                                "schema": {"$slot": "ResourceSlot"},
+                            },
+                        ]
+                    }
+                }
+            },
+        },
+        "node_templates": [],
+        "handle_templates": [
+            {
+                "uuid": "target-device-handle",
+                "handle_key": "target_device",
+                "data_key": "target_device",
+            },
+            {
+                "uuid": "resource-handle",
+                "handle_key": "resource",
+                "data_key": "resource",
+            },
+        ],
+        "nodes": [
+            {
+                "uuid": "action-node",
+                "name": "transfer",
+                "type": "device_action",
+                "param": {},
+                "meta_data": {
+                    "unilab": {
+                        "input_bindings": {
+                            "target-device-handle": {
+                                "parameter": "target_device"
+                            },
+                            "resource-handle": {"parameter": "resource"},
+                        }
+                    }
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={},
+        material_identities={"source-material": "target-material"},
+        source_template_names={},
+        resource_template_identities={},
+    )
+
+    assert payload["nodes"][0]["param"] == {
+        "target_device": "unilab-release-input",
+        "resource": {"uuid": "target-material"},
+    }
+
+
+def test_workflow_import_scaffolds_composite_inputs_before_identity_remap() -> None:
+    release = WorkspaceRelease(
+        release_id="sha256:release-composite-input",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {"uuid": "source-parent", "name": "parent"},
+        "node_templates": [
+            {
+                "uuid": "source-composite-template",
+                "name": "workflow:source-child",
+            }
+        ],
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "composite-node",
+                "workflow_node_template_uuid": "source-composite-template",
+                "name": "child",
+                "type": "workflow",
+                "param": {},
+                "meta_data": {
+                    "unilab": {
+                        "composite": {
+                            "contract_compatibility": {
+                                "inputs": [
+                                    {
+                                        "name": "resource",
+                                        "required": True,
+                                        "schema": {"$slot": "ResourceSlot"},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={"source-child": "target-child"},
+        workflow_template_identities={
+            "source-child": "target-published-node-template"
+        },
+        material_identities={"source-material": "target-material"},
+        source_template_names={},
+        resource_template_identities={},
+    )
+
+    assert payload["nodes"][0]["param"] == {
+        "resource": {"uuid": "target-material"}
+    }
+
+
+def test_local_action_catalog_is_restored_into_backend_sync_definition() -> None:
+    definition = _deployment_template_definition(
+        {
+            "uuid": "device-template",
+            "name": "device.robot",
+            "display_name": "机械臂",
+            "resource_type": "device",
+        },
+        (
+            {
+                "template": {
+                    "resource_template_uuid": "device-template",
+                    "name": "pick",
+                    "display_name": "抓取",
+                    "type": "UniLabJsonCommand",
+                    "node_type": "ILab",
+                    "goal": {"resource": "resource"},
+                    "goal_default": {},
+                    "feedback": {},
+                    "result": {},
+                    "schema": '{"type":"object","properties":{}}',
+                },
+                "handles": [
+                    {
+                        "handle_key": "ready",
+                        "io_type": "target",
+                        "type": "default",
+                    },
+                    {
+                        "handle_key": "resource",
+                        "display_name": "物料",
+                        "io_type": "target",
+                        "type": "resource",
+                        "data_source": "goal",
+                        "data_key": "resource",
+                    },
+                ],
+            },
+        ),
+    )
+
+    action = definition["class"]["action_value_mappings"]["pick"]
+    assert action["schema"] == {"type": "object", "properties": {}}
+    assert [handle["handler_key"] for handle in action["handles"]["input"]] == [
+        "resource"
+    ]
+
+
+def test_workspace_host_release_publish_uses_visible_local_backend_and_can_activate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, "host-token", readiness_timeout=1)
+    host._components["backend"].update(  # type: ignore[attr-defined]
+        {"phase": "ready", "address": "http://127.0.0.1:18003"}
+    )
+    host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
+    host._switch_authority = lambda values: {"domainMode": values["mode"]}  # type: ignore[method-assign]
+    captured: dict[str, object] = {}
+
+    class Publisher:
+        def publish(self) -> dict[str, object]:
+            return {"releaseId": "sha256:release-1", "verified": True}
+
+    def create_publisher(**kwargs: object) -> Publisher:
+        captured.update(kwargs)
+        return Publisher()
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.release_publish.create_existing_backend_publisher",
+        create_publisher,
+    )
+
+    result = host._dispatch(
+        "release.publish",
+        {
+            "backendUrl": "https://backend.example",
+            "activate": True,
+            "verify": True,
+        },
+    )
+
+    assert captured["source_address"] == "http://127.0.0.1:18003"
+    assert captured["source_workspace"] == workspace
+    assert result["activated"] is True
+    assert result["authority"] == {"domainMode": "backend"}
+
+
+def test_unilab_workspace_publish_dispatches_the_same_host_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parser = ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    register_workspace_subcommands(subparsers)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    args = vars(
+        parser.parse_args(
+            [
+                "workspace",
+                "publish",
+                "--workspace",
+                str(workspace),
+                "--backend-url",
+                "https://backend.example",
+                "--activate",
+                "--json",
+            ]
+        )
+    )
+    calls: list[tuple[str, object]] = []
+
+    class Client:
+        def execute(self, command: str, **kwargs: object) -> dict[str, object]:
+            calls.append((command, kwargs))
+            return {"verified": True}
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.cli.ensure_workspace_host",
+        lambda _workspace: Client(),
+    )
+
+    assert dispatch_workspace_command(args) is True
+    assert calls[0][0] == "release.publish"
+    assert calls[0][1]["parameters"] == {
+        "backendUrl": "https://backend.example",
+        "activate": True,
+        "verify": True,
+    }

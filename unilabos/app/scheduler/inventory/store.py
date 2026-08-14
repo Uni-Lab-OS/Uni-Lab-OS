@@ -13,7 +13,7 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class InvalidCursorAdvance(ValueError):
@@ -882,6 +882,10 @@ PRAGMA user_version = 5;
 COMMIT;
 """
 
+# v6：补齐 Go Backend 物料图的实例类型字段。修订号继续以
+# material_inventory.aggregate_version 为唯一权威，不复制第二份版本列。
+_SCHEMA_V6_MATERIAL_TYPE = "ALTER TABLE material ADD COLUMN type TEXT NOT NULL DEFAULT ''"
+
 # v2：实验室操作系统布局层（元信息 / 分区 / 2D 摆放）。
 # 只增表不改旧表，v1 库可原地升级。
 _SCHEMA_V2 = """
@@ -940,15 +944,16 @@ class InventoryStore:
                 "SELECT type FROM sqlite_master WHERE name='material_instance'"
             ).fetchone()
             # user_version 可能被备份/测试工具错误降写。规范 v5 以可写兼容视图
-            # 为结构指纹；已是 v5 时绝不能再次运行旧表 ALTER 或重命名迁移。
+            # 为结构指纹；已是 v5 时绝不能再次运行旧表 ALTER 或重命名迁移，
+            # 但仍要继续执行后续 additive migration。
             if (
-                current < SCHEMA_VERSION
+                current < 5
                 and compatibility_object is not None
                 and compatibility_object[0] == "view"
             ):
-                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                current = 5
+                self._conn.execute("PRAGMA user_version = 5")
                 self._conn.commit()
-                return
             if current < 1:
                 self._conn.executescript(_SCHEMA)
             if current < 2:
@@ -993,9 +998,29 @@ class InventoryStore:
                 except BaseException:
                     self._conn.rollback()
                     raise
+            if current < 6:
+                material_columns = {
+                    row[1]
+                    for row in self._conn.execute(
+                        "PRAGMA table_info(material)"
+                    ).fetchall()
+                }
+                if "type" not in material_columns:
+                    self._conn.execute(_SCHEMA_V6_MATERIAL_TYPE)
+            if current >= 5:
+                # A development build may have added the v6 column before the
+                # deterministic backfill was introduced; keep this idempotent.
+                self._conn.execute(
+                    "UPDATE material SET type=("
+                    "SELECT resource_type FROM resource_template "
+                    "WHERE resource_template.uuid=material.resource_template_uuid"
+                    ") WHERE type=''"
+                )
             if current < SCHEMA_VERSION:
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                self._conn.commit()
+            # Idempotent repair/backfill statements also open an implicit SQLite
+            # transaction when the schema version is already current.
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

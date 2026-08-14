@@ -293,6 +293,8 @@ class WorkspaceHost:
             return self._update_configuration(parameters)
         if command == "authority.switch":
             return self._switch_authority(parameters)
+        if command == "release.publish":
+            return self._publish_release(parameters)
         if command == "renderer.attach":
             return self._attach_renderer(parameters)
         if command == "renderer.detach":
@@ -920,7 +922,12 @@ class WorkspaceHost:
             self._publish_locked("configuration.updated", parameters)
             return self._snapshot_locked()
 
-    def _switch_authority(self, parameters: dict[str, object]) -> dict[str, object]:
+    def _switch_authority(
+        self,
+        parameters: dict[str, object],
+        *,
+        bootstrap: bool = True,
+    ) -> dict[str, object]:
         """Atomically move Canvas/Runtime and Edge to one Domain Authority."""
 
         mode = _optional_text(parameters.get("mode"))
@@ -951,7 +958,7 @@ class WorkspaceHost:
         # Local -> Backend 切换先用用户此刻正在查看的 Local Backend
         # Projection 初始化目标。模板或实例失败时尚未停止任何
         # 本地进程，所以当前 Authority 与画布保持完整。
-        if current_mode == "local" and mode == "backend":
+        if current_mode == "local" and mode == "backend" and bootstrap:
             temporary_backend = not backend_ready
             if temporary_backend:
                 self._start_backend({})
@@ -996,6 +1003,85 @@ class WorkspaceHost:
                 {"mode": mode, "backendUrl": backend_url},
             )
             return self._snapshot_locked()
+
+    def _publish_release(self, parameters: dict[str, object]) -> dict[str, object]:
+        """Publish the visible Local generation and optionally activate Backend Authority."""
+
+        unknown = sorted(set(parameters) - {"backendUrl", "activate", "verify"})
+        if unknown:
+            raise WorkspaceHostError(
+                "release_parameters_invalid",
+                f"未知发布字段：{', '.join(unknown)}",
+            )
+        backend_url = self._normalize_backend_url(
+            _optional_text(parameters.get("backendUrl"))
+        )
+        activate = bool(parameters.get("activate", False))
+        if parameters.get("verify", True) is not True:
+            raise WorkspaceHostError(
+                "release_verification_required", "WorkspaceRelease 不允许跳过回读校验"
+            )
+        with self._lock:
+            domain_mode = str(self._configuration.get("domainMode") or "local")
+            backend_ready = self._components["backend"]["phase"] == "ready"
+        if domain_mode != "local":
+            raise WorkspaceHostError(
+                "release_source_not_local", "WorkspaceRelease 只能从 Local Authority 构建"
+            )
+        self._preflight_backend_authority(backend_url)
+        temporary_backend = not backend_ready
+        if temporary_backend:
+            self._start_backend({})
+        try:
+            with self._lock:
+                component = dict(self._components["backend"])
+            source_address = _optional_text(component.get("address"))
+            if not source_address:
+                raise WorkspaceHostError(
+                    "release_source_unavailable", "Local Backend 尚未就绪"
+                )
+            from .release_publish import create_existing_backend_publisher
+
+            staged_authority: dict[str, object] | None = None
+
+            def stage_device_authority() -> None:
+                nonlocal staged_authority
+                staged_authority = self._switch_authority(
+                    {"mode": "backend", "backendUrl": backend_url},
+                    bootstrap=False,
+                )
+
+            with self._lock:
+                self._publish_locked(
+                    "release.publish.started", {"backendUrl": backend_url}
+                )
+            try:
+                receipt = create_existing_backend_publisher(
+                    source_address=source_address,
+                    source_workspace=self.paths.workspace,
+                    target_address=backend_url,
+                    credential=os.environ.get("UNILAB_BACKEND_API_KEY") or self.token,
+                    deployment_directory=self.paths.root / "deployments",
+                    timeout=self.readiness_timeout,
+                    before_workflows=stage_device_authority if activate else None,
+                ).publish()
+            except BaseException:
+                if staged_authority is not None:
+                    self._switch_authority({"mode": "local"})
+                raise
+            with self._lock:
+                self._publish_locked("release.publish.succeeded", receipt)
+        finally:
+            if temporary_backend:
+                self._stop_component("backend")
+        if activate:
+            snapshot = staged_authority or self._switch_authority(
+                {"mode": "backend", "backendUrl": backend_url}
+            )
+            receipt = {**receipt, "activated": True, "authority": snapshot}
+        else:
+            receipt = {**receipt, "activated": False}
+        return receipt
 
     def _bootstrap_backend_authority(self, backend_url: str) -> None:
         """Initialize a target from the current Local Backend projection."""
