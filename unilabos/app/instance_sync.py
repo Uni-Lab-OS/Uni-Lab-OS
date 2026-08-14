@@ -102,6 +102,12 @@ class InstanceSynchronizer:
                         raise InstanceSyncError(
                             f"existing material {node['barcode']} has no UUID"
                         )
+                    self._request(
+                        "PUT",
+                        f"/edge/materials/{material_uuid}/sites/from-template",
+                        route="/api/v1/edge/materials/:material_uuid/sites/from-template",
+                        json={},
+                    )
                     existing_count += 1
                 else:
                     request_body: Dict[str, Any] = {
