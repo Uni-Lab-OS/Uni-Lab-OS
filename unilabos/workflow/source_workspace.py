@@ -196,7 +196,7 @@ def validate_source_registration(
     package_root: str | Path,
     relative_path: str,
 ) -> tuple[Path, str]:
-    """验证单项来源注册指向受限的 ``workflows/*.py`` 路径。
+    """验证单项来源注册指向受限的 ``workflows/**/*.py`` 路径。
 
     参数：``package_root`` 是实际 Python 包目录；``relative_path`` 是包内源码路径。
     返回：规范绝对包目录和规范 POSIX 相对路径。
@@ -540,17 +540,20 @@ def validate_declared_sources(
         )
         assert package_descriptor is not None
         package_metadata = os.fstat(package_descriptor)
-        workflows_descriptor = _open_child_directory(
-            package_descriptor,
-            "workflows",
-            missing_ok=True,
-        )
-        if workflows_descriptor is not None:
-            for relative_path in tuple(relative_paths):
-                # 路径结构已由 manifest 模块验证；这里只用最终文件名做 dir_fd 读取。
-                filename = PurePosixPath(relative_path).name
+        package_root = root_snapshot.selected_root / package_id
+        package_identity = (package_metadata.st_dev, package_metadata.st_ino)
+        for relative_path in tuple(relative_paths):
+            with _source_parent_descriptor(
+                package_root,
+                PurePosixPath(relative_path),
+                expected_root_identity=package_identity,
+                create=False,
+            ) as source_parent:
+                if source_parent is None:
+                    continue
+                parent_descriptor, filename = source_parent
                 source_bytes = _read_optional_regular_at(
-                    workflows_descriptor,
+                    parent_descriptor,
                     filename,
                     byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
                     error_code="invalid_workflow_source",
@@ -631,7 +634,8 @@ def _source_location(
     relative = PurePosixPath(raw_relative)
     if (
         relative.is_absolute()
-        or len(relative.parts) != 2
+        or raw_relative != relative.as_posix()
+        or len(relative.parts) < 2
         or relative.parts[0] != "workflows"
         or any(part in {"", ".", ".."} for part in relative.parts)
         or relative.suffix != ".py"

@@ -24,7 +24,9 @@ from typing import (
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point
+from sensor_msgs.msg import JointState
 from rclpy.action import ActionClient, get_action_server_names_and_types_by_node
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.service import Service
 from typing_extensions import TypedDict
 from unilabos_msgs.action import EmptyIn, StrSingleInput, ResourceCreateFromOuterEasy, ResourceCreateFromOuter
@@ -350,6 +352,16 @@ class HostNode(BaseROS2DeviceNode):
             print_publish=False,
             resource_tracker=self._resource_tracker,  # host node并不是通过initialize 包一层传进来的
         )
+        # ``/joint_states`` 是 MoveIt/PLC/SDK 统一的真实关节观测出口。
+        # HostNode 只拥有 ROS 订阅生命周期；命名归属、时序和限频由
+        # 独立 JointStateProjector 深模块处理，不进入设备状态或控制面。
+        self._joint_state_projection_subscription = self.create_subscription(
+            JointState,
+            "/joint_states",
+            self._project_joint_state,
+            qos_profile_sensor_data,
+            callback_group=self.callback_group,
+        )
 
         # 创建设备、动作客户端和目标存储
         self.devices_names: Dict[str, str] = {device_id: self.namespace}  # 存储设备名称和命名空间的映射
@@ -458,6 +470,20 @@ class HostNode(BaseROS2DeviceNode):
             if hasattr(bridge, "publish_host_ready"):
                 bridge.publish_host_ready()
                 self.lab_logger().debug(f"Host ready signal sent via {bridge.__class__.__name__}")
+
+    @staticmethod
+    def _project_joint_state(message: JointState) -> None:
+        """把 ROS 时戳和关节实测值送入只读投影器。"""
+
+        from unilabos.device_mesh.joint_state_projector import publish_joint_state
+
+        stamp = message.header.stamp
+        observed_at = float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000
+        publish_joint_state(
+            tuple(message.name),
+            tuple(message.position),
+            observed_at=observed_at if observed_at > 0 else None,
+        )
 
     def _send_re_register(self, sclient, device_namespace: str):
         """

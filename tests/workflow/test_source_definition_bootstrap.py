@@ -119,6 +119,23 @@ def test_missing_definition_is_created_with_stable_manifest_provenance(
     assert authoring_record["update_time"] is not None
 
 
+def test_nested_workflow_source_identity_is_persisted_without_flattening(
+    workflow_store: WorkflowStore,
+) -> None:
+    """多级 Workflow 模块路径应原样成为来源事实而不是压平成文件名。"""
+
+    relative_path = "workflows/operations/robot/pick.py"
+    registration = _registration(relative_path=relative_path)
+
+    workflow_store.install_discovered_sources((registration,))
+
+    persisted = workflow_store.get_source_registration(WORKFLOW_A_UUID)
+    workflow = workflow_store.get_workflow(WORKFLOW_A_UUID)
+    assert persisted["relative_path"] == relative_path
+    assert persisted["source_uri"] == f"package://alpha_lab/{relative_path}"
+    assert workflow["name"] == "alpha_lab.pick"
+
+
 def test_active_definition_is_reused_without_overwriting_user_fields_on_restart(
     tmp_path: Path,
 ) -> None:

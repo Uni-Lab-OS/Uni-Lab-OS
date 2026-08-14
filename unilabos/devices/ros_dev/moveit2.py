@@ -1,5 +1,6 @@
 import copy
 import threading
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any, List, Optional, Tuple, Union
 
@@ -16,6 +17,7 @@ from moveit_msgs.msg import (
     MoveItErrorCodes,
     OrientationConstraint,
     PlanningScene,
+    PlanningSceneComponents,
     PositionConstraint,
 )
 from moveit_msgs.srv import (
@@ -242,6 +244,7 @@ class MoveIt2:
         self.__planning_scene = None
         self.__old_planning_scene = None
         self.__old_allowed_collision_matrix = None
+        self.__active_tool_collision_id = None
 
         # Create a service for applying the planning scene
         self._apply_planning_scene_service = self._node.create_client(
@@ -1785,6 +1788,139 @@ class MoveIt2:
             object=CollisionObject(operation=CollisionObject.REMOVE)
         )
         self.__attached_collision_object_publisher.publish(msg)
+
+    def apply_tool_context(self, tool_context: Any) -> Mapping[str, Any]:
+        """原子应用快换工具的碰撞包络并回读同一附着对象。
+
+        参数：``tool_context`` 必须提供不可变摘要、附着代次及
+        ``planning_scene``；当前只接受 box/sphere/cylinder/cone 基本体。
+        返回：绑定 ToolContext 摘要和附着代次的结构化确认。
+        异常：机械臂非空闲、模型字段非法或 PlanningScene 服务不可用时
+        关闭失败；不会启动 RViz，也不会触发任何机械臂运动。
+        """
+
+        if self.query_state() != MoveIt2State.IDLE:
+            raise RuntimeError("MoveIt 非空闲，禁止更换 PlanningScene 工具")
+        planning_scene = getattr(tool_context, "planning_scene", None)
+        if not isinstance(planning_scene, Mapping):
+            raise TypeError("ToolContext.planning_scene 必须是对象")
+        object_id = str(planning_scene.get("attached_body_id", "")).strip()
+        declared_parent = str(planning_scene.get("parent_link", "")).strip()
+        if not object_id or not declared_parent:
+            raise ValueError("ToolContext 缺少 attached_body_id 或 parent_link")
+        if not self.__end_effector_name.endswith(declared_parent):
+            raise ValueError("ToolContext.parent_link 与当前 MoveIt 末端链接不匹配")
+        primitives = planning_scene.get("collision_primitives")
+        if not isinstance(primitives, list) or not primitives:
+            raise ValueError("ToolContext 至少需要一个 collision primitive")
+        touch_links = planning_scene.get("allowed_touch_links", [])
+        if not isinstance(touch_links, list):
+            raise TypeError("ToolContext.allowed_touch_links 必须是列表")
+        qualified_touch_links = [
+            self.__end_effector_name
+            if self.__end_effector_name.endswith(str(link))
+            else str(link)
+            for link in touch_links
+        ]
+        collision = CollisionObject()
+        collision.header.stamp = self._node.get_clock().now().to_msg()
+        collision.header.frame_id = self.__end_effector_name
+        collision.id = object_id
+        collision.operation = CollisionObject.ADD
+        for index, item in enumerate(primitives):
+            if not isinstance(item, Mapping):
+                raise TypeError(f"collision_primitives[{index}] 必须是对象")
+            shape = str(item.get("shape", "")).strip()
+            dimensions = item.get("size_m")
+            pose_data = item.get("pose")
+            if not isinstance(dimensions, list) or not isinstance(pose_data, Mapping):
+                raise TypeError(f"collision_primitives[{index}] 尺寸或 pose 不正确")
+            dimension_values = [float(value) for value in dimensions]
+            shape_contract = {
+                "box": (SolidPrimitive.BOX, 3),
+                "sphere": (SolidPrimitive.SPHERE, 1),
+                "cylinder": (SolidPrimitive.CYLINDER, 2),
+                "cone": (SolidPrimitive.CONE, 2),
+            }
+            if shape not in shape_contract:
+                raise ValueError(f"不支持的工具碰撞基本体: {shape}")
+            primitive_type, expected_size = shape_contract[shape]
+            if len(dimension_values) != expected_size or any(
+                value <= 0.0 for value in dimension_values
+            ):
+                raise ValueError(f"{shape} 的 size_m 数量或数值无效")
+            xyz = pose_data.get("xyz_m")
+            quaternion = pose_data.get("orientation_xyzw")
+            if not isinstance(xyz, list) or len(xyz) != 3:
+                raise ValueError("工具碰撞 pose.xyz_m 必须包含三个数")
+            if not isinstance(quaternion, list) or len(quaternion) != 4:
+                raise ValueError("工具碰撞 pose.orientation_xyzw 必须包含四个数")
+            collision.primitives.append(
+                SolidPrimitive(type=primitive_type, dimensions=dimension_values)
+            )
+            collision.primitive_poses.append(
+                Pose(
+                    position=Point(**dict(zip(("x", "y", "z"), map(float, xyz)))),
+                    orientation=Quaternion(
+                        **dict(
+                            zip(
+                                ("x", "y", "z", "w"),
+                                map(float, quaternion),
+                            )
+                        )
+                    ),
+                )
+            )
+        attached = AttachedCollisionObject(
+            link_name=self.__end_effector_name,
+            object=collision,
+            touch_links=qualified_touch_links,
+        )
+        scene = PlanningScene(is_diff=True)
+        scene.robot_state.is_diff = True
+        if (
+            self.__active_tool_collision_id is not None
+            and self.__active_tool_collision_id != object_id
+        ):
+            scene.robot_state.attached_collision_objects.append(
+                AttachedCollisionObject(
+                    object=CollisionObject(
+                        id=self.__active_tool_collision_id,
+                        operation=CollisionObject.REMOVE,
+                    )
+                )
+            )
+        scene.robot_state.attached_collision_objects.append(attached)
+        if not self._apply_planning_scene_service.wait_for_service(timeout_sec=3.0):
+            raise RuntimeError("ApplyPlanningScene 服务尚未就绪")
+        response = self._apply_planning_scene_service.call(
+            ApplyPlanningScene.Request(scene=scene)
+        )
+        if response is None or response.success is not True:
+            raise RuntimeError("MoveIt 拒绝应用工具 PlanningScene")
+        if not self._get_planning_scene_service.wait_for_service(timeout_sec=3.0):
+            raise RuntimeError("GetPlanningScene 服务尚未就绪，无法确认工具")
+        request = GetPlanningScene.Request()
+        request.components.components = (
+            PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS
+        )
+        observed_response = self._get_planning_scene_service.call(request)
+        if observed_response is None:
+            raise RuntimeError("GetPlanningScene 未返回工具回读")
+        observed = observed_response.scene
+        observed_ids = {
+            item.object.id
+            for item in observed.robot_state.attached_collision_objects
+        }
+        if object_id not in observed_ids:
+            raise RuntimeError("PlanningScene 回读未包含本次快换工具")
+        self.__active_tool_collision_id = object_id
+        return {
+            "applied": True,
+            "tool_context_digest": str(tool_context.digest),
+            "attachment_generation": int(tool_context.attachment_generation),
+            "attached_body_id": object_id,
+        }
 
     def move_collision(
         self,

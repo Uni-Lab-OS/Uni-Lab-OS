@@ -15,7 +15,9 @@ from unilabos.workflow.store import (
     utc_now,
 )
 
-_ACTIVE_JOB_STATES = frozenset({"pending", "dispatched", "running"})
+_ACTIVE_JOB_STATES = frozenset(
+    {"pending", "dispatched", "running", "execution_unknown"}
+)
 _TERMINAL_JOB_STATES = frozenset(
     {"succeeded", "failed", "skipped", "canceled", "timeout"}
 )
@@ -395,6 +397,118 @@ class TaskRuntimeProjection:
                     task_uuid=task_uuid,
                     now=projected_at,
                 )
+            return self._aggregate(connection, task_uuid)
+
+    def project_job_execution_unknown(
+        self,
+        *,
+        job_uuid: str,
+        uncertainty_reason: str,
+        return_info: Mapping[str, Any] | None = None,
+        error_info: Sequence[Any] | None = None,
+    ) -> dict[str, Any]:
+        """打开工作流节点作业的持久执行不确定性。
+
+        参数：``job_uuid`` 是已派发作业身份；``uncertainty_reason`` 是无法证明
+        物理结果的诊断；``return_info`` 与 ``error_info`` 保存设备原始结果和稳定
+        错误。返回：更新后的任务/作业聚合。异常：无效载荷、未派发作业、普通
+        终态或冲突重放抛 ``StoreConflict``。该操作不写业务终态、不写完成时间、
+        不释放任何占用；相同不确定事实的投递重放零写入。
+        """
+
+        normalized_reason = uncertainty_reason.strip()
+        if not normalized_reason:
+            raise StoreConflict("执行不确定原因不能为空")
+        if return_info is not None and not isinstance(return_info, Mapping):
+            raise StoreConflict("return_info 必须是对象")
+        if error_info is not None and (
+            not isinstance(error_info, Sequence)
+            or isinstance(error_info, (str, bytes, bytearray))
+        ):
+            raise StoreConflict("error_info 必须是序列")
+
+        normalized_return_info = dict(return_info or {})
+        normalized_error_info = list(error_info or [])
+        return_info_json = _encode_json_field(
+            normalized_return_info,
+            field_name="return_info",
+        )
+        error_info_json = _encode_json_field(
+            normalized_error_info,
+            field_name="error_info",
+        )
+
+        with self._store.transaction() as connection:
+            job_row = self._job_row(connection, job_uuid)
+            task_uuid = str(job_row["workflow_task_uuid"])
+            task_row = self._task_row(connection, task_uuid)
+            attention_reason = f"job_execution_unknown:{job_uuid}"
+            if job_row["status"] == "execution_unknown":
+                same_payload = (
+                    str(job_row["uncertainty_reason"] or "") == normalized_reason
+                    and _decode_json_field(job_row["return_info"], fallback={})
+                    == normalized_return_info
+                    and _decode_json_field(job_row["error_info"], fallback=[])
+                    == normalized_error_info
+                    and task_row["cleanup_status"] == "requires_attention"
+                    and task_row["attention_reason"] == attention_reason
+                )
+                if same_payload:
+                    return self._aggregate(connection, task_uuid)
+                raise StoreConflict(f"作业执行不确定载荷冲突：{job_uuid}")
+            if job_row["status"] in _TERMINAL_JOB_STATES:
+                raise StoreConflict(f"作业终态不能改为执行未知：{job_uuid}")
+            if job_row["status"] not in {"dispatched", "running"}:
+                raise StoreConflict(f"作业尚未派发，不能标记执行未知：{job_uuid}")
+            if task_row["status"] not in {"running", "failed"}:
+                raise StoreConflict(f"父任务状态不接受执行未知：{task_uuid}")
+
+            opened_at = utc_now()
+            updated_jobs = connection.execute(
+                """
+                UPDATE workflow_node_job
+                SET status = 'execution_unknown', uncertainty_reason = ?,
+                    return_info = ?, error_info = ?, update_time = ?
+                WHERE uuid = ? AND status IN ('dispatched', 'running')
+                  AND deleted_at IS NULL
+                """,
+                (
+                    normalized_reason,
+                    return_info_json,
+                    error_info_json,
+                    opened_at,
+                    job_uuid,
+                ),
+            ).rowcount
+            if updated_jobs != 1:
+                raise StoreConflict(f"作业执行未知状态发生并发变化：{job_uuid}")
+            updated_tasks = connection.execute(
+                """
+                UPDATE workflow_task
+                SET cleanup_status = 'requires_attention', attention_reason = ?,
+                    update_time = ?
+                WHERE uuid = ? AND status IN ('running', 'failed')
+                  AND deleted_at IS NULL
+                """,
+                (attention_reason, opened_at, task_uuid),
+            ).rowcount
+            if updated_tasks != 1:
+                raise StoreConflict(f"任务执行未知状态发生并发变化：{task_uuid}")
+            WorkflowStore._append_runtime_event(
+                connection,
+                task_uuid=task_uuid,
+                job_uuid=job_uuid,
+                kind="uncertainty_opened",
+                from_status=str(job_row["status"]),
+                to_status="execution_unknown",
+                now=opened_at,
+                data={"reason": normalized_reason},
+            )
+            self._append_invalidation(
+                connection,
+                task_uuid=task_uuid,
+                now=opened_at,
+            )
             return self._aggregate(connection, task_uuid)
 
     @staticmethod

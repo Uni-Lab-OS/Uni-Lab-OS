@@ -45,44 +45,48 @@ def source_parent_descriptor(
     expected_root_identity: tuple[int, int],
     create: bool,
 ) -> Iterator[tuple[int, str] | None]:
-    """固定注册源码的直接父目录描述符。
+    """逐级固定注册源码的父目录描述符。
 
     参数：根目录、规范相对路径和预期身份固定来源；``create`` 决定是否创建
-    ``workflows``。返回：父目录描述符与文件名或允许缺失；异常映射为稳定工作区
+    全部父目录。返回：父目录描述符与文件名或允许缺失；异常映射为稳定工作区
     错误，退出总会关闭描述符。
     """
 
     root_descriptor = open_directory_chain(root, flags=directory_flags())
-    parent_descriptor = -1
+    opened_descriptors: list[int] = []
     try:
         metadata = os.fstat(root_descriptor)
         if (metadata.st_dev, metadata.st_ino) != expected_root_identity:
             raise SourceWorkspaceError("invalid_input")
-        try:
-            parent_descriptor = os.open(
-                relative.parts[0],
-                directory_flags(),
-                dir_fd=root_descriptor,
-            )
-        except FileNotFoundError:
-            if not create:
-                yield None
-                return
-            with suppress(FileExistsError):
-                os.mkdir(relative.parts[0], 0o755, dir_fd=root_descriptor)
-            parent_descriptor = os.open(
-                relative.parts[0],
-                directory_flags(),
-                dir_fd=root_descriptor,
-            )
-        yield parent_descriptor, relative.parts[1]
+        current_descriptor = root_descriptor
+        for parent_name in relative.parts[:-1]:
+            try:
+                next_descriptor = os.open(
+                    parent_name,
+                    directory_flags(),
+                    dir_fd=current_descriptor,
+                )
+            except FileNotFoundError:
+                if not create:
+                    yield None
+                    return
+                with suppress(FileExistsError):
+                    os.mkdir(parent_name, 0o755, dir_fd=current_descriptor)
+                next_descriptor = os.open(
+                    parent_name,
+                    directory_flags(),
+                    dir_fd=current_descriptor,
+                )
+            opened_descriptors.append(next_descriptor)
+            current_descriptor = next_descriptor
+        yield current_descriptor, relative.name
     except SourceWorkspaceError:
         raise
     except OSError:
         raise SourceWorkspaceError("invalid_input") from None
     finally:
-        if parent_descriptor >= 0:
-            os.close(parent_descriptor)
+        for descriptor in reversed(opened_descriptors):
+            os.close(descriptor)
         os.close(root_descriptor)
 
 

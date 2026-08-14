@@ -102,21 +102,25 @@ def publish_registered_source(
     byte_limit: int,
     expected_hash: object | str | None,
 ) -> None:
-    """创建固定父目录并通过绝对路径后端原子发布注册源码。
+    """逐级创建固定父目录并通过绝对路径后端原子发布注册源码。
 
     参数：包路径、相对路径、内容和根身份固定写入对象；``byte_limit`` 限制内容；
     ``expected_hash`` 是 CAS 条件。返回：发布并复核根身份后无返回值；安全、CAS
     和基础设施错误沿用下层分类。
     """
 
-    source_parent = ensure_child_directory(
-        package_root,
-        expected_root_identity=expected_root_identity,
-        child_name=relative_path.parts[0],
-    )
+    source_parent = package_root
+    parent_identity = expected_root_identity
+    for parent_name in relative_path.parts[:-1]:
+        source_parent = ensure_child_directory(
+            source_parent,
+            expected_root_identity=parent_identity,
+            child_name=parent_name,
+        )
+        parent_identity = directory_identity(source_parent)
     atomic_publish_source(
         parent_path=source_parent,
-        target_name=relative_path.parts[1],
+        target_name=relative_path.name,
         content=content,
         byte_limit=byte_limit,
         expected_hash=expected_hash,
@@ -166,27 +170,23 @@ def validate_declared_sources(
     assert_directory_identity(selected_root, expected_selected_identity)
     package_root = selected_root / package_id
     package_identity = directory_identity(package_root)
-    workflows_root = package_root / "workflows"
-    try:
-        workflows_identity = directory_identity(workflows_root)
-    except StableFileAccessError:
-        if workflows_root.exists() or workflows_root.is_symlink():
-            raise
-        workflows_identity = None
-    if workflows_identity is not None:
-        for relative_path in tuple(relative_paths):
-            filename = PurePosixPath(relative_path).name
+    for relative_path in tuple(relative_paths):
+        source_path = package_root / PurePosixPath(relative_path).as_posix()
+        try:
             snapshot = read_regular_path(
-                workflows_root / filename,
+                source_path,
                 byte_limit=source_byte_limit,
                 missing_ok=True,
             )
-            if snapshot is not None:
-                try:
-                    snapshot.content.decode("utf-8")
-                except UnicodeError:
-                    raise StableFileAccessError("invalid_utf8_source") from None
-        assert_directory_identity(workflows_root, workflows_identity)
+        except StableFileAccessError:
+            if not source_path.parent.exists():
+                continue
+            raise
+        if snapshot is not None:
+            try:
+                snapshot.content.decode("utf-8")
+            except UnicodeError:
+                raise StableFileAccessError("invalid_utf8_source") from None
     assert_directory_identity(package_root, package_identity)
     assert_directory_identity(selected_root, expected_selected_identity)
     return package_root, package_identity

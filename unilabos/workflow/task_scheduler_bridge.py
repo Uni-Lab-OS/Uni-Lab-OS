@@ -8,6 +8,7 @@ from copy import deepcopy
 from typing import Any
 
 from unilabos.app.scheduler.dag_state import WorkflowRun
+from unilabos.app.scheduler.execution_result import is_execution_unknown_result
 from unilabos.app.scheduler.material_source_resolution import (
     MaterialSourceResolutionCoordinator,
 )
@@ -260,7 +261,9 @@ class TaskSchedulerBridge:
         task_uuid = self._required_text(task.get("uuid"), field="task.uuid")
         jobs = self._store.list_jobs(task_uuid)
         uncertain_jobs = [
-            job for job in jobs if job.get("status") in {"dispatched", "running"}
+            job
+            for job in jobs
+            if job.get("status") in {"dispatched", "running", "execution_unknown"}
         ]
         if uncertain_jobs:
             logger.error(
@@ -457,11 +460,12 @@ class TaskSchedulerBridge:
         ret_value: Any,
         suc_type: str,
     ) -> None:
-        """把既有调度器明确结果投影为标准任务/作业终态。
+        """把设备结果投影为明确终态或执行未知事实。
 
         参数：``job_uuid`` 是稳定作业身份；``success`` 是明确成功标志；
         ``ret_value`` 是设备结果；``suc_type`` 是遗留人工处理分类。返回无；非本桥
-        作业忽略，投影冲突传播给调度器记录，绝不触发物理重做。
+        作业忽略，投影冲突传播给调度器记录，绝不触发物理重做。设备显式返回
+        ``execution_unknown`` 时保留作业路由与任务预留，等待对账恢复。
         """
 
         task_uuid = self._task_by_job.get(job_uuid)
@@ -473,6 +477,25 @@ class TaskSchedulerBridge:
             if isinstance(ret_value, Mapping)
             else ({"return_value": ret_value} if ret_value is not None else {})
         )
+        if is_execution_unknown_result(ret_value):
+            message = str(return_info.get("message") or "设备动作物理结果无法确认")
+            self._projection.project_job_execution_unknown(
+                job_uuid=job_uuid,
+                uncertainty_reason=message,
+                return_info=return_info,
+                error_info=[
+                    {
+                        "code": "execution_unknown",
+                        "message": message,
+                        "suc_type": suc_type,
+                    }
+                ],
+            )
+            logger.error(
+                "工作流节点作业 %s 进入 execution_unknown，保留调度路由等待对账",
+                job_uuid,
+            )
+            return
         # ``error_info`` 只在明确失败时记录稳定代码与人工决策来源。
         error_info: list[dict[str, Any]] = []
         if not success:
@@ -568,8 +591,9 @@ class TaskSchedulerBridge:
         """判断标准作业是否已经越过持久派发边界。
 
         参数：``jobs`` 是本次提交的既有工作流节点作业（WorkflowNodeJob）集合。
-        返回：任一作业已为 ``dispatched`` 或 ``running`` 时为真。异常：存储读取
-        故障视为不能证明未派发，保守返回真并禁止取消或清除回调路由。
+        返回：任一作业已为 ``dispatched``、``running`` 或
+        ``execution_unknown`` 时为真。异常：存储读取故障视为不能证明未派发，
+        保守返回真并禁止取消或清除回调路由。
         """
 
         try:
@@ -580,7 +604,9 @@ class TaskSchedulerBridge:
             }
         except Exception:  # noqa: BLE001 - 无法证明未派发时必须保守保留在途事实
             return True
-        return bool(persisted_statuses & {"dispatched", "running"})
+        return bool(
+            persisted_statuses & {"dispatched", "running", "execution_unknown"}
+        )
 
     @staticmethod
     def _required_text(value: Any, *, field: str) -> str:

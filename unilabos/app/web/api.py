@@ -7,7 +7,8 @@ API模块
 import asyncio
 
 import yaml
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from unilabos.app.model import (
     JobAddReq,
@@ -112,6 +113,31 @@ async def broadcast_device_status():
         except Exception as e:
             print(f"Error in broadcast: {e}")
             await asyncio.sleep(1)
+
+
+async def broadcast_joint_states() -> None:
+    """在既有 Device Status WebSocket 上广播只读关节观测。
+
+    OS 不持久化也不排队姿态；投影器对每个 Graph Device 实例执行
+    20 Hz 上限和 latest-value-wins。慢页面只会丢弃中间帧，不反压 ROS。
+    """
+
+    from unilabos.device_mesh.joint_state_projector import (
+        drain_joint_state_messages,
+    )
+
+    while True:
+        try:
+            for message in drain_joint_state_messages():
+                for connection in tuple(active_connections):
+                    try:
+                        await connection.send_json(message)
+                    except Exception:
+                        active_connections.discard(connection)
+        except Exception as error:
+            print(f"Error in joint state broadcast: {error}")
+        finally:
+            await asyncio.sleep(0.05)
 
 
 async def broadcast_status_page_data():
@@ -1375,6 +1401,57 @@ def post_job_add(req: JobAddReq):
     return JobAddResp(data=data)
 
 
+@api.get("/kinematic-models/{device_id}.urdf", include_in_schema=False)
+def read_kinematic_render_model(device_id: str) -> Response:
+    """返回本启动代际与执行模型同名的实例化渲染 URDF。"""
+
+    from unilabos.device_mesh.package_moveit_model import (
+        get_package_render_model,
+    )
+
+    model = get_package_render_model(device_id)
+    if model is None:
+        return Response(status_code=404)
+    return Response(
+        content=model.render_urdf,
+        media_type="application/xml",
+        headers={
+            "Cache-Control": "no-store",
+            "X-UniLab-Device-Id": model.device_id,
+            "X-UniLab-Topology-Digest": model.topology_digest,
+        },
+    )
+
+
+@api.get(
+    "/kinematic-models/{device_id}/meshes/{asset_name}",
+    include_in_schema=False,
+)
+def read_kinematic_mesh(device_id: str, asset_name: str) -> Response:
+    """只读返回型号包为该 Device 冻结的 exact mesh 资产。"""
+
+    from unilabos.device_mesh.package_moveit_model import (
+        get_package_render_mesh,
+        get_package_render_model,
+    )
+
+    asset = get_package_render_mesh(device_id, asset_name)
+    model = get_package_render_model(device_id)
+    if model is None:
+        return Response(status_code=404)
+    if asset is None:
+        return Response(status_code=404)
+    return FileResponse(
+        asset,
+        media_type="model/stl" if asset.suffix.lower() == ".stl" else None,
+        headers={
+            "Cache-Control": "no-store",
+            "X-UniLab-Device-Id": model.device_id,
+            "X-UniLab-Topology-Digest": model.topology_digest,
+        },
+    )
+
+
 def setup_api_routes(app):
     """设置API路由"""
     app.include_router(admin, prefix="/admin/v1", tags=["admin"])
@@ -1384,4 +1461,5 @@ def setup_api_routes(app):
     @app.on_event("startup")
     async def startup_event():
         asyncio.create_task(broadcast_device_status(), name="web-api-startup-device")
+        asyncio.create_task(broadcast_joint_states(), name="web-api-startup-joints")
         asyncio.create_task(broadcast_status_page_data(), name="web-api-startup-status")

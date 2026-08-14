@@ -32,6 +32,7 @@ pages = None
 workflow_routes_mounted = False
 resource_contract_routes_mounted = False
 workspace_authoring_routes_mounted = False
+robot_commissioning_routes_mounted = False
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -94,7 +95,7 @@ def setup_server() -> FastAPI:
     并保持工作流接口关闭，不回退到第二套运行时。
     """
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
-    global workspace_authoring_routes_mounted
+    global workspace_authoring_routes_mounted, robot_commissioning_routes_mounted
 
     # 创建页面路由
     if pages is None:
@@ -102,6 +103,17 @@ def setup_server() -> FastAPI:
 
     # 设置API路由
     setup_api_routes(app)
+
+    if not robot_commissioning_routes_mounted:
+        from unilabos.app.robot_commissioning import (
+            create_robot_commissioning_router,
+            get_robot_commissioning_service,
+        )
+
+        app.include_router(
+            create_robot_commissioning_router(get_robot_commissioning_service())
+        )
+        robot_commissioning_routes_mounted = True
 
     if (
         not workspace_authoring_routes_mounted

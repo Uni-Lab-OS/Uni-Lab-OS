@@ -1319,6 +1319,45 @@ def main():
             "info",
         )
 
+    devices_and_resources = dict_from_graph(graph_res.physical_setup_graph)
+    from unilabos.device_mesh.joint_state_projector import (
+        configure_joint_state_projection,
+    )
+    from unilabos.device_mesh.package_moveit_model import (
+        collect_package_joint_state_owners,
+    )
+
+    # Graph node.id 是运动学实例的唯一稳定、可读命名空间。
+    # 编译发生在 Inventory 冻结前，从而让物料渲染快照指向与
+    # MoveIt/PLC/SDK 反馈共用关节名的实例化 render URDF。
+    joint_state_owners = collect_package_joint_state_owners(
+        devices_and_resources,
+        lab_registry.device_type_registry,
+    )
+    configure_joint_state_projection(joint_state_owners)
+    owner_by_device_id = {owner.device_id: owner for owner in joint_state_owners}
+    for resource_node in resource_tree_set.all_nodes:
+        resource = resource_node.res_content
+        owner = owner_by_device_id.get(str(resource.id))
+        if owner is None:
+            continue
+        config = dict(resource.config or {})
+        rendering = dict(config.get("rendering") or {})
+        rendering["model"] = {
+            "path": f"/api/v1/kinematic-models/{owner.device_id}.urdf",
+            "format": "urdf",
+            "position": [0.0, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0],
+        }
+        rendering["kinematics"] = {
+            "device_id": owner.device_id,
+            "topology_digest": owner.topology_digest,
+            "qualified_joint_names": list(owner.qualified_joint_names),
+            "stale_after_s": owner.stale_after_s,
+        }
+        config["rendering"] = rendering
+        resource.config = config
+
     # 第二次设备包依赖检查：云端物料同步后，community 包可能引入新的 requirements
     # TODO: 当 community device package 功能上线后，在这里调用
     #   install_requirements_txt(community_pkg_path / "requirements.txt", label="community.xxx")
@@ -1445,63 +1484,70 @@ def main():
 
     args_dict["resources_mesh_config"] = {}
     args_dict["resources_edge_config"] = resource_edge_info
-    # web visiualize 2D
-    if args_dict["visual"] != "disable":
-        enable_rviz = args_dict["visual"] == "rviz"
-        devices_and_resources = dict_from_graph(graph_res.physical_setup_graph)
-        if devices_and_resources is not None:
+    from unilabos.device_mesh.motion_runtime_plan import plan_motion_runtime
+
+    # 运动运行时（Motion Runtime）来自 Graph 的执行后端选择；RViz/web 只决定显示。
+    # 因此 ``--visual disable`` 不会再关闭 MoveIt，打开 RViz 也不会给 PLC 机械臂
+    # 启动第二套执行器。
+    motion_plan = plan_motion_runtime(
+        devices_and_resources,
+        visual=args_dict["visual"],
+    )
+    resource_runtime = None
+    if motion_plan.ros_launch_required:
+        try:
             from unilabos.device_mesh.resource_visalization import (
                 ResourceVisualization,
             )  # 此处开启后，logger会变更为INFO，有需要请调整
 
-            resource_visualization = ResourceVisualization(
+            resource_runtime = ResourceVisualization(
                 devices_and_resources,
                 [n.res_content for n in args_dict["resources_config"].all_nodes],  # type: ignore  # FIXME
-                enable_rviz=enable_rviz,
+                enable_rviz=motion_plan.enable_rviz,
+                required_moveit_device_ids=motion_plan.moveit_device_ids,
             )
-            args_dict["resources_mesh_config"] = resource_visualization.resource_model
-            start_backend(**args_dict)
-            server_thread = threading.Thread(
-                target=start_server,
-                kwargs=dict(
-                    open_browser=not BasicConfig.disable_browser,
-                    port=BasicConfig.port,
-                ),
+            # 先准备并校验 ROS/MoveIt，再启动任何设备；必需的运动运行时缺失时
+            # 关闭失败，不能把它降级成“跳过可视化”。
+            resource_runtime.prepare()
+            args_dict["resources_mesh_config"] = resource_runtime.resource_model
+        except (ImportError, OSError) as error:
+            if resource_runtime is not None:
+                resource_runtime.stop()
+            resource_runtime = None
+            if motion_plan.motion_runtime_required:
+                raise RuntimeError(
+                    "Graph 要求 MoveIt 运动运行时，但 ROS/MoveIt 环境未就绪"
+                ) from error
+            print_status(
+                f"ROS 2环境未正确设置，跳过3D可视化启动。错误详情: {error}",
+                "warning",
             )
-            server_thread.start()
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            try:
-                resource_visualization.start()
-            except OSError as e:
-                if "AMENT_PREFIX_PATH" in str(e):
-                    print_status(
-                        f"ROS 2环境未正确设置，跳过3D可视化启动。错误详情: {e}",
-                        "warning",
-                    )
-                    print_status(
-                        "建议解决方案：\n"
-                        "1. 激活Conda环境: conda activate unilab\n"
-                        "2. 或使用 --visual disable 参数禁用可视化",
-                        "info",
-                    )
-                else:
-                    raise
-            while True:
-                time.sleep(1)
-        else:
-            start_backend(**args_dict)
-            restart_requested = start_server(
-                open_browser=not BasicConfig.disable_browser,
-                port=BasicConfig.port,
+            print_status(
+                "建议激活 ROS 2/MoveIt 环境；纯显示场景也可使用 --visual disable",
+                "info",
             )
-            if restart_requested:
-                print_status("[Main] Restart requested, cleaning up...", "info")
-                cleanup_for_restart()
-                return
+
+    if resource_runtime is not None:
+        import atexit
+
+        atexit.register(resource_runtime.stop)
+        start_backend(**args_dict)
+        server_thread = threading.Thread(
+            target=start_server,
+            kwargs={
+                "open_browser": not BasicConfig.disable_browser,
+                "port": BasicConfig.port,
+            },
+        )
+        server_thread.start()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        resource_runtime.start()
+        if motion_plan.motion_runtime_required:
+            raise RuntimeError("MoveIt 运动运行时在 OS 服务结束前提前退出")
+        while True:
+            time.sleep(1)
     else:
         start_backend(**args_dict)
-
-        # 启动服务器（默认支持WebSocket触发重启）
         restart_requested = start_server(
             open_browser=not BasicConfig.disable_browser,
             port=BasicConfig.port,

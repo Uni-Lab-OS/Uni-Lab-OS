@@ -118,7 +118,8 @@ def test_discovery_returns_only_sources_from_explicit_authorized_roots(
         "demo_package/../workflows/demo.py",
         r"demo_package\workflows\demo.py",
         "other_package/workflows/demo.py",
-        "demo_package/workflows/nested/demo.py",
+        "demo_package/workflows//demo.py",
+        "demo_package/workflows/./demo.py",
         "demo_package/demo.py",
         "demo_package/workflows/demo.txt",
     ),
@@ -127,7 +128,7 @@ def test_discovery_rejects_paths_outside_exact_package_workflow_shape(
     tmp_path: Path,
     declared_source: str,
 ) -> None:
-    """证明源码路径只能是当前包下的一层 ``workflows/*.py``。
+    """证明源码路径必须位于当前包的 ``workflows/`` 目录且不可越界。
 
     参数：``tmp_path`` 是隔离授权目录；``declared_source`` 是待拒绝路径。
     返回：无；测试断言路径错误稳定归类为工作流源码声明错误。
@@ -144,6 +145,29 @@ def test_discovery_rejects_paths_outside_exact_package_workflow_shape(
         discover_editable_sources((selected_root,))
 
     assert caught.value.code == "invalid_workflow_source"
+
+
+def test_discovery_accepts_nested_workflow_module_path(tmp_path: Path) -> None:
+    """证明领域包可按业务模块组织 ``workflows/`` 下的多级源码。
+
+    参数：``tmp_path`` 是隔离授权目录。返回：无；断言嵌套源码保持规范相对
+    路径与可读包 URI。异常：发现或合同断言失败时由 pytest 报告。
+    """
+
+    selected_root = tmp_path / "selected"
+    declared_source = "demo_package/workflows/operations/robot/pick.py"
+    _write_editable_package(
+        selected_root,
+        entries=((WORKFLOW_UUID, declared_source),),
+    )
+
+    plan = discover_editable_sources((selected_root,))
+
+    registration = plan.registrations[0]
+    assert registration.relative_path == "workflows/operations/robot/pick.py"
+    assert registration.source_uri == (
+        "package://demo_package/workflows/operations/robot/pick.py"
+    )
 
 
 @pytest.mark.parametrize(
