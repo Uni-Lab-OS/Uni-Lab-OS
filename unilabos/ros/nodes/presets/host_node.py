@@ -146,7 +146,7 @@ class MaterialStateRecordReturn:
 
     ``resource`` 继续发布为同一个物料占位符（ResourceSlot），其余字段是已持久化
     ``material_state_history`` 行的稳定身份和公共状态字段。运行时使用 JSON-safe
-    字典，并沿用 HostNode 物料动作的扁平资源树返回形状。
+    字典；``resource`` 严格使用单物料 ``{"uuid": ...}`` 引用形状。
     """
 
     resource: ResourceSlot
@@ -171,12 +171,10 @@ class TransferManualReturn(TypedDict):
     site: str
 
 
-def _dump_resource_slot(resource: Any) -> List[List[ResourceDictType]]:
-    """序列化 PLR 物料或设备型父资源原始映射。"""
+def _dump_resource_slot(resource: Any) -> Dict[str, str]:
+    """把已水合物料序列化为规范 ResourceSlot 单对象引用。"""
 
-    if isinstance(resource, dict):
-        return [[dict(resource)]]
-    return ResourceTreeSet.from_plr_resources([resource]).dump()
+    return {"uuid": _stable_resource_uuid(resource)}
 
 
 class TestLatencyReturn(TypedDict):
@@ -2527,8 +2525,9 @@ class HostNode(BaseROS2DeviceNode):
             source[来源]: 可选观测来源或工艺动作身份。
             description[说明]: 可选人类可读说明。
         Returns:
-            JSON-safe 字典；``resource`` 保留同一 UUID 并继续作为 ResourceSlot
-            输出，其他字段来自刚写入的 material_state_history 行。
+            JSON-safe 字典；``resource`` 以规范 ``{"uuid": ...}`` 单对象引用保留
+            同一 UUID 并继续作为 ResourceSlot 输出，其他字段来自刚写入的
+            material_state_history 行。
 
         Raises:
             ValueError: resource 缺失、没有稳定 UUID，或 state_data 不是非空对象。
@@ -2635,8 +2634,9 @@ class HostNode(BaseROS2DeviceNode):
             site: 目标父物料中的库位（Site）名称；空串表示使用默认排布。
 
         Returns:
-            保留旧调用兼容的四键字典；物料和目标父物料仍用原扁平树形态返回，
-            ``site`` 回传库位名，``result`` 是底层转移结果的稳定字符串。
+            保留四键字典；物料和目标父物料均用规范 ``{"uuid": ...}``
+            ResourceSlot 单对象引用返回，``site`` 回传库位名，``result`` 是底层
+            转移结果的稳定字符串。
 
         Raises:
             ValueError: 待转移物料或目标父物料缺失，或底层转移拒绝时抛出。
@@ -2699,8 +2699,9 @@ class HostNode(BaseROS2DeviceNode):
                 _ordering 换算成 spot）；不传则由父级默认排布。
 
         Returns:
-            原有四键运行结果字典；静态类型化动作（Typed Action）合同把两个物料
-            字段发布为物料占位符（ResourceSlot），供下游工作流节点继续连接。
+            四键运行结果字典；两个物料字段按规范单对象引用返回。静态类型化动作
+            （Typed Action）合同把它们发布为物料占位符（ResourceSlot），供下游
+            工作流节点继续连接。
 
         Raises:
             ValueError: 必需物料缺失或转移执行失败时由既有执行核心抛出。

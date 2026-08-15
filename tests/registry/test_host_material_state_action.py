@@ -13,6 +13,7 @@ import pytest
 from unilabos.app.scheduler.inventory.backend_contract import BackendResourceService
 from unilabos.app.scheduler.inventory.service import InventoryService
 from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.registry.material_lock_schema import compile_material_lock_schema
 from unilabos.registry.registry import Registry
 from unilabos.registry.template_projection import RegistryTemplateProjection
 from unilabos.ros.nodes.presets.host_node import HostNode
@@ -92,10 +93,9 @@ def test_record_material_state_persists_history_and_preserves_uuid(
         )
     )
 
-    assert result["resource"] == [[resource]]
-    assert result["resource"][0][0]["uuid"] == material["uuid"]
+    assert result["resource"] == {"uuid": material["uuid"]}
     assert result == {
-        "resource": [[resource]],
+        "resource": {"uuid": material["uuid"]},
         "state_uuid": result["state_uuid"],
         "material_uuid": material["uuid"],
         "status": "completed",
@@ -120,6 +120,64 @@ def test_record_material_state_persists_history_and_preserves_uuid(
         "SELECT COUNT(*) AS count FROM material_state_history WHERE material_uuid=?",
         (material["uuid"],),
     )["count"] == 1
+
+
+def test_host_resource_slot_result_can_feed_adjacent_host_action(
+    material_inventory: tuple[
+        InventoryStore,
+        InventoryService,
+        BackendResourceService,
+        dict[str, Any],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host 的 ResourceSlot 输出必须能按同一 UUID 进入相邻 Host 动作。
+
+    本测试覆盖真实的相邻动作接缝：先执行内置 ``record_material_state``，再把
+    公开 ``resource`` 结果交给真实 Registry 扫描得到的同一动作冻结 Schema。
+    预派发物料锁校验必须接受标准单物料对象并取回原 Material UUID；二维 PLR
+    树形状会在此精确失败，防止问题延迟到驱动前水合阶段。
+    """
+
+    _store, inventory, _backend, material = material_inventory
+    monkeypatch.setattr(
+        "unilabos.app.scheduler.integration.get_inventory_service",
+        lambda: inventory,
+    )
+    resource = {
+        "uuid": material["uuid"],
+        "name": "sample-1",
+        "type": "resource",
+    }
+    upstream = asyncio.run(
+        HostNode.record_material_state(
+            object(),
+            resource,
+            {"sealed": True},
+            source="upstream-host-action",
+        )
+    )
+
+    registry = Registry()
+    monkeypatch.setattr(registry, "_setup_called", False)
+    monkeypatch.setattr(registry, "_startup_executor", None)
+    monkeypatch.setattr(registry, "device_type_registry", {})
+    monkeypatch.setattr(registry, "resource_type_registry", {})
+    registry.setup(external_only=True)
+    downstream_schema = registry.device_type_registry["host_node"]["class"][
+        "action_value_mappings"
+    ]["record_material_state"]["schema"]
+
+    downstream_param = {
+        "resource": upstream["resource"],
+        "state_data": {"sealed": True, "verified": True},
+    }
+    locked_materials = compile_material_lock_schema(
+        downstream_schema
+    ).material_lock_uuids(downstream_param)
+
+    assert upstream["resource"] == {"uuid": material["uuid"]}
+    assert locked_materials == (material["uuid"],)
 
 
 @pytest.mark.parametrize(
