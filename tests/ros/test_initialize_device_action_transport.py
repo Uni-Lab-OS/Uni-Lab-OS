@@ -6,6 +6,7 @@ from typing import Any
 from unilabos.package_manager.driver_runtime import PythonDriverActivation
 from unilabos.ros import initialize_device
 from unilabos_msgs.action import StrSingleInput
+from std_msgs.msg import String
 
 
 def test_device_initialization_wraps_runtime_endpoints_without_polluting_activation(
@@ -36,7 +37,7 @@ def test_device_initialization_wraps_runtime_endpoints_without_polluting_activat
         package_catalog_digest="sha256:" + "2" * 64,
         driver_class=Driver,
         driver_params={},
-        status_types={},
+        status_types={"selected_model": "str"},
         action_value_mappings=public_mappings,
         hardware_interface={},
         driver_is_ros=False,
@@ -66,7 +67,7 @@ def test_device_initialization_wraps_runtime_endpoints_without_polluting_activat
         """
 
         assert driver_class is Driver
-        wrapped_contracts.append(options["action_value_mappings"])
+        wrapped_contracts.append(options)
 
         class Wrapped:
             """记录组合根传递的设备实例参数。"""
@@ -102,8 +103,10 @@ def test_device_initialization_wraps_runtime_endpoints_without_polluting_activat
     assert initialized is not None
     assert len(wrapped_contracts) == 1
     assert (
-        wrapped_contracts[0]["_execute_driver_command"]["type"]
+        wrapped_contracts[0]["action_value_mappings"]["_execute_driver_command"]["type"]
         is StrSingleInput
     )
+    assert wrapped_contracts[0]["status_types"]["selected_model"] is String
+    assert activation.status_types == {"selected_model": "str"}
     assert activation.action_value_mappings == public_mappings
     assert "_execute_driver_command" not in activation.action_value_mappings

@@ -150,6 +150,53 @@ def test_workspace_model_catalog_compiles_package_catalog_definitions(
     assert catalog.read_asset(model["path"]).content.startswith(b"<robot>")
 
 
+def test_workspace_model_catalog_projects_named_model_references(
+    tmp_path: Path,
+) -> None:
+    """设备的包内命名模型引用必须发布为引用设备自己的模板绑定。"""
+
+    root = tmp_path / "workspace"
+    package = root / "factory_lab"
+    declaration = package / "devices.py"
+    model_entry = package / "models" / "real_device" / "device.xacro"
+    model_entry.parent.mkdir(parents=True)
+    package.joinpath("__init__.py").write_text("", encoding="utf-8")
+    declaration.write_text(
+        """from unilabos.registry.decorators import device
+
+
+@device(
+    id="real_device",
+    model={"format": "xacro", "entry": "models/real_device/device.xacro"},
+)
+class RealDevice:
+    pass
+
+
+@device(id="virtual_device", model={"$ref": "real_device"})
+class VirtualDevice:
+    pass
+""",
+        encoding="utf-8",
+    )
+    model_entry.write_text("<robot/>", encoding="utf-8")
+    root.joinpath("pyproject.toml").write_text(
+        '[project]\nname = "factory-lab"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    plan = compile_workspace_startup(WorkspaceSource(root))
+    package_catalog = compile_package_source(plan.source, startup_plan=plan)
+
+    catalog = compile_workspace_material_models(plan, package_catalog)
+
+    real_model = catalog.models_by_template["community.factory_lab.real_device"]
+    virtual_model = catalog.models_by_template[
+        "community.factory_lab.virtual_device"
+    ]
+    assert virtual_model == real_model
+    assert catalog.read_asset(virtual_model["path"]).content == b"<robot/>"
+
+
 def test_workspace_model_catalog_rejects_assets_outside_declared_model_root(
     tmp_path: Path,
 ) -> None:

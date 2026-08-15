@@ -124,19 +124,34 @@ def compile_workspace_material_models(
     definitions = _material_definitions(startup_plan, definition_source)
 
     models_by_template: dict[str, Mapping[str, Any]] = {}
+    model_definitions: dict[str, Mapping[str, Any]] = {}
+    model_references: dict[str, str] = {}
     allowed_roots: set[PurePosixPath] = set()
     for raw_definition in definitions:
         if not isinstance(raw_definition, Mapping):
             raise TypeError("注册表定义必须是对象")
-        declaration_file = _workspace_declaration_file(startup_plan, raw_definition)
-        if declaration_file is None:
-            continue
         model = raw_definition.get("model")
         if not isinstance(model, Mapping):
             continue
         entry = model.get("entry")
         model_format = model.get("format")
-        if entry is None and model_format is None:
+        model_reference = model.get("$ref")
+        if entry is None and model_format is None and model_reference is None:
+            continue
+        template_id = _required_text(raw_definition.get("id"), "资源模板 id")
+        if template_id in model_definitions:
+            raise ValueError(f"工作区模型资源模板身份重复: {template_id}")
+        model_definitions[template_id] = raw_definition
+        if model_reference is not None:
+            if entry is not None or model_format is not None or set(model) != {"$ref"}:
+                raise ValueError("工作区命名模型引用不能同时声明其他模型字段")
+            model_references[template_id] = _required_text(
+                model_reference,
+                "工作区命名模型引用",
+            )
+            continue
+        declaration_file = _workspace_declaration_file(startup_plan, raw_definition)
+        if declaration_file is None:
             continue
         if not isinstance(entry, str) or not entry:
             raise ValueError("工作区模型资产入口必须是非空 POSIX 相对路径")
@@ -145,7 +160,6 @@ def compile_workspace_material_models(
         logical_entry = _logical_model_path(startup_plan, declaration_file, entry)
         if not startup_plan.source.has_file(logical_entry):
             raise ValueError("工作区模型入口不存在")
-        template_id = _required_text(raw_definition.get("id"), "资源模板 id")
         public_entry = _public_model_path(startup_plan, logical_entry)
         projected_model: dict[str, Any] = {
             "path": public_entry,
@@ -167,6 +181,36 @@ def compile_workspace_material_models(
         models_by_template[template_id] = MappingProxyType(projected_model)
         # ``model_root`` 授权 Xacro 入口的同目录依赖，例如 meshes 与 YAML。
         allowed_roots.add(PurePosixPath(logical_entry).parent)
+
+    resolving: set[str] = set()
+
+    def project_named_reference(template_id: str) -> Mapping[str, Any]:
+        """把包内命名引用绑定到目标模型的同一不可变公开快照。"""
+
+        projected = models_by_template.get(template_id)
+        if projected is not None:
+            return projected
+        if template_id in resolving:
+            raise ValueError(f"工作区命名模型引用形成循环: {template_id}")
+        reference = model_references.get(template_id)
+        if reference is None:
+            raise ValueError(f"工作区命名模型引用目标没有模型: {template_id}")
+        target_id = reference
+        if target_id not in model_definitions:
+            namespace = template_id.rsplit(".", 1)[0]
+            target_id = f"{namespace}.{reference}"
+        if target_id not in model_definitions:
+            raise ValueError(f"工作区命名模型引用目标不存在: {reference}")
+        resolving.add(template_id)
+        try:
+            projected = project_named_reference(target_id)
+        finally:
+            resolving.remove(template_id)
+        models_by_template[template_id] = projected
+        return projected
+
+    for template_id in sorted(model_references):
+        project_named_reference(template_id)
 
     return WorkspaceMaterialModelCatalog(
         startup_plan=startup_plan,

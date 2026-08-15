@@ -23,6 +23,7 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -37,7 +38,7 @@ from unilabos.resources.site_definition import normalize_available_sites
 
 MAX_SCAN_DEPTH = 10      # 最大目录递归深度
 MAX_SCAN_FILES = 1000    # 最大扫描文件数量
-_CACHE_VERSION = 10      # 缓存格式版本号，模板库位合同变化时递增
+_CACHE_VERSION = 10      # 缓存格式版本号，模板库位或设备工厂合同变化时递增
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # 合法的装饰器来源模块
@@ -46,6 +47,34 @@ _REGISTRY_DECORATOR_MODULE = "unilabos.registry.decorators"
 _SUBSCRIBE_DECORATOR_MODULE = "unilabos.utils.decorator"
 # placeholder_keys 常量来源模块（如 PLACEHOLDER_DEDUCT_RESOURCE），值需解析成字符串字面量
 _PLACEHOLDER_MODULE = "unilabos.registry.placeholder_type"
+
+
+class DeviceFactoryScanError(ValueError):
+    """设备工厂无法静态证明单一返回类时的稳定扫描错误。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class _StaticClassRecord:
+    """一个无需导入即可读取合同的工作区类定义。"""
+
+    identity: str
+    node: ast.ClassDef
+    module: ast.Module
+    module_name: str
+    import_map: Dict[str, str]
+
+
+@dataclass(frozen=True)
+class _StaticSymbolIndex:
+    """一次 package 扫描共享的类、别名与内容代际索引。"""
+
+    classes: Dict[str, _StaticClassRecord]
+    aliases: Dict[str, str]
+    digest: str
 
 
 @lru_cache(maxsize=1)
@@ -227,6 +256,9 @@ def scan_directory(
     else:
         py_files = _collect_py_files(root_dir, max_depth=max_depth, max_files=max_files, exclude_files=exclude_files)
 
+    # 工厂返回类和继承合同需要跨文件的同代静态索引；建立过程只读 AST。
+    symbol_index = _build_static_symbol_index(py_files, python_path)
+
     cache_files: Dict[str, Any] = cache.get("files", {}) if cache else {}
 
     # --- Parallel scan (with cache fast-path) ---
@@ -244,11 +276,17 @@ def scan_directory(
             return [], [], False
 
         cached_entry = cache_files.get(key)
-        if cached_entry and _is_cache_hit(cached_entry, fp):
+        if (
+            cached_entry
+            and _is_cache_hit(cached_entry, fp)
+            and cached_entry.get("symbol_digest") == symbol_index.digest
+        ):
             return cached_entry.get("devices", []), cached_entry.get("resources", []), True
 
         try:
-            devs, ress = _parse_file(py_file, python_path)
+            devs, ress = _parse_file(py_file, python_path, symbol_index)
+        except DeviceFactoryScanError:
+            raise
         except (SyntaxError, Exception):
             devs, ress = [], []
 
@@ -256,6 +294,7 @@ def scan_directory(
             "md5": fp["md5"],
             "size": fp["size"],
             "mtime": fp["mtime"],
+            "symbol_digest": symbol_index.digest,
             "devices": devs,
             "resources": ress,
         }
@@ -348,9 +387,279 @@ def _detect_class_type(cls_node: ast.ClassDef, import_map: Dict[str, str]) -> st
     return "python"
 
 
+def _build_static_symbol_index(
+    python_files: List[Path],
+    python_path: Path,
+) -> _StaticSymbolIndex:
+    """为一个 package 建立不执行源码的类与简单别名索引。"""
+
+    classes: Dict[str, _StaticClassRecord] = {}
+    aliases: Dict[str, str] = {}
+    digest = hashlib.sha256()
+    parsed_modules: List[Tuple[str, ast.Module, Dict[str, str]]] = []
+    for filepath in sorted(python_files):
+        source = filepath.read_text(encoding="utf-8", errors="replace")
+        digest.update(str(filepath).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(source.encode("utf-8"))
+        try:
+            module = ast.parse(source, filename=str(filepath))
+        except SyntaxError:
+            # 产品全量扫描延续既有“坏文件不阻断其他注册表”的兼容语义；
+            # Package Catalog 编译随后仍会对同一文件关闭式失败。
+            continue
+        module_name = _filepath_to_module(filepath, python_path)
+        import_map = _collect_imports(module, module_name)
+        parsed_modules.append((module_name, module, import_map))
+        for statement in module.body:
+            if isinstance(statement, ast.ClassDef):
+                identity = f"{module_name}:{statement.name}"
+                classes[identity] = _StaticClassRecord(
+                    identity=identity,
+                    node=statement,
+                    module=module,
+                    module_name=module_name,
+                    import_map=import_map,
+                )
+
+    # 简单 ``Alias = Class`` 在类全集建立后再解析，避免声明顺序影响结果。
+    for module_name, module, import_map in parsed_modules:
+        for statement in module.body:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = statement.value
+            if value is None:
+                continue
+            targets = (
+                statement.targets
+                if isinstance(statement, ast.Assign)
+                else [statement.target]
+            )
+            target_identity = _resolve_symbol_identity(value, import_map, aliases)
+            if target_identity is None:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    aliases[f"{module_name}:{target.id}"] = target_identity
+
+    return _StaticSymbolIndex(
+        classes=classes,
+        aliases=aliases,
+        digest=digest.hexdigest(),
+    )
+
+
+def _resolve_symbol_identity(
+    expression: ast.expr,
+    import_map: Dict[str, str],
+    aliases: Dict[str, str],
+) -> Optional[str]:
+    """把名称或属性表达式归一为 ``module:symbol``，不导入目标模块。"""
+
+    identity: Optional[str] = None
+    if isinstance(expression, ast.Name):
+        identity = import_map.get(expression.id)
+    elif isinstance(expression, ast.Attribute):
+        parts: List[str] = []
+        current: ast.expr = expression
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            root = import_map.get(current.id)
+            parts.reverse()
+            if root and ":" not in root:
+                identity = f"{root}.{'.'.join(parts[:-1])}:{parts[-1]}"
+            elif root and ":" in root and len(parts) == 1:
+                module, symbol = root.split(":", 1)
+                identity = f"{module}.{symbol}:{parts[0]}"
+    if identity is None:
+        return None
+    visited: set[str] = set()
+    while identity in aliases and identity not in visited:
+        visited.add(identity)
+        identity = aliases[identity]
+    return identity
+
+
+def _annotation_base_name(expression: ast.expr) -> str:
+    """返回注解构造器的末级名称，供关闭式类型门禁使用。"""
+
+    if isinstance(expression, ast.Name):
+        return expression.id
+    if isinstance(expression, ast.Attribute):
+        return expression.attr
+    return ""
+
+
+def _resolve_factory_return_class(
+    function: ast.FunctionDef,
+    import_map: Dict[str, str],
+    symbol_index: _StaticSymbolIndex,
+) -> _StaticClassRecord:
+    """静态证明同步工厂的注解和全部 return 都指向同一工作区类。"""
+
+    annotation = function.returns
+    if annotation is None:
+        raise DeviceFactoryScanError(
+            "device_factory_return_missing",
+            "@device 工厂必须声明唯一返回设备类",
+        )
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError as error:
+            raise DeviceFactoryScanError(
+                "device_factory_return_unresolved",
+                "@device 工厂字符串返回注解无法静态解析",
+            ) from error
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        raise DeviceFactoryScanError(
+            "device_factory_return_ambiguous",
+            "@device 工厂返回注解不能是 Union 或 Optional",
+        )
+    if isinstance(annotation, ast.Subscript):
+        base_name = _annotation_base_name(annotation.value)
+        if base_name == "Annotated":
+            if isinstance(annotation.slice, ast.Tuple) and annotation.slice.elts:
+                annotation = annotation.slice.elts[0]
+            else:
+                raise DeviceFactoryScanError(
+                    "device_factory_return_unresolved",
+                    "@device 工厂 Annotated 返回注解缺少设备类",
+                )
+        elif base_name in {
+            "Optional",
+            "Union",
+            "Type",
+            "Awaitable",
+            "Coroutine",
+            "type",
+        }:
+            raise DeviceFactoryScanError(
+                "device_factory_return_ambiguous",
+                "@device 工厂返回注解必须是单一具体设备类",
+            )
+        else:
+            raise DeviceFactoryScanError(
+                "device_factory_return_unresolved",
+                "@device 工厂返回注解不是可静态解析的设备类",
+            )
+    if isinstance(annotation, ast.Constant) and annotation.value is None:
+        raise DeviceFactoryScanError(
+            "device_factory_return_ambiguous",
+            "@device 工厂不能返回 None",
+        )
+    if isinstance(annotation, ast.Name) and annotation.id in {"Any", "None"}:
+        raise DeviceFactoryScanError(
+            "device_factory_return_ambiguous",
+            "@device 工厂返回注解必须是具体设备类",
+        )
+    return_identity = _resolve_symbol_identity(
+        annotation,
+        import_map,
+        symbol_index.aliases,
+    )
+    record = symbol_index.classes.get(return_identity or "")
+    if record is None:
+        raise DeviceFactoryScanError(
+            "device_factory_return_unresolved",
+            "@device 工厂返回类不在当前 workspace package 的静态类索引中",
+        )
+
+    class _ReturnVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.values: List[ast.expr | None] = []
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node is function:
+                for statement in node.body:
+                    self.visit(statement)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_Return(self, node: ast.Return) -> None:
+            self.values.append(node.value)
+
+    visitor = _ReturnVisitor()
+    visitor.visit(function)
+    if not visitor.values:
+        raise DeviceFactoryScanError(
+            "device_factory_contract_invalid",
+            "@device 工厂没有返回设备实例",
+        )
+    for value in visitor.values:
+        target = value.func if isinstance(value, ast.Call) else value
+        if target is None:
+            actual_identity = None
+        else:
+            actual_identity = _resolve_symbol_identity(
+                target,
+                import_map,
+                symbol_index.aliases,
+            )
+        if actual_identity != record.identity:
+            raise DeviceFactoryScanError(
+                "device_factory_contract_invalid",
+                "@device 工厂存在无法证明为注解类实例的返回路径",
+            )
+    return record
+
+
+def _extract_inherited_class_body(
+    record: _StaticClassRecord,
+    symbol_index: _StaticSymbolIndex,
+    visiting: Optional[set[str]] = None,
+) -> dict:
+    """按基类到子类顺序合并静态动作、状态和自动方法合同。"""
+
+    visiting = set(visiting or ())
+    if record.identity in visiting:
+        raise DeviceFactoryScanError(
+            "device_factory_contract_invalid",
+            "设备返回类继承关系存在循环",
+        )
+    visiting.add(record.identity)
+    merged = {
+        "actions": {},
+        "status_properties": {},
+        "init_params": [],
+        "init_docstring": None,
+        "auto_methods": {},
+    }
+    for base in record.node.bases:
+        base_identity = _resolve_symbol_identity(
+            base,
+            record.import_map,
+            symbol_index.aliases,
+        )
+        base_record = symbol_index.classes.get(base_identity or "")
+        if base_record is None:
+            continue
+        base_body = _extract_inherited_class_body(base_record, symbol_index, visiting)
+        for key in ("actions", "status_properties", "auto_methods"):
+            merged[key].update(base_body[key])
+    own = _extract_class_body(
+        record.node,
+        record.import_map,
+        module=record.module,
+        module_name=record.module_name,
+    )
+    for key in ("actions", "status_properties", "auto_methods"):
+        merged[key].update(own[key])
+    merged["init_params"] = own["init_params"]
+    merged["init_docstring"] = own["init_docstring"]
+    return merged
+
+
 def _parse_file(
     filepath: Path,
     python_path: Path,
+    symbol_index: Optional[_StaticSymbolIndex] = None,
 ) -> Tuple[List[dict], List[dict]]:
     """只通过 AST 解析一个 Python 文件中的设备与资源声明。
 
@@ -376,6 +685,8 @@ def _parse_file(
     import_map = _collect_imports(tree, module_path)
     # ``literal_constants`` 只收集当前文件根级安全字面量，供较长的库位数组复用。
     literal_constants = _collect_literal_constants(tree)
+    if symbol_index is None:
+        symbol_index = _build_static_symbol_index([filepath], python_path)
 
     devices: List[dict] = []
     resources: List[dict] = []
@@ -392,11 +703,10 @@ def _parse_file(
                         constant_name = value.rsplit(":", 1)[-1]
                         if constant_name in literal_constants:
                             device_args[key] = literal_constants[constant_name]
-                class_body = _extract_class_body(
-                    node,
-                    import_map,
-                    module=tree,
-                    module_name=module_path,
+                class_record = symbol_index.classes[f"{module_path}:{node.name}"]
+                class_body = _extract_inherited_class_body(
+                    class_record,
+                    symbol_index,
                 )
 
                 # Support ids + id_meta (multi-device) or id (single device)
@@ -413,13 +723,15 @@ def _parse_file(
                 base_meta = {
                     "class_name": node.name,
                     "module": f"{module_path}:{node.name}",
+                    "is_factory": False,
                     "file_path": str(filepath).replace("\\", "/"),
                     "category": device_args.get("category", []),
                     "description": device_args.get("description", ""),
                     "displayname": displayname,
                     "icon": device_args.get("icon", ""),
                     "version": device_args.get("version", "1.0.0"),
-                    "device_type": _detect_class_type(node, import_map),
+                    "device_type": device_args.get("device_type")
+                    or _detect_class_type(node, import_map),
                     "handles": device_args.get("handles", []),
                     "available_sites": normalize_available_sites(
                         device_args.get("available_sites")
@@ -471,6 +783,86 @@ def _parse_file(
 
         # --- @resource on module-level functions ---
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            device_decorator = _find_method_decorator(node, "device")
+            if device_decorator is not None and _is_registry_decorator("device", import_map):
+                if isinstance(node, ast.AsyncFunctionDef):
+                    raise DeviceFactoryScanError(
+                        "device_factory_async_unsupported",
+                        "@device v1 不支持异步工厂",
+                    )
+                device_args = _extract_decorator_args(device_decorator, import_map)
+                return_record = _resolve_factory_return_class(
+                    node,
+                    import_map,
+                    symbol_index,
+                )
+                class_body = _extract_inherited_class_body(
+                    return_record,
+                    symbol_index,
+                )
+                device_ids: List[str]
+                if device_args.get("ids") is not None:
+                    device_ids = list(device_args["ids"])
+                else:
+                    did = device_args.get("id") or device_args.get("device_id")
+                    device_ids = [did] if did else [f"{module_path}:{node.name}"]
+                _validate_device_ids(device_ids)
+                id_meta = device_args.get("id_meta") or {}
+                base_meta = {
+                    "class_name": return_record.node.name,
+                    "module": return_record.identity,
+                    "is_factory": True,
+                    "factory_module": f"{module_path}:{node.name}",
+                    "return_class_module": return_record.identity,
+                    "file_path": str(filepath).replace("\\", "/"),
+                    "category": device_args.get("category", []),
+                    "description": device_args.get("description", ""),
+                    "displayname": device_args.get("displayname", ""),
+                    "icon": device_args.get("icon", ""),
+                    "version": device_args.get("version", "1.0.0"),
+                    "device_type": device_args.get("device_type")
+                    or _detect_class_type(return_record.node, return_record.import_map),
+                    "handles": device_args.get("handles", []),
+                    "model": device_args.get("model"),
+                    "hardware_interface": device_args.get("hardware_interface"),
+                    "metadata": device_args.get("metadata") or {},
+                    "actions": class_body.get("actions", {}),
+                    "status_properties": class_body.get("status_properties", {}),
+                    "init_params": _extract_method_params(
+                        node,
+                        import_map,
+                        skip_first=False,
+                    ),
+                    "init_docstring": ast.get_docstring(node),
+                    "auto_methods": class_body.get("auto_methods", {}),
+                    "import_map": import_map,
+                }
+                for did in device_ids:
+                    meta = dict(base_meta)
+                    meta["device_id"] = did
+                    overrides = id_meta.get(did, {})
+                    for key in (
+                        "handles",
+                        "description",
+                        "displayname",
+                        "icon",
+                        "model",
+                        "hardware_interface",
+                        "metadata",
+                    ):
+                        if key in overrides:
+                            if key == "metadata" and isinstance(overrides[key], dict):
+                                meta[key] = {
+                                    **(base_meta.get("metadata") or {}),
+                                    **overrides[key],
+                                }
+                            else:
+                                meta[key] = overrides[key]
+                    meta["displayname"] = resolve_registry_displayname(
+                        meta.get("displayname"), did
+                    )
+                    devices.append(meta)
+
             resource_decorator = _find_method_decorator(node, "resource")
             if resource_decorator is not None and _is_registry_decorator("resource", import_map):
                 res_meta = _extract_resource_meta(
@@ -583,7 +975,7 @@ def _extract_resource_meta(
 # ---------------------------------------------------------------------------
 
 
-def _collect_imports(tree: ast.Module, module_path: str = "") -> Dict[str, str]:
+def _collect_imports(tree: ast.Module, module_path: str = "") -> Dict[str, Any]:
     """
     Walk all Import/ImportFrom nodes in the AST tree, build a mapping from
     local name to fully-qualified import path.
@@ -598,7 +990,7 @@ def _collect_imports(tree: ast.Module, module_path: str = "") -> Dict[str, str]:
          "SetLiquidReturn": "unilabos.devices.liquid_handling.liquid_handler_abstract:SetLiquidReturn",
          ...}
     """
-    import_map: Dict[str, str] = {}
+    import_map: Dict[str, Any] = {}
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -622,7 +1014,13 @@ def _collect_imports(tree: ast.Module, module_path: str = "") -> Dict[str, str]:
                 # 顶层赋值 (如 MotorAxis = Enum(...))
                 for target in node.targets:
                     if isinstance(target, ast.Name):
-                        import_map.setdefault(target.id, f"{module_path}:{target.id}")
+                        try:
+                            # 只接受 Python AST 能证明的纯字面量；它支持
+                            # 大型 ids/id_meta 目录常量，但不会执行作者代码。
+                            literal_value = ast.literal_eval(node.value)
+                        except (TypeError, ValueError):
+                            literal_value = f"{module_path}:{target.id}"
+                        import_map.setdefault(target.id, literal_value)
 
     return import_map
 
@@ -801,7 +1199,7 @@ def _ast_node_to_value(node: ast.expr, import_map: Dict[str, str]) -> Any:
     return f"<ast:{type(node).__name__}>"
 
 
-def _resolve_name(name: str, import_map: Dict[str, str]) -> str:
+def _resolve_name(name: str, import_map: Dict[str, Any]) -> Any:
     """
     Resolve a bare Name reference via import_map.
 
@@ -812,7 +1210,7 @@ def _resolve_name(name: str, import_map: Dict[str, str]) -> str:
     使装饰器 placeholder_keys 可用常量替代字面量；按导入的原始属性名取值以兼容 as 别名。
     """
     source = import_map.get(name)
-    if source and source.startswith(_PLACEHOLDER_MODULE + ":"):
+    if isinstance(source, str) and source.startswith(_PLACEHOLDER_MODULE + ":"):
         attr = source.split(":", 1)[1]
         value = _placeholder_constants().get(attr)
         if value is not None:
@@ -1114,6 +1512,8 @@ _PARAM_SKIP_NAMES = frozenset({"sample_uuids"})
 def _extract_method_params(
     func_node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
     import_map: Optional[Dict[str, str]] = None,
+    *,
+    skip_first: bool = True,
 ) -> List[dict]:
     """
     Extract parameters from a class method definition.
@@ -1130,16 +1530,17 @@ def _extract_method_params(
 
     args = func_node.args
 
-    # Skip the first positional arg (self/cls) -- always present for class methods
-    # noinspection PyUnresolvedReferences
-    positional_args = args.args[1:] if args.args else []
+    # 类方法跳过 self/cls；模块级工厂必须保留第一个业务参数。
+    all_positional_args = [*args.posonlyargs, *args.args]
+    positional_args = all_positional_args[1:] if skip_first else all_positional_args
 
     # defaults align to the *end* of the args list; offset must account for the skipped arg
-    num_args = len(args.args)
+    num_args = len(all_positional_args)
     num_defaults = len(args.defaults)
     first_default_idx = num_args - num_defaults
 
-    for i, arg in enumerate(positional_args, start=1):
+    start_index = 1 if skip_first and all_positional_args else 0
+    for i, arg in enumerate(positional_args, start=start_index):
         name = arg.arg
         if name in _PARAM_SKIP_NAMES:
             continue

@@ -1407,6 +1407,24 @@ def main():
         resource_tree_set.merge_remote_resources(remote_tree_set)
         print_status("远端物料同步完成", "info")
 
+    # Opted-in PyLabRobot factories are the single source of truth for their
+    # default rack/site topology.  Expand them before Inventory freezes the
+    # startup graph; the exact same prepared instance is consumed later by the
+    # ROS device wrapper, so the device factory still runs only once.
+    from unilabos.package_manager.driver_runtime.factory_resource_projection import (
+        project_factory_resource_trees,
+    )
+
+    inferred_factory_count = project_factory_resource_trees(
+        lab_registry,
+        resource_tree_set,
+    )
+    if inferred_factory_count:
+        print_status(
+            f"已从 {inferred_factory_count} 个设备工厂推断默认培养架与点位",
+            "info",
+        )
+
     # 第二次设备包依赖检查：云端物料同步后，community 包可能引入新的 requirements
     # TODO: 当 community device package 功能上线后，在这里调用
     #   install_requirements_txt(community_pkg_path / "requirements.txt", label="community.xxx")

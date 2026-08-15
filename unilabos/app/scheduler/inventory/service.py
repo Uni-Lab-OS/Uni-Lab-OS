@@ -163,6 +163,28 @@ class InventoryService:
         else:
             conn.execute("RELEASE SAVEPOINT inventory_command_attempt")
 
+    def append_material_state(
+        self,
+        material_uuid: str,
+        values: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """经库存服务稳定入口追加一条 Backend-compatible 物料状态记录。
+
+        参数：``material_uuid`` 是 Material 稳定 UUID；``values`` 沿用公共后端
+        ``MaterialStateRequest`` 字段。返回：刚写入的 ``material_state_history``
+        行。异常：公共后端合同原样失败。状态时序和 Material latest projection
+        仍由同一个既有事务实现，本 helper 不建立第二套写路径。
+        """
+
+        from unilabos.app.scheduler.inventory.backend_contract import (
+            BackendResourceService,
+        )
+
+        return BackendResourceService(self.store).append_material_state(
+            material_uuid,
+            values,
+        )
+
     # ------------------------------------------------------------------
     # 事务内公共 helper
     # ------------------------------------------------------------------

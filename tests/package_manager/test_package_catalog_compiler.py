@@ -168,6 +168,54 @@ def test_compile_package_source_discovers_complete_catalog_without_import(
     assert not hasattr(builtins, "_package_catalog_source_imported")
 
 
+def test_device_factory_catalog_separates_contract_class_from_activation_source(
+    tmp_path: Path,
+) -> None:
+    """工厂设备保留返回类合同，并把实际激活入口投影为独立 factory。"""
+
+    from unilabos.package_manager import WorkspaceSource, compile_package_source
+
+    workspace_root = tmp_path / "workspace"
+    package_root = workspace_root / "factory_lab"
+    package_root.mkdir(parents=True)
+    package_root.joinpath("__init__.py").write_text("", encoding="utf-8")
+    workspace_root.joinpath("pyproject.toml").write_text(
+        "[project]\nname='factory-lab'\nversion='0.1.0'\n",
+        encoding="utf-8",
+    )
+    workspace_root.joinpath("package.yaml").write_text(
+        "package:\n  name: factory_lab\nworkflows: []\n",
+        encoding="utf-8",
+    )
+    package_root.joinpath("devices.py").write_text(
+        "from unilabos.registry.decorators import action, device\n\n"
+        "class CytomatDevice:\n"
+        "    @action(description='旋转')\n"
+        "    def rotate(self, position: int) -> None:\n"
+        "        pass\n\n"
+        "@device(id='cytomat', category=['incubator'], device_type='pylabrobot')\n"
+        "def make_cytomat(name: str, port: str = '') -> CytomatDevice:\n"
+        "    return CytomatDevice()\n",
+        encoding="utf-8",
+    )
+
+    catalog = compile_package_source(WorkspaceSource(workspace_root))
+    definition = catalog.definitions.devices[0]
+    entry = definition.details["registry_entry"]
+
+    assert (definition.module, definition.symbol) == (
+        "factory_lab.devices",
+        "make_cytomat",
+    )
+    assert entry["class"]["module"] == "factory_lab.devices:CytomatDevice"
+    assert entry["class"]["type"] == "pylabrobot"
+    assert entry["factory"] == {
+        "module": "factory_lab.devices:make_cytomat",
+        "return_class": "factory_lab.devices:CytomatDevice",
+    }
+    assert set(entry["class"]["action_value_mappings"]) == {"rotate"}
+
+
 def test_catalog_digest_is_independent_of_absolute_workspace_path(
     tmp_path: Path,
 ) -> None:

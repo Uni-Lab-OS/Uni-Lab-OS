@@ -14,7 +14,7 @@ from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.models import CandidateCompilation
 
-from .test_authoring_engine import WORKFLOW_UUID, _applied_graph, _template
+from .test_authoring_engine import WORKFLOW_UUID, _applied_graph, _handle, _template
 
 # ``DEVICE_MATERIAL_UUID`` 是可信工作流（Workflow）源码固定选择的实际设备
 # 物料（Material）稳定身份。
@@ -22,11 +22,21 @@ DEVICE_MATERIAL_UUID = "51000000-0000-4000-8000-000000000001"
 # ``ACTION_NODE_UUID`` 是固定执行器（Fixed Executor）执行设备动作的
 # 工作流节点（WorkflowNode）稳定身份。
 ACTION_NODE_UUID = "52000000-0000-4000-8000-000000000001"
+SECOND_ACTION_NODE_UUID = "52000000-0000-4000-8000-000000000002"
 # ``ACTION_TEMPLATE_UUID`` 只标识动作模板（Action Template）。
 # 它绝不能冒充实际设备物料（Material）身份。
 ACTION_TEMPLATE_UUID = "53000000-0000-4000-8000-000000000001"
 # ``DEVICE_RESOURCE_TEMPLATE_UUID`` 是测试动作所属实际设备类型的资源模板身份。
 DEVICE_RESOURCE_TEMPLATE_UUID = "31000000-0000-4000-8000-000000000001"
+# ``SECONDARY_DEVICE_RESOURCE_TEMPLATE_UUID`` 表示复用同一 Python 类的另一个
+# 设备定义业务身份。
+SECONDARY_DEVICE_RESOURCE_TEMPLATE_UUID = "31000000-0000-4000-8000-000000000002"
+SECONDARY_ACTION_TEMPLATE_UUID = "53000000-0000-4000-8000-000000000002"
+SECONDARY_DEVICE_MATERIAL_UUID = "51000000-0000-4000-8000-000000000002"
+PRIMARY_READY_TARGET_UUID = "54000000-0000-4000-8000-000000000001"
+PRIMARY_READY_SOURCE_UUID = "54000000-0000-4000-8000-000000000002"
+SECONDARY_READY_TARGET_UUID = "54000000-0000-4000-8000-000000000003"
+SECONDARY_READY_SOURCE_UUID = "54000000-0000-4000-8000-000000000004"
 
 
 def _catalog(
@@ -92,6 +102,69 @@ def fixed_executor_projection():
     prepared = reactor.prepare()
     return workflow_output()
 '''
+
+
+def _two_action_source(device_identity: str) -> str:
+    """构造同一固定设备变量连续调用两个动作的可信工作流源码。
+
+    参数：``device_identity`` 是固定设备部署业务 ID。返回：含两个稳定动作节点
+    UUID 的 Python 工作流源码。异常：无；身份合法性由公共编译接缝验证。
+    """
+
+    return f'''from lab.devices import Reactor
+from unilabos.workflow.authoring import device, workflow, workflow_output
+
+
+reactor: Reactor = device({device_identity!r})
+
+
+@workflow(
+    workflow_uuid="{WORKFLOW_UUID}",
+    displayname="Fixed executor projection",
+)
+def fixed_executor_projection():
+    # unilab:node_uuid={ACTION_NODE_UUID}
+    prepared = reactor.prepare()
+    # unilab:node_uuid={SECOND_ACTION_NODE_UUID}
+    prepared_again = reactor.prepare()
+    return workflow_output()
+'''
+
+
+def _shared_implementation_catalog() -> AuthoringCatalogSnapshot:
+    """构造两个设备业务身份复用同一实现类和动作名的目录快照。"""
+
+    primary = _catalog().actions[0].detached_template()
+    secondary = deepcopy(primary)
+    secondary["uuid"] = SECONDARY_ACTION_TEMPLATE_UUID
+    secondary["resource_template_uuid"] = SECONDARY_DEVICE_RESOURCE_TEMPLATE_UUID
+    handles = [
+        _handle(
+            handle_uuid,
+            node_template_uuid=template_uuid,
+            key="ready",
+            io_type=io_type,
+            value_type="any",
+            data_source="dependency",
+        )
+        for template_uuid, target_uuid, source_uuid in (
+            (
+                ACTION_TEMPLATE_UUID,
+                PRIMARY_READY_TARGET_UUID,
+                PRIMARY_READY_SOURCE_UUID,
+            ),
+            (
+                SECONDARY_ACTION_TEMPLATE_UUID,
+                SECONDARY_READY_TARGET_UUID,
+                SECONDARY_READY_SOURCE_UUID,
+            ),
+        )
+        for handle_uuid, io_type in (
+            (target_uuid, "target"),
+            (source_uuid, "source"),
+        )
+    ]
+    return AuthoringCatalogSnapshot.from_entities([primary, secondary], handles)
 
 
 def _build_graph(
@@ -205,6 +278,43 @@ def test_fixed_device_business_id_resolves_to_material_uuid() -> None:
         "mode": "fixed",
         "device_id": "reactor-a",
     }
+
+
+def test_fixed_device_business_id_selects_action_from_shared_implementation() -> None:
+    """库存模板身份必须消歧共享实现动作且同一设备变量只解析一次。"""
+
+    resolved_resource_ids: list[str] = []
+
+    def resolve_device_identity(resource_id: str) -> dict[str, str] | None:
+        """记录库存解析次数并返回第二个设备模板的实际物料身份。"""
+
+        resolved_resource_ids.append(resource_id)
+        if resource_id != "reactor-b":
+            return None
+        return {
+            "uuid": SECONDARY_DEVICE_MATERIAL_UUID,
+            "resource_template_uuid": SECONDARY_DEVICE_RESOURCE_TEMPLATE_UUID,
+        }
+
+    compilation = WorkflowAuthoringEngine(
+        catalog=_shared_implementation_catalog(),
+        resource_reference_resolver=resolve_device_identity,
+    ).compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_two_action_source("reactor-b"),
+        source_uri="package://lab/workflows/shared_implementation.py",
+        applied_graph=_applied_graph(),
+    )
+
+    assert compilation.valid and compilation.graph is not None, compilation.diagnostics
+    assert resolved_resource_ids == ["reactor-b"]
+    assert len(compilation.graph["nodes"]) == 2
+    assert all(
+        node["workflow_node_template_uuid"] == SECONDARY_ACTION_TEMPLATE_UUID
+        and node["material_uuid"] == SECONDARY_DEVICE_MATERIAL_UUID
+        for node in compilation.graph["nodes"]
+    )
 
 
 def test_trusted_compile_freezes_same_device_identity_into_execution_plan() -> None:

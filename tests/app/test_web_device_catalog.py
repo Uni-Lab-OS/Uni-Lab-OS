@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -152,6 +153,7 @@ def test_project_device_catalog_joins_resource_online_and_registry_facts() -> No
             {
                 "id": "pump-1",
                 "materialUuid": device_material_uuid,
+                "resourceTemplateUuid": "30000000-0000-4000-8000-000000000001",
                 "deviceTypeId": "community.lab.pump",
                 "deviceKey": "/devices/pump-1/pump-1",
                 "namespace": "/devices/pump-1",

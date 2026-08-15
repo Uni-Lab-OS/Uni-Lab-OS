@@ -17,6 +17,13 @@ class _Driver:
     """不建立设备连接的已选驱动类。"""
 
 
+def _make_driver(name: str, port: str = "") -> _Driver:
+    """返回测试驱动，模拟包托管 ``@device`` 同步工厂。"""
+
+    del name, port
+    return _Driver()
+
+
 class _Registry:
     """只实现驱动运行时所需解析接口的测试注册表 Adapter。"""
 
@@ -76,6 +83,100 @@ def _package_entry() -> dict[str, Any]:
             },
         },
     }
+
+
+def _factory_package_entry() -> dict[str, Any]:
+    """构造合同类与实际工厂入口分离的包托管条目。"""
+
+    entry = _package_entry()
+    entry["source_fqid"] = "demo.heater:make_driver"
+    entry["factory"] = {
+        "module": "demo.heater:make_driver",
+        "return_class": "demo.heater:Driver",
+    }
+    entry["class"]["module"] = "demo.heater:Driver"
+    entry["init_param_enforce"] = {"port": "COM9"}
+    return entry
+
+
+def test_factory_activation_loads_only_factory_and_declared_return_class() -> None:
+    """工厂设备保留两个明确角色，并在激活期完成参数绑定。"""
+
+    registry = _Registry({"community.demo.heater": _factory_package_entry()})
+    loaded_sources: list[str] = []
+
+    def load_selected(source_identity: str) -> Any:
+        loaded_sources.append(source_identity)
+        return {
+            "demo.heater:make_driver": _make_driver,
+            "demo.heater:Driver": _Driver,
+        }[source_identity]
+
+    activation = activate_python_driver(
+        registry,
+        "community.demo.heater",
+        {"name": "heater-a", "port": "COM1"},
+        loader=load_selected,
+    )
+
+    assert loaded_sources == ["demo.heater:make_driver", "demo.heater:Driver"]
+    assert activation.source_identity == "demo.heater:make_driver"
+    assert activation.driver_factory is _make_driver
+    assert activation.driver_class is _Driver
+    assert activation.driver_params == {"name": "heater-a", "port": "COM9"}
+
+
+def test_factory_activation_rejects_missing_required_constructor_parameter() -> None:
+    """合并后的配置必须能完整绑定工厂签名，不能推迟到设备线程才失败。"""
+
+    entry = _factory_package_entry()
+    entry.pop("init_param_enforce")
+    registry = _Registry({"community.demo.heater": entry})
+
+    def load_selected(source_identity: str) -> Any:
+        return {
+            "demo.heater:make_driver": _make_driver,
+            "demo.heater:Driver": _Driver,
+        }[source_identity]
+
+    with pytest.raises(DriverActivationError) as caught:
+        activate_python_driver(
+            registry,
+            "community.demo.heater",
+            {"port": "COM1"},
+            loader=load_selected,
+        )
+
+    assert caught.value.code == "factory_argument_bind_error"
+
+
+def test_factory_runtime_annotation_must_match_static_catalog_class() -> None:
+    """运行时类型提示被篡改或漂移时，选中工厂在实例化前关闭式失败。"""
+
+    class OtherDriver:
+        pass
+
+    def wrong_factory(name: str) -> OtherDriver:
+        del name
+        return OtherDriver()
+
+    registry = _Registry({"community.demo.heater": _factory_package_entry()})
+
+    def load_selected(source_identity: str) -> Any:
+        return {
+            "demo.heater:make_driver": wrong_factory,
+            "demo.heater:Driver": _Driver,
+        }[source_identity]
+
+    with pytest.raises(DriverActivationError) as caught:
+        activate_python_driver(
+            registry,
+            "community.demo.heater",
+            {"name": "heater-a"},
+            loader=load_selected,
+        )
+
+    assert caught.value.code == "factory_return_class_mismatch"
 
 
 @pytest.mark.parametrize(

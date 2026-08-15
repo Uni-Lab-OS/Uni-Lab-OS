@@ -43,6 +43,7 @@ def prepare_task_input(
     execution_plan: Mapping[str, Any],
     jobs: Sequence[Mapping[str, Any]],
     resource_resolver: ResourceSlotResolver | None = None,
+    allow_missing_required: bool = False,
 ) -> PreparedTaskInput:
     """在持久写入前解析任务输入并绑定活动计划节点。
 
@@ -72,6 +73,7 @@ def prepare_task_input(
             jobs=prepared_jobs,
             input_bindings=validated.input_bindings,
             resolved_input=resolved,
+            allow_missing_required=allow_missing_required,
         )
     except TaskInputError:
         raise
@@ -117,15 +119,41 @@ def _resolve_values(
         else:
             value = parameter["default"]
         try:
-            normalized = normalize_value(schema, value)
-            resolved[name] = _resolve_resource_slot_values(
+            resolved[name] = resolve_task_input_value(
                 schema.to_dict(),
-                normalized,
+                value,
                 resource_resolver=resource_resolver,
             )
         except WorkflowSchemaError as exc:
             raise TaskInputError("工作流任务输入值不符合 Schema") from exc
     return resolved
+
+
+def resolve_task_input_value(
+    schema: Mapping[str, Any],
+    value: Any,
+    *,
+    resource_resolver: ResourceSlotResolver | None = None,
+) -> Any:
+    """按任务输入的同一 Schema 与库存权威规则规范一个独立值。
+
+    参数：``schema`` 是规范工作流值 Schema，``value`` 是候选 JSON 值，
+    ``resource_resolver`` 是可选物料权威。返回：可冻结到任务的最小规范值。
+    异常：Schema、普通值或物料身份不合法时抛 ``TaskInputError``。
+    """
+
+    try:
+        parsed = parse_value_schema(schema)
+        normalized = normalize_value(parsed, value)
+        return _resolve_resource_slot_values(
+            parsed.to_dict(),
+            normalized,
+            resource_resolver=resource_resolver,
+        )
+    except TaskInputError:
+        raise
+    except WorkflowSchemaError as exc:
+        raise TaskInputError("工作流任务输入值不符合 Schema") from exc
 
 
 def _resolve_resource_slot_values(
@@ -196,6 +224,7 @@ def _bind_active_plan(
     jobs: list[dict[str, Any]],
     input_bindings: Mapping[str, Mapping[str, Mapping[str, str]]],
     resolved_input: Mapping[str, Any],
+    allow_missing_required: bool = False,
 ) -> None:
     """把已解析输入绑定到活动计划节点与对应首次作业。
 
@@ -263,7 +292,11 @@ def _bind_active_plan(
         )
         if provider_count > 1:
             raise TaskInputError("计划目标输入存在多个提供者")
-        if bool(input_projection.get("required")) and provider_count == 0:
+        if (
+            bool(input_projection.get("required"))
+            and provider_count == 0
+            and not allow_missing_required
+        ):
             raise TaskInputError("计划必填目标输入没有提供者")
         if binding is None:
             continue

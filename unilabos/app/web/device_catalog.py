@@ -66,11 +66,23 @@ def project_device_catalog(
         definition = registry.get(device_type_id, {})
         # ``material_uuid`` 是库存权威证明的实际设备物料身份；资源树中的 ``uuid``
         # 仅属于本次运行快照，不能授权设备动作（Action）执行。
+        material_identity = material_resolver(device_id) if material_resolver else None
         material_uuid = _device_material_uuid(material_resolver, device_id)
+        material_uuid = (
+            str(material_identity.get("uuid") or "")
+            if isinstance(material_identity, Mapping)
+            else ""
+        )
+        resource_template_uuid = (
+            str(material_identity.get("resource_template_uuid") or "")
+            if isinstance(material_identity, Mapping)
+            else ""
+        )
         items.append(
             {
                 "id": device_id,
                 "materialUuid": material_uuid,
+                "resourceTemplateUuid": resource_template_uuid,
                 "deviceTypeId": device_type_id,
                 "deviceKey": str(
                     online_fact.get("device_key")

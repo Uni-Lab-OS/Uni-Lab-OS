@@ -16,7 +16,6 @@ from unilabos.workflow.authoring_ast import (
 from unilabos.workflow.authoring_graph import (
     AuthoringGraphError,
     build_candidate_graph,
-    candidate_changeset,
     semantic_graph_equal,
 )
 from unilabos.workflow.authoring_kernel import (
@@ -241,10 +240,12 @@ class WorkflowAuthoringEngine:
         graph: dict[str, Any],
         source_uri: str,
     ) -> CandidateCompilation:
-        """把候选图确定性生成规范 Python 源码。
+        """把候选图确定性规范为结构化 Python 与对应候选图。
 
         参数说明：工作流身份必须与 ``graph`` 一致，``source_uri`` 只校验文本
-        合法性；返回保留原图的源码结果，失败时返回结构化诊断。
+        合法性；画布删边携带的瞬时意图会被真实递归 ``parallel/group`` 结构
+        取代，因此返回图可以只在结构元数据和源码顺序上规范化。业务节点、连接点
+        与依赖边不能漂移；无法结构化的 DAG 返回专用诊断。
         """
 
         try:
@@ -252,25 +253,21 @@ class WorkflowAuthoringEngine:
             _source_contract("", source_uri)
             _assert_graph_identity(graph, identity=identity, revision=revision)
             rendered = render_authoring_python(graph=graph, catalog=self._catalog)
-            changeset = candidate_changeset(graph=graph, applied_graph=graph)
-            validate_candidate_bundle(
-                graph=graph,
-                base_graph=graph,
+            normalized = self.compile(
                 workflow_uuid=identity,
-                revision=revision,
-                source_map=rendered.source_map,
-                changeset=changeset,
-                require_unchanged_graph=True,
+                workflow_revision=revision,
+                python_source=rendered.python_source,
+                source_uri=source_uri,
+                applied_graph=graph,
             )
-            return CandidateCompilation(
-                diagnostics=[],
-                graph=deepcopy(graph),
-                normalized_python_source=rendered.python_source,
-                source_map=rendered.source_map,
-                changeset=changeset,
-                compiler_version=self.compiler_version,
-                template_catalog_fingerprint=self.template_catalog_fingerprint,
-            )
+            if not normalized.valid or normalized.graph is None:
+                return normalized
+            if not _structured_graph_equal(normalized.graph, graph):
+                raise AuthoringGraphError(
+                    "non_series_parallel",
+                    "工作流依赖无法用结构化 series/parallel 源码无损表达",
+                )
+            return normalized
         except AuthoringGraphError as error:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
@@ -412,6 +409,44 @@ def _assert_graph_identity(
         raise AuthoringGraphError("candidate_invalid", "候选图缺少工作流身份")
     if validate_uuid(workflow.get("uuid")) != identity or workflow.get("revision") != revision:
         raise AuthoringGraphError("candidate_invalid", "候选图身份或修订不匹配")
+
+
+def _structured_graph_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """比较结构规范化前后的业务图并忽略已退役的结构投影字段。
+
+    画布删除 ready 边时，``order_dependency_suppressions`` 只传递一次编辑意图；
+    组节点的旧 ``parallel_scope/parallel_order`` 与源码位置也会由递归 AST 重新
+    计算。这四项不是执行图事实，其他工作流、节点、边和目录差异一律拒绝。
+    """
+
+    def normalize(value: Mapping[str, Any]) -> dict[str, Any]:
+        result = deepcopy(dict(value))
+        workflow = result.get("workflow")
+        if isinstance(workflow, dict):
+            workflow_meta = workflow.get("meta_data")
+            workflow_unilab = (
+                workflow_meta.get("unilab") if isinstance(workflow_meta, dict) else None
+            )
+            if isinstance(workflow_unilab, dict):
+                workflow_unilab.pop("order_dependency_suppressions", None)
+        nodes = result.get("nodes")
+        if isinstance(nodes, list):
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                metadata = node.get("meta_data")
+                unilab = metadata.get("unilab") if isinstance(metadata, dict) else None
+                if not isinstance(unilab, dict):
+                    continue
+                for field_name in (
+                    "authoring_source_order",
+                    "parallel_scope",
+                    "parallel_order",
+                ):
+                    unilab.pop(field_name, None)
+        return result
+
+    return semantic_graph_equal(normalize(left), normalize(right))
 
 
 def _error_result(

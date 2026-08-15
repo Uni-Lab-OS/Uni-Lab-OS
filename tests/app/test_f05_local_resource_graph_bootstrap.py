@@ -71,16 +71,40 @@ class _SharedImplementationRegistry(_Registry):
     def obtain_registry_device_info(self) -> list[dict[str, Any]]:
         """返回业务 ID 不同但实现类相同的两个设备模板。
 
-        参数：无。返回：主设备和次设备定义；二者共享实现类身份，但资源图只按
-        唯一业务 ID 引用主设备。异常：无；每次调用都返回无共享引用的新字典。
+        参数：无。返回：主设备和次设备定义；二者共享实现类身份和 ``source_fqid``，
+        但资源图只按唯一业务 ID 引用主设备。异常：无；每次调用都返回无共享引用的新字典。
         """
 
         primary = super().obtain_registry_device_info()[0]
+        primary["source_fqid"] = "m2b_native_e2e.mount:M2BMount"
         secondary = {
             **primary,
             "id": "m2b_mount_secondary",
             "display_name": "M2B Mount Secondary",
             "class": dict(primary["class"]),
+        }
+        return [primary, secondary]
+
+
+class _CrossImplementationAliasRegistry(_Registry):
+    """提供工厂入口与另一设备返回类交叉碰撞的注册表代际。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回实现身份交叉碰撞、但业务 ID 各自唯一的两个设备模板。"""
+
+        primary = super().obtain_registry_device_info()[0]
+        collision_alias = "m2b_native_e2e.secondary:SecondaryMount"
+        primary["source_fqid"] = collision_alias
+        secondary = {
+            **primary,
+            "id": "m2b_mount_secondary",
+            "display_name": "M2B Mount Secondary",
+            "source_fqid": "m2b_native_e2e.factory:make_secondary_mount",
+            "class": {
+                **primary["class"],
+                "module": collision_alias,
+                "type": "SecondaryMount",
+            },
         }
         return [primary, secondary]
 
@@ -226,16 +250,21 @@ class _ResourceTree:
         site_parent_uuid: str = "64000000-0000-4000-8000-0000000002b0",
         mount_name: str = "Stacker A",
         mount_scale: float = 1,
+        site_type: str = "well",
+        mount_class: str = "m2b_mount",
     ) -> None:
         """保存测试资源树的可变输入。
 
-        参数：三个参数分别表示库位父身份、设备展示名与设备三轴缩放值。返回：
-        无。异常：无；``site_parent_uuid`` 是运行时父引用，不是正式物料 UUID。
+        参数：前四项分别表示库位父身份、设备展示名、设备三轴缩放值和库位类型；
+        ``mount_class`` 是资源图中的设备模板别名。返回：无。异常：无；
+        ``site_parent_uuid`` 是运行时父引用，不是正式物料 UUID。
         """
 
         self._site_parent_uuid = site_parent_uuid
         self._mount_name = mount_name
         self._mount_scale = mount_scale
+        self._site_type = site_type
+        self._mount_class = mount_class
 
     def dump(self) -> list[list[dict[str, Any]]]:
         """返回设备物料和两个有序库位（Site）的序列化树。
@@ -262,7 +291,7 @@ class _ResourceTree:
                     "description": "",
                     "parent_uuid": None,
                     "type": "device",
-                    "class": "m2b_mount",
+                    "class": self._mount_class,
                     "pose": mount_pose,
                     "config": {"category": "stacker"},
                     "data": {},
@@ -274,10 +303,10 @@ class _ResourceTree:
                     "name": "Slot 1",
                     "description": "",
                     "parent_uuid": self._site_parent_uuid,
-                    "type": "well",
+                    "type": self._site_type,
                     "class": "",
                     "pose": _pose(0, 0, 40, 100, 100, 24),
-                    "config": {"category": "well"},
+                    "config": {"category": self._site_type},
                     "data": {},
                     "barcode": "",
                 },
@@ -287,10 +316,10 @@ class _ResourceTree:
                     "name": "Slot 2",
                     "description": "",
                     "parent_uuid": runtime_mount_uuid,
-                    "type": "well",
+                    "type": self._site_type,
                     "class": "",
                     "pose": _pose(120, 0, 40, 100, 100, 24),
-                    "config": {"category": "well"},
+                    "config": {"category": self._site_type},
                     "data": {},
                     "barcode": "",
                 },
@@ -412,6 +441,24 @@ def test_bootstrap_exposes_compiled_shape_in_local_template_detail() -> None:
     }
 
 
+@pytest.mark.parametrize("site_type", ["plate_holder", "resource_holder"])
+def test_pylabrobot_holder_categories_project_as_inventory_sites(
+    site_type: str,
+) -> None:
+    """Factory-owned holders are Sites and never require a material class."""
+
+    store = InventoryStore(":memory:")
+    try:
+        receipt = _bootstrap(store, _ResourceTree(site_type=site_type))
+        graph = BackendResourceService(store).material_graph()
+    finally:
+        store.close()
+
+    assert receipt["material_count"] == 1
+    assert receipt["site_count"] == 2
+    assert len(graph["nodes"][0]["sites"]) == 2
+
+
 def test_bootstrap_projects_public_shape_kind_and_model_url() -> None:
     """物料读模型必须携带外形类型与 OS 公开模型 URL。
 
@@ -472,8 +519,8 @@ def test_shared_implementation_class_keeps_unique_business_aliases() -> None:
     """共享 Python 实现类不得阻止按唯一业务 ID 投影本地资源图。
 
     参数：无。返回：无。断言：两个资源模板（ResourceTemplate）合法复用同一
-    实现类时，模糊类别名不进入解析表，但资源图中的 ``m2b_mount`` 业务 ID 仍
-    唯一解析并提交；这复现 SZLab 多设备复用 ``MoveitInterface`` 的启动形状。
+    实现类和 ``source_fqid`` 时，模糊别名不进入解析表，但资源图中的
+    ``m2b_mount`` 业务 ID 仍唯一解析并提交；这复现多 ID 装饰器的启动形状。
     """
 
     store = InventoryStore(":memory:")
@@ -491,6 +538,30 @@ def test_shared_implementation_class_keeps_unique_business_aliases() -> None:
     assert [node["material"]["uuid"] for node in graph["nodes"]] == [
         MOUNT_MATERIAL_UUID
     ]
+
+
+def test_cross_implementation_alias_collision_is_not_arbitrarily_resolved() -> None:
+    """设备工厂入口与另一返回类交叉碰撞时不得选择任一业务模板。
+
+    参数：无。返回：无。断言：资源图仅给出交叉碰撞的实现别名时，启动投影
+    关闭式失败；两个业务 ID 仍可供作者显式选择，但实现身份不具有唯一语义。
+    """
+
+    store = InventoryStore(":memory:")
+    try:
+        with pytest.raises(
+            ResourceGraphBootstrapError,
+            match="资源模板身份未进入注册表",
+        ):
+            _bootstrap(
+                store,
+                _ResourceTree(
+                    mount_class="m2b_native_e2e.secondary:SecondaryMount"
+                ),
+                registry=_CrossImplementationAliasRegistry(),
+            )
+    finally:
+        store.close()
 
 
 def test_bootstrap_persists_implicit_host_executor_material_identity() -> None:

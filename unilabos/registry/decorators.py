@@ -47,6 +47,7 @@ Usage:
 
 from enum import Enum
 from functools import wraps
+import inspect
 import re
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -213,7 +214,7 @@ class HardwareInterface(BaseModel):
 # ---------------------------------------------------------------------------
 # 全局注册表 -- 记录所有被装饰器标记的类/函数
 # ---------------------------------------------------------------------------
-_registered_devices: Dict[str, type] = {}  # device_id -> class
+_registered_devices: Dict[str, Callable[..., Any]] = {}  # device_id -> class or sync factory
 _registered_resources: Dict[str, Any] = {}  # resource_id -> class or function
 
 
@@ -270,7 +271,7 @@ def device(
     available_sites: Optional[List[Dict[str, Any]]] = None,
 ):
     """
-    设备类装饰器
+    设备类或同步工厂函数装饰器
 
     将类标记为一个 UniLab-OS 设备，并附加注册表元数据。
 
@@ -355,23 +356,28 @@ def device(
         "metadata": dict(metadata or {}),
     }
 
-    def decorator(cls):
-        """把设备类注册为一个或多个资源模板（ResourceTemplate）。
+    def decorator(target):
+        """把设备类或同步工厂注册为一个或多个资源模板（ResourceTemplate）。
 
-        参数：``cls`` 是被装饰的设备类。返回：原设备类；注册身份重复时抛出
-        ``ValueError``。库位（Site）模板已在外层冻结，本函数只绑定同一代元数据。
+        参数：``target`` 是被装饰的设备类或同步工厂函数。返回：原对象；注册身份
+        重复、对象类型非法或使用异步工厂时抛出稳定异常。库位（Site）模板已在
+        外层冻结，本函数只绑定同一代元数据。
         """
 
-        cls._device_registry_meta = base_meta
-        cls._device_registry_id_meta = id_meta
-        cls._device_registry_ids = device_ids
+        if not (inspect.isclass(target) or inspect.isfunction(target)):
+            raise TypeError("@device 只能装饰设备类或同步工厂函数")
+        if inspect.iscoroutinefunction(target):
+            raise TypeError("@device v1 不支持异步工厂函数")
+        target._device_registry_meta = base_meta
+        target._device_registry_id_meta = id_meta
+        target._device_registry_ids = device_ids
 
         for did in device_ids:
             if did in _registered_devices:
                 raise ValueError(f"@device id 重复: '{did}' 已被 {_registered_devices[did]} 注册")
-            _registered_devices[did] = cls
+            _registered_devices[did] = target
 
-        return cls
+        return target
 
     return decorator
 

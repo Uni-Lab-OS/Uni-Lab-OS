@@ -170,9 +170,10 @@ class DeviceActionRunService:
         """从设备物料摘要解析 Edge 本地执行器身份。
 
         参数：``material`` 是创建阶段读取的活动设备物料（Material）摘要。
-        返回：去除首尾空白的 ``edge_local_id``。异常：直接字段及 ``meta_data``
+        返回：去除首尾空白的本地执行器 ID。异常：直接字段及 ``meta_data``
         映射/JSON 均未提供有效身份时抛 ``DeviceActionRunUnavailable``，确保失败
-        发生在任务持久化之前。
+        发生在任务持久化之前。资源图启动投影可用已证明来源的
+        ``source_node_id``，但不按名称、条码或物料 UUID 猜测。
         """
 
         direct_identity = str(material.get("edge_local_id") or "").strip()
@@ -190,7 +191,13 @@ class DeviceActionRunService:
             nested_identity = str(material_meta_data.get("edge_local_id") or "").strip()
             if nested_identity:
                 return nested_identity
-        raise DeviceActionRunUnavailable("设备物料缺少明确 edge_local_id")
+            if material_meta_data.get("source") == "resource-tree-set":
+                source_node_id = str(
+                    material_meta_data.get("source_node_id") or ""
+                ).strip()
+                if source_node_id:
+                    return source_node_id
+        raise DeviceActionRunUnavailable("设备物料缺少可执行的本地设备标识")
 
     @staticmethod
     def _validate_action_param(

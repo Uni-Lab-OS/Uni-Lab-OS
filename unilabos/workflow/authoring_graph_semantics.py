@@ -38,8 +38,14 @@ def candidate_changeset(
 
     candidate = graph_containers(graph)
     applied = graph_containers(applied_graph)
-    candidate_nodes = _semantic_entities(candidate["nodes"])
-    applied_nodes = _semantic_entities(applied["nodes"])
+    candidate_nodes = _semantic_entities(
+        candidate["nodes"],
+        collection_name="nodes",
+    )
+    applied_nodes = _semantic_entities(
+        applied["nodes"],
+        collection_name="nodes",
+    )
     candidate_edges = _semantic_entities(candidate["edges"])
     applied_edges = _semantic_entities(applied["edges"])
     expected = {
@@ -134,15 +140,17 @@ def _semantic_entities(
     result: dict[str, str] = {}
     for value in values:
         identity = str(value["uuid"])
-        semantic = deepcopy(
-            {
-                key: child
-                for key, child in value.items()
-                # ``status`` 仅是旧本地 Store 的内部兼容列；Backend 公共节点 DTO
-                # 已不再读写它，作者源码也不能表达它，因此不能形成图变更。
-                if key not in {"create_time", "update_time", "workflow_uuid", "status"}
-            }
-        )
+        ignored_fields = {"create_time", "update_time", "workflow_uuid"}
+        if collection_name == "nodes":
+            # ``status`` 是任务运行时投影：作者编译器生成写模型时不携带，服务在
+            # 候选签发时从已应用后端图补回。若把它计入作者语义，同一候选会在
+            # 编译与补形后得到不同变更集，最终被误报为 candidate_invalid。
+            ignored_fields.add("status")
+        semantic = deepcopy({
+            key: child
+            for key, child in value.items()
+            if key not in ignored_fields
+        })
         if collection_name == "handle_templates":
             # Backend ``omitempty`` 会省略结构性 ready handle 的三个空字段；目录
             # 重投影则显式返回 ``None``，两种 wire 形状没有作者语义差异。
@@ -181,7 +189,12 @@ def _semantic_graph(graph: Mapping[str, Any]) -> str:
     workflow.setdefault("description", None)
     payload = {
         "workflow": workflow,
-        "nodes": sorted(_semantic_entities(value["nodes"]).values()),
+        "nodes": sorted(
+            _semantic_entities(
+                value["nodes"],
+                collection_name="nodes",
+            ).values()
+        ),
         "edges": sorted(_semantic_entities(value["edges"]).values()),
         "node_templates": sorted(
             _semantic_entities(

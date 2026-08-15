@@ -24,7 +24,10 @@ class RecordingTaskSchedulerBridge:
         self.steps: list[tuple[str, str | None]] = []
 
     def submit(self, task: dict[str, Any]) -> dict[str, Any]:
-        return {"task": self.store.get_task(task["uuid"]), "jobs": self.store.list_jobs(task["uuid"])}
+        return {
+            "task": self.store.get_task(task["uuid"]),
+            "jobs": self.store.list_jobs(task["uuid"]),
+        }
 
     def step(
         self,
@@ -33,7 +36,11 @@ class RecordingTaskSchedulerBridge:
         target_node_uuid: str | None = None,
     ) -> dict[str, Any]:
         self.steps.append((task_uuid, target_node_uuid))
-        return {"workflow_id": task_uuid, "state": "paused", "dispatched": [target_node_uuid]}
+        return {
+            "workflow_id": task_uuid,
+            "state": "paused",
+            "dispatched": [target_node_uuid],
+        }
 
 
 def _runtime(tmp_path):
@@ -80,7 +87,9 @@ def _runtime(tmp_path):
     return client, store, bridge, workflow["uuid"]
 
 
-def test_debug_launch_freezes_configuration_and_excludes_disabled_node(tmp_path) -> None:
+def test_debug_launch_freezes_configuration_and_excludes_disabled_node(
+    tmp_path,
+) -> None:
     client, store, _bridge, workflow_uuid = _runtime(tmp_path)
 
     response = client.post(
@@ -97,9 +106,9 @@ def test_debug_launch_freezes_configuration_and_excludes_disabled_node(tmp_path)
     assert response.status_code == 201, response.text
     task = response.json()["data"]
     jobs = client.get(f"/api/v1/workflow-tasks/{task['uuid']}/jobs").json()["data"]
-    projection = client.get(
-        f"/api/v1/debug/workflow-tasks/{task['uuid']}"
-    ).json()["data"]
+    projection = client.get(f"/api/v1/debug/workflow-tasks/{task['uuid']}").json()[
+        "data"
+    ]
 
     assert {node["uuid"] for node in task["workflow_snapshot"]["nodes"]} == {
         START_NODE_UUID,
@@ -121,6 +130,41 @@ def test_debug_launch_freezes_configuration_and_excludes_disabled_node(tmp_path)
     store.close()
 
 
+def test_debug_preflight_hash_is_rechecked_when_task_is_created(tmp_path) -> None:
+    """HTTP 预检哈希须与创建事务中的同一图事实一致。"""
+
+    client, store, _bridge, workflow_uuid = _runtime(tmp_path)
+    request = {
+        "workflow_uuid": workflow_uuid,
+        "start_node_uuids": [START_NODE_UUID],
+        "breakpoint_node_uuids": [],
+        "input": {},
+        "launch_overrides": [],
+    }
+
+    preflight = client.post("/api/v1/debug/workflow-tasks:preflight", json=request)
+    assert preflight.status_code == 200, preflight.text
+    projection = preflight.json()["data"]
+    assert projection["status"] == "ready"
+    assert projection["requirements"] == []
+
+    created = client.post(
+        "/api/v1/debug/workflow-tasks",
+        json={**request, "preflight_hash": projection["preflight_hash"]},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["code"] == 0
+
+    stale = client.post(
+        "/api/v1/debug/workflow-tasks",
+        json={**request, "preflight_hash": "sha256:" + "0" * 64},
+    )
+    assert stale.status_code == 200
+    assert stale.json()["code"] == 3003
+    assert "重新执行调试启动预检" in stale.json()["error"]["msg"]
+    store.close()
+
+
 def test_debug_step_requires_exact_open_hold_and_is_idempotent(tmp_path) -> None:
     client, store, bridge, workflow_uuid = _runtime(tmp_path)
     task = client.post(
@@ -131,9 +175,9 @@ def test_debug_step_requires_exact_open_hold_and_is_idempotent(tmp_path) -> None
             "breakpoint_node_uuids": [],
         },
     ).json()["data"]
-    projection = client.get(
-        f"/api/v1/debug/workflow-tasks/{task['uuid']}"
-    ).json()["data"]
+    projection = client.get(f"/api/v1/debug/workflow-tasks/{task['uuid']}").json()[
+        "data"
+    ]
     hold_uuid = projection["holds"][0]["uuid"]
     body = {
         "type": "step",
@@ -153,9 +197,9 @@ def test_debug_step_requires_exact_open_hold_and_is_idempotent(tmp_path) -> None
     assert first.json()["data"] == replay.json()["data"]
     assert first.json()["data"]["status"] == "succeeded"
     assert bridge.steps == [(task["uuid"], START_NODE_UUID)]
-    released = client.get(
-        f"/api/v1/debug/workflow-tasks/{task['uuid']}"
-    ).json()["data"]["holds"][0]
+    released = client.get(f"/api/v1/debug/workflow-tasks/{task['uuid']}").json()[
+        "data"
+    ]["holds"][0]
     assert released["status"] == "released"
     store.close()
 

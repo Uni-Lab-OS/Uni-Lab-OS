@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from unilabos.workflow.authoring_engine import WorkflowAuthoringEngine
+from unilabos.workflow.authoring_identity import authoring_edge_uuid
 from unilabos.workflow.authoring_kernel import AuthoringCatalogSnapshot
 
 from .test_authoring_engine import (
     ANALYZE_NODE_UUID,
     ANALYZE_READY_TARGET,
     PREPARE_NODE_UUID,
+    PREPARE_READY_TARGET,
     PREPARE_READY_SOURCE,
     WORKFLOW_UUID,
     _compile,
@@ -20,6 +23,9 @@ from .test_authoring_engine import (
 GROUP_A_NODE_UUID = "20000000-0000-4000-8000-000000000011"
 GROUP_B_NODE_UUID = "20000000-0000-4000-8000-000000000012"
 BRANCH_B_NODE_UUID = "20000000-0000-4000-8000-000000000013"
+BRANCH_C_NODE_UUID = "20000000-0000-4000-8000-000000000014"
+GROUP_C_NODE_UUID = "20000000-0000-4000-8000-000000000015"
+GROUP_D_NODE_UUID = "20000000-0000-4000-8000-000000000016"
 GROUP_TEMPLATE_UUID = "30000000-0000-4000-8000-000000000011"
 
 
@@ -141,6 +147,104 @@ def parallel_preparation(*, sample_a: ResourceSlot, sample_b: ResourceSlot):
 '''
 
 
+def _nested_parallel_source() -> str:
+    """返回外层支路内再含并行支路的递归结构源码。"""
+
+    return f'''from lab.devices import Reactor
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import device, group, parallel, workflow, workflow_output
+
+
+reactor: Reactor = device()
+
+
+@workflow(workflow_uuid="{WORKFLOW_UUID}", displayname="Nested parallel")
+def nested_parallel(
+    *,
+    sample_a: ResourceSlot,
+    sample_b: ResourceSlot,
+    sample_c: ResourceSlot,
+):
+    with parallel():
+        # unilab:node_uuid={GROUP_A_NODE_UUID}
+        with group(name="AB path"):
+            with parallel():
+                # unilab:node_uuid={GROUP_B_NODE_UUID}
+                with group(name="A path"):
+                    # unilab:node_uuid={PREPARE_NODE_UUID}
+                    branch_a = reactor.prepare(sample=sample_a, cycles=1)
+                # unilab:node_uuid={GROUP_C_NODE_UUID}
+                with group(name="B path"):
+                    # unilab:node_uuid={BRANCH_B_NODE_UUID}
+                    branch_b = reactor.prepare(sample=sample_b, cycles=2)
+        # unilab:node_uuid={GROUP_D_NODE_UUID}
+        with group(name="C path"):
+            # unilab:node_uuid={BRANCH_C_NODE_UUID}
+            branch_c = reactor.prepare(sample=sample_c, cycles=3)
+    return workflow_output(
+        sample_a=branch_a.prepared,
+        sample_b=branch_b.prepared,
+        sample_c=branch_c.prepared,
+    )
+'''
+
+
+def _four_action_source() -> str:
+    """返回四个默认顺序动作，供非 series-parallel 图夹具复用。"""
+
+    return f'''from lab.devices import Reactor
+from unilabos.registry.placeholder_type import ResourceSlot
+from unilabos.workflow.authoring import device, workflow, workflow_output
+
+
+reactor: Reactor = device()
+
+
+@workflow(workflow_uuid="{WORKFLOW_UUID}", displayname="Four actions")
+def four_actions(
+    *,
+    sample_a: ResourceSlot,
+    sample_b: ResourceSlot,
+    sample_c: ResourceSlot,
+    sample_d: ResourceSlot,
+):
+    # unilab:node_uuid={PREPARE_NODE_UUID}
+    action_a = reactor.prepare(sample=sample_a, cycles=1)
+    # unilab:node_uuid={BRANCH_B_NODE_UUID}
+    action_b = reactor.prepare(sample=sample_b, cycles=2)
+    # unilab:node_uuid={BRANCH_C_NODE_UUID}
+    action_c = reactor.prepare(sample=sample_c, cycles=3)
+    # unilab:node_uuid={ANALYZE_NODE_UUID}
+    action_d = reactor.prepare(sample=sample_d, cycles=4)
+    return workflow_output(
+        sample_a=action_a.prepared,
+        sample_b=action_b.prepared,
+        sample_c=action_c.prepared,
+        sample_d=action_d.prepared,
+    )
+'''
+
+
+def _ready_edge(source_node_uuid: str, target_node_uuid: str) -> dict[str, Any]:
+    """构造测试目录中两个 prepare 动作间的 ready 边。"""
+
+    return {
+        "uuid": authoring_edge_uuid(
+            workflow_uuid=WORKFLOW_UUID,
+            source_node_uuid=source_node_uuid,
+            source_handle_uuid=PREPARE_READY_SOURCE,
+            target_node_uuid=target_node_uuid,
+            target_handle_uuid=PREPARE_READY_TARGET,
+        ),
+        "source_node_uuid": source_node_uuid,
+        "target_node_uuid": target_node_uuid,
+        "source_handle_uuid": PREPARE_READY_SOURCE,
+        "target_handle_uuid": PREPARE_READY_TARGET,
+        "description": None,
+        "meta_data": {},
+    }
+
+
 def _node(graph: dict[str, Any], node_uuid: str) -> dict[str, Any]:
     """按稳定 UUID 取得唯一候选工作流节点（WorkflowNode）。
 
@@ -244,6 +348,83 @@ def test_parallel_groups_use_real_ready_order_without_fork_join_nodes() -> None:
     assert "with parallel():" in result.normalized_python_source
 
 
+def test_nested_parallel_inside_group_round_trips_recursively() -> None:
+    """group 内嵌 parallel 必须保留展示父级并达到规范固定点。"""
+
+    engine = _group_engine()
+    compiled = _compile(engine, _nested_parallel_source())
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    graph = compiled.graph
+    assert _node(graph, GROUP_B_NODE_UUID)["parent_uuid"] == GROUP_A_NODE_UUID
+    assert _node(graph, GROUP_C_NODE_UUID)["parent_uuid"] == GROUP_A_NODE_UUID
+    assert _node(graph, PREPARE_NODE_UUID)["parent_uuid"] == GROUP_B_NODE_UUID
+    assert _node(graph, BRANCH_B_NODE_UUID)["parent_uuid"] == GROUP_C_NODE_UUID
+    assert compiled.normalized_python_source is not None
+    assert compiled.normalized_python_source.count("with parallel():") == 2
+
+    repeated = _compile(engine, compiled.normalized_python_source, graph=graph)
+    assert repeated.valid, repeated.diagnostics
+    assert repeated.graph == graph
+
+
+def test_deleted_ready_edge_round_trips_as_structured_parallelization() -> None:
+    """画布删除 ready 边后必须扩大真实 parallel，而不是写控制注释。"""
+
+    engine = _group_engine()
+    compiled = _compile(engine, _parallel_source())
+    assert compiled.valid and compiled.graph is not None
+    graph = deepcopy(compiled.graph)
+    ready_edge = next(
+        edge
+        for edge in graph["edges"]
+        if edge["source_node_uuid"] == BRANCH_B_NODE_UUID
+        and edge["target_node_uuid"] == ANALYZE_NODE_UUID
+    )
+    graph["edges"] = [
+        edge for edge in graph["edges"] if edge["uuid"] != ready_edge["uuid"]
+    ]
+    graph["workflow"]["meta_data"]["unilab"][
+        "order_dependency_suppressions"
+    ] = [
+        {
+            "source_node_uuid": BRANCH_B_NODE_UUID,
+            "target_node_uuid": ANALYZE_NODE_UUID,
+        }
+    ]
+
+    generated = engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=graph,
+        source_uri="package://lab/workflows/parallel-ready-deletion.py",
+    )
+    assert generated.valid and generated.normalized_python_source is not None
+    assert "unilab:parallelize" not in generated.normalized_python_source
+    assert "with parallel():\n        pass" not in generated.normalized_python_source
+    assert generated.normalized_python_source.count("with parallel():") == 1
+    assert "with group(name='并行支路 1'):" in generated.normalized_python_source
+    assert generated.graph is not None
+    assert "order_dependency_suppressions" not in (
+        generated.graph["workflow"]["meta_data"]["unilab"]
+    )
+    validated = engine.validate(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=generated.graph,
+        python_source=generated.normalized_python_source,
+        source_uri="package://lab/workflows/parallel-ready-deletion.py",
+    )
+    assert validated.valid, validated.diagnostics
+    assert validated.graph == generated.graph
+    assert {
+        (edge["source_node_uuid"], edge["target_node_uuid"])
+        for edge in generated.graph["edges"]
+    } == {
+        (PREPARE_NODE_UUID, ANALYZE_NODE_UUID),
+    }
+
+
 def test_parallel_branch_cannot_read_a_sibling_result() -> None:
     """并行分支不能读取同级分支的未汇合结果。
 
@@ -263,3 +444,31 @@ def test_parallel_branch_cannot_read_a_sibling_result() -> None:
     assert [item["code"] for item in result.diagnostics] == [
         "unsupported_authoring_syntax"
     ]
+
+
+def test_non_series_parallel_dag_returns_explicit_diagnostic() -> None:
+    """N 形偏序不能降级成隐藏注释或错误的嵌套并行。"""
+
+    engine = _group_engine()
+    compiled = _compile(engine, _four_action_source())
+    assert compiled.valid and compiled.graph is not None
+    graph = deepcopy(compiled.graph)
+    graph["edges"] = [
+        _ready_edge(PREPARE_NODE_UUID, BRANCH_C_NODE_UUID),
+        _ready_edge(BRANCH_B_NODE_UUID, BRANCH_C_NODE_UUID),
+        _ready_edge(BRANCH_B_NODE_UUID, ANALYZE_NODE_UUID),
+    ]
+
+    generated = engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=graph,
+        source_uri="package://lab/workflows/non-series-parallel.py",
+    )
+
+    assert not generated.valid
+    assert generated.graph is None
+    assert [item["code"] for item in generated.diagnostics] == [
+        "non_series_parallel"
+    ]
+    assert "series-parallel" in generated.diagnostics[0]["message"]

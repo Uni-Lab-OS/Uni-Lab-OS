@@ -35,6 +35,11 @@ from unilabos.workflow.device_action_run import (
     DeviceActionRunService,
     DeviceActionRunUnavailable,
 )
+from unilabos.workflow.debug_launch import (
+    DebugLaunchPreflight,
+    MaterialCandidates,
+    scope_debug_task_input,
+)
 from unilabos.workflow.event_reader import DurableEventReader
 from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.graph_validation import GraphValidationError
@@ -121,6 +126,14 @@ _ERRORS = {
     "template_catalog_unavailable": (
         503,
         "设备动作模板暂不可用，请稍后重试",
+    ),
+    "debug_launch_requires_input": (
+        409,
+        "调试启动仍有缺失输入，请完成预检引导后重试",
+    ),
+    "debug_preflight_conflict": (
+        409,
+        "工作流或库存事实已变化，请重新执行调试启动预检",
     ),
     "internal_error": (500, "本地工作流服务出现错误，请重试或查看日志"),
 }
@@ -316,6 +329,7 @@ class WorkflowService:
         compiler: Optional[AuthoringCompiler] = None,
         compiler_rebuilder: Callable[[], AuthoringCompiler] | None = None,
         material_resolver: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+        material_candidates: MaterialCandidates | None = None,
         task_scheduler_bridge: WorkflowTaskSchedulerBridge | None = None,
     ) -> None:
         """装配本地工作流应用服务。
@@ -339,6 +353,10 @@ class WorkflowService:
             material_resolver=material_resolver,
         )
         self._material_resolver = material_resolver
+        self._debug_launch_preflight = DebugLaunchPreflight(
+            material_resolver=material_resolver,
+            material_candidates=material_candidates,
+        )
         # ``_task_scheduler_bridge`` 是普通任务与设备单动作共享的唯一监听器所有者；
         # 后端控制（Backend-controlled）配置保持空，避免第二个调度权威。
         self._task_scheduler_bridge = task_scheduler_bridge
@@ -704,6 +722,8 @@ class WorkflowService:
         input_value: Dict[str, Any],
         description: Optional[str],
         meta_data: Dict[str, Any],
+        launch_overrides: List[Dict[str, Any]] | None = None,
+        preflight_hash: str | None = None,
     ) -> Dict[str, Any]:
         """创建带不可变起始点、断点和首个 Admission Hold 的调试任务。"""
 
@@ -719,6 +739,12 @@ class WorkflowService:
                 raise ValueError
             input_value = normalize_json_object(input_value)
             meta_data = normalize_json_object(meta_data)
+            normalized_overrides = normalize_json_array(launch_overrides)
+            if (
+                preflight_hash is not None
+                and _HASH_TOKEN.fullmatch(preflight_hash) is None
+            ):
+                raise ValueError
         except (TypeError, ValueError):
             raise WorkflowError("invalid_input") from None
         description = self._optional_text(description)
@@ -726,17 +752,18 @@ class WorkflowService:
         start_node_uuid = normalized_starts[0]
 
         def plan_builder(graph: Dict[str, Any]) -> PreparedTaskInput:
-            prepared = self._prepare_task_input(
-                graph,
-                input_value=input_value,
-                run_mode="step",
-                target_node_uuid=None,
-            )
-            return self._scope_debug_task_input(
-                prepared,
+            decision = self._debug_launch_preflight.evaluate(
+                graph=graph,
+                raw_input=input_value,
                 start_node_uuid=start_node_uuid,
                 breakpoint_node_uuids=normalized_breakpoints,
+                launch_overrides=normalized_overrides,
             )
+            if preflight_hash is not None and decision.preflight_hash != preflight_hash:
+                raise WorkflowError("debug_preflight_conflict")
+            if decision.status != "ready" or decision.prepared is None:
+                raise WorkflowError("debug_launch_requires_input")
+            return decision.prepared
 
         try:
             task = self._store.create_task_with_jobs(
@@ -756,6 +783,8 @@ class WorkflowService:
             if self._task_scheduler_bridge is None:
                 return task
             return self._task_scheduler_bridge.submit(task)["task"]
+        except WorkflowError:
+            raise
         except (TaskInputError, StoreConflict, ValueError):
             raise WorkflowError("invalid_input") from None
         except TaskSchedulerBridgeError:
@@ -800,6 +829,54 @@ class WorkflowService:
             ],
             "disabled_node_uuids": disabled,
         }
+
+    def preflight_debug_workflow_task(
+        self,
+        *,
+        workflow_uuid: str,
+        start_node_uuids: List[str],
+        breakpoint_node_uuids: List[str],
+        input_value: Dict[str, Any],
+        launch_overrides: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """权威分析调试范围的缺失值、物料事实建议与已确认覆盖。
+
+        本入口只读工作流与库存，不创建任务、不写库存；创建入口会在自己的
+        图事务中重新计算同一哈希，避免前端持有的建议跨修订或库存变化生效。
+        """
+
+        workflow_uuid = self.get_workflow(workflow_uuid)["uuid"]
+        try:
+            starts = [validate_uuid(value) for value in start_node_uuids]
+            breakpoints = [validate_uuid(value) for value in breakpoint_node_uuids]
+            if len(starts) != 1 or len(set(starts)) != 1:
+                raise ValueError
+            if len(set(breakpoints)) != len(breakpoints):
+                raise ValueError
+            input_value = normalize_json_object(input_value)
+            launch_overrides = normalize_json_array(launch_overrides)
+            graph = self.get_graph(workflow_uuid)
+            decision = self._debug_launch_preflight.evaluate(
+                graph=graph,
+                raw_input=input_value,
+                start_node_uuid=starts[0],
+                breakpoint_node_uuids=breakpoints,
+                launch_overrides=launch_overrides,
+            )
+            workflow = graph.get("workflow")
+            revision = (
+                workflow.get("revision") if isinstance(workflow, Mapping) else None
+            )
+            if not isinstance(revision, int):
+                raise ValueError
+            return decision.to_public_dict(
+                workflow_uuid=workflow_uuid,
+                workflow_revision=revision,
+            )
+        except WorkflowError:
+            raise
+        except (TaskInputError, StoreConflict, TypeError, ValueError):
+            raise WorkflowError("invalid_input") from None
 
     def command_debug_workflow_task(
         self,
