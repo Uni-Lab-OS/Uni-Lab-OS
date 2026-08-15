@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 import requests
 
+from unilabos.app.instance_geometry import (
+    InstanceGeometryError,
+    default_host_relative_position,
+    relative_position_from_graph_node,
+)
 from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 from unilabos.utils.tracing import inject_trace_context, span
-
 
 INSTANCE_TOKEN_ENV = "UNILAB_INSTANCE_SYNC_TOKEN"
 
@@ -46,7 +51,18 @@ class InstanceSynchronizer:
         self.timeout = timeout
 
     def sync_graph(self, graph: Mapping[str, Any]) -> InstanceSyncReport:
-        """创建缺失实例；同一条码已存在时校验模板后直接复用。"""
+        """把设备图中的缺失节点按父子顺序创建为云端物料（Material）。
+
+        Args:
+            graph: 包含节点、父子关系和可选几何信息的设备图。
+
+        Returns:
+            本次创建数、复用数及本地节点到云端物料 UUID 的映射。
+
+        Raises:
+            InstanceSyncError: 认证、设备图、模板、父子关系或云端响应
+                不满足实例同步合同时抛出。
+        """
 
         if not self.operator_token:
             raise InstanceSyncError("operator token is required for instance writes")
@@ -123,6 +139,8 @@ class InstanceSynchronizer:
                     }
                     if parent_local_id:
                         request_body["parent_uuid"] = material_uuids[parent_local_id]
+                    if node.get("relative_position") is not None:
+                        request_body["relative_position"] = node["relative_position"]
                     created = self._request(
                         "POST",
                         "/materials",
@@ -316,6 +334,17 @@ def run_instance_sync_command(
 
 
 def _graph_node(raw_node: Any) -> Dict[str, Any]:
+    """把一个原始设备图节点规范化为实例同步内部节点。
+
+    Args:
+        raw_node: 设备图中的单个节点对象。
+
+    Returns:
+        包含稳定本地身份、模板名、物料字段、父级和可选相对位置的内部节点。
+
+    Raises:
+        InstanceSyncError: 节点不是对象、缺少身份或几何字段不是有限数值时抛出。
+    """
     if not isinstance(raw_node, Mapping):
         raise InstanceSyncError("device graph node must be an object")
     local_id = str(raw_node.get("id") or "").strip()
@@ -326,15 +355,21 @@ def _graph_node(raw_node: Any) -> Dict[str, Any]:
     barcode = normalize_resource_instance_barcode(raw_node.get("barcode"), local_id)
     resource_type = "device" if raw_resource_type == "device" else "resource"
     parent = raw_node.get("parent")
+    config = _object(raw_node.get("config"))
+    try:
+        relative_position = relative_position_from_graph_node(raw_node, config)
+    except InstanceGeometryError as exc:
+        raise InstanceSyncError(str(exc)) from exc
     return {
         "id": local_id,
         "name": str(raw_node.get("name") or local_id).strip(),
         "type": resource_type,
         "class": template_name,
         "barcode": barcode,
-        "config": _object(raw_node.get("config")),
+        "config": config,
         "data": _object(raw_node.get("data")),
         "parent": str(parent).strip() if parent else "",
+        "relative_position": relative_position,
     }
 
 
@@ -352,6 +387,12 @@ def _attach_external_roots(
     Backend 的 Material 合同要求非设备实例必须有父实例。设备图通常把
     Deck 表达为无父场景根，因此在跨 Authority 初始化时显式把它挂到
     HostNode；设备根仍保持无父，不虚构物理包含关系。
+
+    Args:
+        nodes: 已规范化且尚未补齐外部根的设备图节点。
+
+    Returns:
+        必要时包含自动 Host Node、并已修正资源父级的独立节点列表。
     """
 
     node_ids = {node["id"] for node in nodes}
@@ -379,6 +420,7 @@ def _attach_external_roots(
                 "config": {},
                 "data": {},
                 "parent": "",
+                "relative_position": default_host_relative_position(),
             },
             *nodes,
         ]
