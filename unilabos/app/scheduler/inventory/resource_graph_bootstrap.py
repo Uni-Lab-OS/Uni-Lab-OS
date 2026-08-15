@@ -465,8 +465,9 @@ def _material_config_with_rendering(
 
     参数：``node`` 是资源树物料节点；``template_name`` 是已解析的资源
     模板（ResourceTemplate）业务身份；``material_rendering_by_template`` 是工作区
-    公开模型快照。返回：无共享引用的物料配置。异常：既有渲染字段非对象、
-    模型快照非对象或资产不指向 OS 公开路由时关闭式失败。
+    公开模型快照。返回：无共享引用的物料配置，并以资源树节点类型发布稳定的
+    ``device`` / ``resource`` 几何身份。异常：既有渲染字段非对象、模型快照
+    非对象或资产不指向 OS 公开路由时关闭式失败。
     """
 
     config = _json_object(node.get("config"), "material.config")
@@ -482,6 +483,11 @@ def _material_config_with_rendering(
         rendering["kind"] = explicit_kind.strip()
     elif isinstance(category, str) and category.strip():
         rendering["kind"] = category.strip()
+
+    node_type = str(node.get("type") or "").strip().casefold()
+    rendering["material_kind"] = (
+        "device" if node_type == "device" else "resource"
+    )
 
     model_snapshot = None
     if material_rendering_by_template is not None:

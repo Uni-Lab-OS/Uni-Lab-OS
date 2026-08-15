@@ -432,8 +432,33 @@ def test_bootstrap_projects_public_shape_kind_and_model_url() -> None:
         store.close()
 
     rendering = graph["nodes"][0]["material"]["config"]["rendering"]
-    assert rendering == {"kind": "stacker", "model": public_model}
+    assert rendering == {
+        "kind": "stacker",
+        "material_kind": "device",
+        "model": public_model,
+    }
     assert "local_bridge" not in rendering["model"]["path"]
+
+
+def test_bootstrap_marks_non_device_materials_as_resources() -> None:
+    """器材类型必须进入渲染合同，且不依赖业务名称猜测。"""
+
+    dumped = _ResourceTree().dump()
+    dumped[0][0]["type"] = "warehouse"
+
+    class _WarehouseTree:
+        def dump(self) -> list[list[dict[str, Any]]]:
+            return dumped
+
+    store = InventoryStore(":memory:")
+    try:
+        _bootstrap(store, _WarehouseTree())
+        graph = BackendResourceService(store).material_graph()
+    finally:
+        store.close()
+
+    rendering = graph["nodes"][0]["material"]["config"]["rendering"]
+    assert rendering["material_kind"] == "resource"
 
 
 def test_config_sites_project_ordered_occupied_inventory_sites() -> None:
