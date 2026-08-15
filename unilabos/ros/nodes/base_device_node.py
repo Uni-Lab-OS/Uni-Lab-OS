@@ -2792,9 +2792,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             # 等待 action 完成
             if future is not None:
                 if isinstance(future, Task):
-                    # rclpy Task：直接 await，完成瞬间唤醒
+                    # rclpy Task 的 done callback 可能由当前 Action 所在的同一
+                    # executor worker 触发。长耗时动作下直接 await 偶尔不会重新
+                    # 调度外层 Action 协程，导致驱动已返回但 ROS result 永不发布。
+                    # 用短时 rclpy timer 主动让出 executor，并在 Task 完成后读取
+                    # 结果，保证 HostNode 一定能收到终态。
+                    while not future.done():
+                        await ROS2DeviceNode.async_wait_for(
+                            self,
+                            0.05,
+                            callback_group=self.callback_group,
+                        )
                     try:
-                        _raw_result = await future
+                        _raw_result = future.result()
                     except Exception as e:
                         _raw_result = e
                 else:
