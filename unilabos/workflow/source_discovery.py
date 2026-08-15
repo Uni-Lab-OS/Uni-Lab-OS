@@ -117,14 +117,16 @@ def discover_editable_sources(
                 )
             registrations.append(
                 EditableSourceRegistration(
-                workflow_uuid=entry.workflow_uuid,
-                package_id=manifest.package_id,
-                package_root=package_root,
-                relative_path=entry.relative_path,
-                source_uri=(f"package://{manifest.package_id}/{entry.relative_path}"),
-                exact_graph_relative_path=entry.exact_graph_relative_path,
-                exact_graph_content_hash=exact_graph_content_hash,
-                package_root_identity=source_snapshot.identity,
+                    workflow_uuid=entry.workflow_uuid,
+                    package_id=manifest.package_id,
+                    package_root=package_root,
+                    relative_path=entry.relative_path,
+                    source_uri=(
+                        f"package://{manifest.package_id}/{entry.relative_path}"
+                    ),
+                    exact_graph_relative_path=entry.exact_graph_relative_path,
+                    exact_graph_content_hash=exact_graph_content_hash,
+                    package_root_identity=source_snapshot.identity,
                 )
             )
     _validate_unique_registrations(registrations)
