@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from unilabos.app.edge_control.addressing import derive_scheduler_address
+
 from .model import WorkspaceHostError, WorkspacePaths
 
 
@@ -246,6 +248,11 @@ def resolve_edge_launch(
         raise WorkspaceHostError(
             "backend_url_missing", "Backend Authority 未配置服务地址"
         )
+    scheduler_address = (
+        derive_scheduler_address(authority_address)
+        if domain_mode == "backend"
+        else authority_address
+    )
     authority_token = (
         os.environ.get("UNILAB_BACKEND_API_KEY") or _workspace_host_token(paths)
         if domain_mode == "backend"
@@ -271,7 +278,7 @@ def resolve_edge_launch(
             "UNILABOS_EDGECONTROLCONFIG_API_KEY": authority_token,
             "UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR": authority_address,
             "UNILABOS_EDGECONTROLCONFIG_EDGE_KEY": _workspace_edge_key(paths),
-            "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": authority_address,
+            "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": scheduler_address,
             "UNILABOS_EDGECONTROLCONFIG_STATE_DB": str(state_db),
             "UNILABOS_WORKBENCH_RUNTIME_MODE": mode,
             "UNILABOS_WORKBENCH_PROCESS_ROLE": "edge_runtime",
@@ -334,6 +341,7 @@ def resolve_edge_launch(
             "externalDevicesOnly": external_devices_only,
             "domainMode": domain_mode,
             "authorityAddress": authority_address,
+            "schedulerAddress": scheduler_address,
             "protocolStatePath": str(state_db),
             "runtimeDirectory": str(runtime_directory),
             "readyFilePath": str(ready_file),

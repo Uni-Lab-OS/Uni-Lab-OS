@@ -23,6 +23,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from unilabos.app.edge_control.addressing import derive_scheduler_address
+
 from .discovery import WorkspaceHostLock, ensure_local_token
 from .launch import (
     LaunchPlan,
@@ -1304,14 +1306,15 @@ class WorkspaceHost:
                     f"Backend Authority 预检失败：{path}：{error}",
                 ) from error
 
-        # Edge Runtime registers itself through this scheduler route.  Probe
-        # route existence before stopping the currently healthy local OS.  A
-        # GET commonly returns 405 for a POST-only route, which still proves
-        # that the Backend exposes the required Edge control contract; 404
-        # means this Backend build cannot be used as an Authority yet.
+        # Edge Runtime registers itself through the Scheduler Authority, not
+        # the Backend API origin. Probe route existence before stopping the
+        # currently healthy local OS. A GET commonly returns 405 for a
+        # POST-only route, which still proves the required contract exists;
+        # 404 means this Scheduler cannot be used as an Authority yet.
         edge_path = "/api/v1/edge/sessions"
+        scheduler_url = derive_scheduler_address(backend_url)
         try:
-            with urlopen(f"{backend_url}{edge_path}", timeout=3.0) as response:
+            with urlopen(f"{scheduler_url}{edge_path}", timeout=3.0) as response:
                 response.read()
             status = response.status
         except HTTPError as error:
@@ -1324,7 +1327,8 @@ class WorkspaceHost:
         if status == HTTPStatus.NOT_FOUND:
             raise WorkspaceHostError(
                 "backend_authority_incompatible",
-                "目标 Backend 暂不支持 Edge 调度连接，请启动包含 Edge 控制接口的 Backend 后重试",
+                "目标 Scheduler 暂不支持 Edge 调度连接，"
+                "请启动包含 Edge 控制接口的 Scheduler 后重试",
             )
         if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
             raise WorkspaceHostError(

@@ -19,6 +19,7 @@ from unilabos.app.edge_control.http import (
     EdgeProtocolHTTPError,
 )
 from unilabos.app.edge_control.store import EdgeControlStore, StoredJob
+from unilabos.config.config import BasicConfig, EdgeControlConfig, HTTPConfig
 
 
 class FakeDataPlane:
@@ -62,6 +63,23 @@ class FakeDataPlane:
             }
         )
         return {"uuid": str(uuid.uuid4())}
+
+
+def test_edge_control_settings_derives_split_scheduler_address(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(EdgeControlConfig, "scheduler_addr", "")
+    monkeypatch.setattr(EdgeControlConfig, "backend_addr", "")
+    monkeypatch.setattr(EdgeControlConfig, "state_db", str(tmp_path / "edge.db"))
+    monkeypatch.setattr(HTTPConfig, "schedule_addr", "")
+    monkeypatch.setattr(HTTPConfig, "remote_addr", "http://[::1]:8080")
+    monkeypatch.setattr(BasicConfig, "machine_name", "edge-fixture")
+
+    settings = EdgeControlSettings.from_config()
+
+    assert settings.backend_address == "http://[::1]:8080"
+    assert settings.scheduler_address == "http://[::1]:8081"
 
 
 class FakeHostNode:

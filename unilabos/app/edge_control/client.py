@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
-from urllib.parse import urlparse, urlunparse
 
 import websockets
 
@@ -22,6 +21,7 @@ from unilabos.app.communication import BaseCommunicationClient
 from unilabos.app.device_action_capabilities import (
     project_device_action_capabilities,
 )
+from unilabos.app.edge_control.addressing import derive_scheduler_address
 from unilabos.app.edge_control.http import (
     BACKEND_UNAUTHORIZED_BUSINESS_CODE,
     EdgeDataPlane,
@@ -132,7 +132,7 @@ class EdgeControlSettings:
         scheduler_address = str(
             EdgeControlConfig.scheduler_addr
             or HTTPConfig.schedule_addr
-            or _derive_scheduler_address(HTTPConfig.remote_addr)
+            or derive_scheduler_address(HTTPConfig.remote_addr)
         ).strip()
         backend_address = str(
             EdgeControlConfig.backend_addr or HTTPConfig.remote_addr
@@ -1028,18 +1028,6 @@ def _host_node() -> Any:
     from unilabos.ros.nodes.presets.host_node import HostNode
 
     return HostNode.get_instance(0)
-
-
-def _derive_scheduler_address(backend_address: str) -> str:
-    parsed = urlparse(str(backend_address or ""))
-    if not parsed.scheme or not parsed.netloc:
-        return str(backend_address or "")
-    hostname = parsed.hostname or ""
-    if parsed.port is not None:
-        netloc = f"{hostname}:{parsed.port + 1}"
-    else:
-        netloc = parsed.netloc
-    return urlunparse((parsed.scheme, netloc, "", "", "", ""))
 
 
 def _envelope(

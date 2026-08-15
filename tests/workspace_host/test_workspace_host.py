@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from unilabos.app.edge_control.addressing import derive_scheduler_address
 from unilabos.app.edge_control.store import EdgeControlStore
 from unilabos.workspace_host.client import WorkspaceHostClient
 from unilabos.workspace_host.discovery import WorkspaceHostLock, ensure_local_token
@@ -255,6 +256,9 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
         backend.address
     )
+    assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR"] == (
+        backend.address
+    )
     stable_state = str(paths.runtime / "edge" / "edge_control.db")
     assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"] == stable_state
     assert second_edge.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"] == stable_state
@@ -378,6 +382,9 @@ def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
     assert edge.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
         "https://backend.example.test"
     )
+    assert edge.environment["UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR"] == (
+        "https://backend.example.test"
+    )
     assert edge.environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"]
     assert 2 <= int(edge.environment["ROS_DOMAIN_ID"]) <= 99
     assert edge.metadata["authorityAddress"] == "https://backend.example.test"
@@ -394,6 +401,61 @@ def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
     )
     assert repeated.environment["UNILABOS_EDGECONTROLCONFIG_STATE_DB"] == backend_state
     assert repeated.environment["ROS_DOMAIN_ID"] == edge.environment["ROS_DOMAIN_ID"]
+
+
+def test_backend_authority_with_explicit_port_routes_edge_to_scheduler(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    ensure_local_token(paths)
+    paths.environment.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "graphPath": "deployment/graphs/graph.json",
+                "runtimeMode": "normal",
+                "domainMode": "backend",
+                "backendUrl": "http://127.0.0.1:8080",
+            }
+        )
+    )
+
+    backend = resolve_backend_launch(
+        paths,
+        backend_port=48_111,
+        hostlink_port=48_112,
+    )
+    edge = resolve_edge_launch(
+        paths,
+        {"address": backend.address, "metadata": backend.metadata},
+    )
+
+    assert edge.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
+        "http://127.0.0.1:8080"
+    )
+    assert edge.environment["UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR"] == (
+        "http://127.0.0.1:8081"
+    )
+    assert edge.metadata["schedulerAddress"] == "http://127.0.0.1:8081"
+
+
+@pytest.mark.parametrize(
+    ("backend_address", "scheduler_address"),
+    [
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8081"),
+        ("http://127.0.0.1:8080/api/v1/", "http://127.0.0.1:8081"),
+        ("https://backend.example.test", "https://backend.example.test"),
+        ("https://backend.example.test/api/v1", "https://backend.example.test"),
+        ("http://[::1]:8080", "http://[::1]:8081"),
+        ("https://[2001:db8::1]", "https://[2001:db8::1]"),
+    ],
+)
+def test_scheduler_address_derivation_preserves_ingress_and_ipv6(
+    backend_address: str,
+    scheduler_address: str,
+) -> None:
+    assert derive_scheduler_address(backend_address) == scheduler_address
 
 
 def test_authority_switch_preflights_before_restart_and_persists_mode(
@@ -434,9 +496,16 @@ def test_authority_switch_preflights_before_restart_and_persists_mode(
 def test_authority_preflight_rejects_backend_without_edge_contract(
     workspace: Path,
 ) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _BackendWithoutEdgeHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    backend, scheduler = _adjacent_http_servers(
+        _ReadyHandler,
+        _BackendWithoutEdgeHandler,
+    )
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (backend, scheduler)
+    ]
+    for thread in threads:
+        thread.start()
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()
     host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
@@ -444,14 +513,41 @@ def test_authority_preflight_rejects_backend_without_edge_contract(
     try:
         with pytest.raises(WorkspaceHostError) as raised:
             host._preflight_backend_authority(
-                f"http://127.0.0.1:{server.server_port}"
+                f"http://127.0.0.1:{backend.server_port}"
             )
         assert raised.value.code == "backend_authority_incompatible"
         assert "Edge 调度连接" in str(raised.value)
     finally:
         host.close()
-        server.shutdown()
-        server.server_close()
+        for server in (backend, scheduler):
+            server.shutdown()
+            server.server_close()
+
+
+def test_authority_preflight_uses_split_scheduler_port(workspace: Path) -> None:
+    backend, scheduler = _adjacent_http_servers(
+        _BackendWithoutEdgeHandler,
+        _SchedulerWithEdgeHandler,
+    )
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (backend, scheduler)
+    ]
+    for thread in threads:
+        thread.start()
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+
+    try:
+        host._preflight_backend_authority(
+            f"http://127.0.0.1:{backend.server_port}"
+        )
+    finally:
+        host.close()
+        for server in (backend, scheduler):
+            server.shutdown()
+            server.server_close()
 
 
 def test_backend_url_normalization_accepts_api_v1_suffix() -> None:
@@ -463,9 +559,16 @@ def test_backend_url_normalization_accepts_api_v1_suffix() -> None:
 def test_authority_preflight_explains_unavailable_scheduler(
     workspace: Path,
 ) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _BackendWithoutSchedulerHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    backend, scheduler = _adjacent_http_servers(
+        _ReadyHandler,
+        _BackendWithoutSchedulerHandler,
+    )
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (backend, scheduler)
+    ]
+    for thread in threads:
+        thread.start()
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()
     host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
@@ -473,7 +576,7 @@ def test_authority_preflight_explains_unavailable_scheduler(
     try:
         with pytest.raises(WorkspaceHostError) as raised:
             host._preflight_backend_authority(
-                f"http://127.0.0.1:{server.server_port}"
+                f"http://127.0.0.1:{backend.server_port}"
             )
         assert raised.value.code == "backend_authority_unavailable"
         assert str(raised.value) == (
@@ -483,8 +586,11 @@ def test_authority_preflight_explains_unavailable_scheduler(
         )
     finally:
         host.close()
-        server.shutdown()
-        server.server_close()
+        for server in (backend, scheduler):
+            server.shutdown()
+            server.server_close()
+
+
 def test_authority_switch_can_reconnect_to_an_existing_release_without_bootstrap(
     workspace: Path,
 ) -> None:
@@ -1013,6 +1119,37 @@ class _BackendWithoutSchedulerHandler(_ReadyHandler):
             self.end_headers()
             return
         super().do_GET()
+
+
+class _SchedulerWithEdgeHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path == "/api/v1/edge/sessions":
+            self.send_response(405)
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+def _adjacent_http_servers(
+    backend_handler: type[BaseHTTPRequestHandler],
+    scheduler_handler: type[BaseHTTPRequestHandler],
+) -> tuple[ThreadingHTTPServer, ThreadingHTTPServer]:
+    for _ in range(100):
+        backend = ThreadingHTTPServer(("127.0.0.1", 0), backend_handler)
+        try:
+            scheduler = ThreadingHTTPServer(
+                ("127.0.0.1", backend.server_port + 1),
+                scheduler_handler,
+            )
+        except OSError:
+            backend.server_close()
+            continue
+        return backend, scheduler
+    raise AssertionError("unable to reserve adjacent Backend and Scheduler ports")
 
 
 class _RendererHandler(BaseHTTPRequestHandler):
