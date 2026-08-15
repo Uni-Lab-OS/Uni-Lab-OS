@@ -144,6 +144,31 @@ def should_bootstrap_local_resource_graph(*, is_host_mode: bool) -> bool:
     return is_host_mode
 
 
+def resolve_resource_graph_source_identity(
+    *,
+    physical_graph_path: object,
+    explicit_source_identity: object = None,
+) -> str:
+    """选择库存稳定 UUID 使用的资源图来源身份。
+
+    参数：``physical_graph_path`` 是本次启动实际读取的图；
+    ``explicit_source_identity`` 是 Workbench 从已校验原图冻结的可选来源身份。
+    返回：显式非空身份优先；省略时严格保持物理路径或远端兜底身份。
+    异常：显式身份不是非空字符串时抛出 ``TypeError`` 或 ``ValueError``。
+
+    Workbench 仍从 ``selected-graph.json`` 读取不可变副本，但库存 UUID 使用原图
+    文件名作为来源身份。普通 CLI、非工作区与远端启动不传该参数，语义不变。
+    """
+
+    if explicit_source_identity is not None:
+        if not isinstance(explicit_source_identity, str):
+            raise TypeError("资源图来源身份必须是字符串")
+        if not explicit_source_identity.strip():
+            raise ValueError("资源图来源身份不能为空")
+        return explicit_source_identity.strip()
+    return str(physical_graph_path or "remote-startup.json")
+
+
 def should_attach_legacy_http_bridge(args_dict: Dict[str, Any]) -> bool:
     """判断是否挂接显式启用的旧云端 HTTP 桥。
 
@@ -226,6 +251,12 @@ def parse_args():
     subparsers = parser.add_subparsers(title="Valid subcommands", dest="command")
 
     parser.add_argument("-g", "--graph", help="Physical setup graph file path.")
+    parser.add_argument(
+        "--resource_graph_source_id",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--workspace",
         type=str,
@@ -1393,7 +1424,12 @@ def main():
                 else None
             ),
             resource_graph_source_id=(
-                str(file_path or "remote-startup.json")
+                resolve_resource_graph_source_identity(
+                    physical_graph_path=file_path,
+                    explicit_source_identity=args_dict.get(
+                        "resource_graph_source_id"
+                    ),
+                )
                 if bootstrap_resource_graph
                 else ""
             ),
