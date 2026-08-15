@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from unilabos.app.edge_control.addressing import derive_scheduler_address
+from unilabos.app.edge_control.addressing import resolve_scheduler_address
 
 from .model import WorkspaceHostError, WorkspacePaths, atomic_write_json
 
@@ -188,6 +188,7 @@ def resolve_backend_launch(
             "externalDevicesOnly": external_devices_only,
             "domainMode": domain_mode,
             "backendUrl": _optional_text(config.get("backendUrl")),
+            "schedulerUrl": _optional_text(config.get("schedulerUrl")),
             "hostLinkPort": hostlink_port,
             "runtimeDirectory": str(runtime_directory),
             "stateDirectory": str(state_directory),
@@ -248,11 +249,17 @@ def resolve_edge_launch(
         raise WorkspaceHostError(
             "backend_url_missing", "Backend Authority 未配置服务地址"
         )
-    scheduler_address = (
-        derive_scheduler_address(authority_address)
-        if domain_mode == "backend"
-        else authority_address
-    )
+    try:
+        scheduler_address = (
+            resolve_scheduler_address(
+                authority_address,
+                _optional_text(metadata.get("schedulerUrl")),
+            )
+            if domain_mode == "backend"
+            else authority_address
+        )
+    except ValueError as error:
+        raise WorkspaceHostError("scheduler_url_invalid", str(error)) from error
     authority_token = (
         os.environ.get("UNILAB_BACKEND_API_KEY") or _workspace_host_token(paths)
         if domain_mode == "backend"
@@ -268,9 +275,13 @@ def resolve_edge_launch(
     # authority by a stable origin digest.
     state_db = edge_state_directory / "edge_control.db"
     if domain_mode == "backend":
-        authority_digest = hashlib.sha256(authority_address.encode("utf-8")).hexdigest()[
-            :16
-        ]
+        scheduler_override = _optional_text(metadata.get("schedulerUrl"))
+        state_scope = (
+            f"{authority_address}\0{scheduler_address}"
+            if scheduler_override
+            else authority_address
+        )
+        authority_digest = hashlib.sha256(state_scope.encode("utf-8")).hexdigest()[:16]
         state_db = edge_state_directory / f"edge_control-backend-{authority_digest}.db"
     environment = _runtime_environment(paths, generation)
     environment.update(

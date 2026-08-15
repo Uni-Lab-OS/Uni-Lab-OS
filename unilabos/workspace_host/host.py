@@ -23,7 +23,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from unilabos.app.edge_control.addressing import derive_scheduler_address
+from unilabos.app.edge_control.addressing import (
+    normalize_scheduler_address,
+    resolve_scheduler_address,
+)
 
 from .discovery import WorkspaceHostLock, ensure_local_token
 from .launch import (
@@ -727,6 +730,12 @@ class WorkspaceHost:
             if self._components["edge"]["phase"] == "ready":
                 return self._snapshot_locked()
             backend = dict(self._components["backend"])
+            backend_metadata = backend.get("metadata")
+            if isinstance(backend_metadata, dict):
+                backend["metadata"] = {
+                    **backend_metadata,
+                    "schedulerUrl": self._configuration.get("schedulerUrl"),
+                }
         if backend.get("phase") != "ready":
             self._start_backend({})
             with self._lock:
@@ -978,6 +987,7 @@ class WorkspaceHost:
             "plcHandshakeWorkflow",
             "domainMode",
             "backendUrl",
+            "schedulerUrl",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
@@ -993,11 +1003,24 @@ class WorkspaceHost:
                 "configuration_invalid",
                 "externalDevicesOnly 必须是布尔值",
             )
+        normalized = dict(parameters)
+        if "schedulerUrl" in normalized:
+            value = normalized["schedulerUrl"]
+            if value is not None and not isinstance(value, str):
+                raise WorkspaceHostError(
+                    "scheduler_url_invalid",
+                    "Scheduler 地址必须是 HTTP(S) 服务地址",
+                )
+            normalized["schedulerUrl"] = self._normalize_scheduler_url(value)
         with self._lock:
-            self._configuration.update(parameters)
+            self._configuration.update(normalized)
+            if "schedulerUrl" in normalized:
+                backend_metadata = self._components["backend"].get("metadata")
+                if isinstance(backend_metadata, dict):
+                    backend_metadata["schedulerUrl"] = normalized["schedulerUrl"]
             payload = {"schemaVersion": 1, **self._configuration}
             atomic_write_json(self.paths.environment, payload)
-            self._publish_locked("configuration.updated", parameters)
+            self._publish_locked("configuration.updated", normalized)
             return self._snapshot_locked()
 
     def _switch_authority(
@@ -1018,18 +1041,33 @@ class WorkspaceHost:
             previous = dict(self._configuration)
             current_mode = str(previous.get("domainMode") or "local")
             current_url = _optional_text(previous.get("backendUrl"))
+            current_scheduler_url = _optional_text(previous.get("schedulerUrl"))
             backend_ready = self._components["backend"]["phase"] == "ready"
             edge_ready = self._components["edge"]["phase"] == "ready"
         if mode == "backend":
             backend_url = self._normalize_backend_url(backend_url)
-            self._preflight_backend_authority(backend_url)
+            scheduler_url = self._normalize_scheduler_url(
+                parameters.get("schedulerUrl", current_scheduler_url)
+            )
+            if scheduler_url:
+                self._preflight_backend_authority(
+                    backend_url,
+                    scheduler_url,
+                )
+            else:
+                self._preflight_backend_authority(backend_url)
         else:
             # Authority mode and publication target are separate concerns.  A
             # user must be able to return to Local, keep authoring against the
             # workspace database, and publish a later release to the same
             # centralized Backend without re-entering its address.
             backend_url = current_url
-        if current_mode == mode and current_url == backend_url:
+            scheduler_url = current_scheduler_url
+        if (
+            current_mode == mode
+            and current_url == backend_url
+            and current_scheduler_url == scheduler_url
+        ):
             return self.snapshot()
         if current_mode == "backend" and mode == "backend":
             raise WorkspaceHostError(
@@ -1053,6 +1091,7 @@ class WorkspaceHost:
         updated = dict(previous)
         updated["domainMode"] = mode
         updated["backendUrl"] = backend_url
+        updated["schedulerUrl"] = scheduler_url
         try:
             if edge_ready:
                 self._stop_component("edge")
@@ -1090,7 +1129,8 @@ class WorkspaceHost:
         """Publish the visible Local generation and optionally activate Backend Authority."""
 
         unknown = sorted(set(parameters) - {
-            "backendUrl", "activate", "verify", "resetTarget", "confirmation"
+            "backendUrl", "schedulerUrl", "activate", "verify", "resetTarget",
+            "confirmation"
         })
         if unknown:
             raise WorkspaceHostError(
@@ -1099,6 +1139,11 @@ class WorkspaceHost:
             )
         backend_url = self._normalize_backend_url(
             _optional_text(parameters.get("backendUrl"))
+        )
+        with self._lock:
+            configured_scheduler_url = self._configuration.get("schedulerUrl")
+        scheduler_url = self._normalize_scheduler_url(
+            parameters.get("schedulerUrl", configured_scheduler_url)
         )
         activate = bool(parameters.get("activate", False))
         reset_target = parameters.get("resetTarget", False) is True
@@ -1119,7 +1164,10 @@ class WorkspaceHost:
             raise WorkspaceHostError(
                 "release_source_not_local", "WorkspaceRelease 只能从 Local Authority 构建"
             )
-        self._preflight_backend_authority(backend_url)
+        if scheduler_url:
+            self._preflight_backend_authority(backend_url, scheduler_url)
+        else:
+            self._preflight_backend_authority(backend_url)
         temporary_backend = not backend_ready
         if temporary_backend:
             self._start_backend({})
@@ -1140,7 +1188,11 @@ class WorkspaceHost:
                 if staged_authority is not None:
                     return
                 staged_authority = self._switch_authority(
-                    {"mode": "backend", "backendUrl": backend_url},
+                    {
+                        "mode": "backend",
+                        "backendUrl": backend_url,
+                        "schedulerUrl": scheduler_url,
+                    },
                     bootstrap=False,
                 )
                 # ``_switch_authority`` already reconnects an Edge that was
@@ -1306,7 +1358,25 @@ class WorkspaceHost:
             )
         return normalized
 
-    def _preflight_backend_authority(self, backend_url: str) -> None:
+    @staticmethod
+    def _normalize_scheduler_url(value: object) -> str | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if not isinstance(value, str):
+            raise WorkspaceHostError(
+                "scheduler_url_invalid",
+                "Scheduler 地址必须是 HTTP(S) 服务地址",
+            )
+        try:
+            return normalize_scheduler_address(value)
+        except ValueError as error:
+            raise WorkspaceHostError("scheduler_url_invalid", str(error)) from error
+
+    def _preflight_backend_authority(
+        self,
+        backend_url: str,
+        scheduler_url: str | None = None,
+    ) -> None:
         for path in ("/api/v1/health", "/api/v1/workflows?page=1&page_size=1"):
             try:
                 with urlopen(f"{backend_url}{path}", timeout=3.0) as response:
@@ -1330,7 +1400,10 @@ class WorkspaceHost:
         # POST-only route, which still proves the required contract exists;
         # 404 means this Scheduler cannot be used as an Authority yet.
         edge_path = "/api/v1/edge/sessions"
-        scheduler_url = derive_scheduler_address(backend_url)
+        try:
+            scheduler_url = resolve_scheduler_address(backend_url, scheduler_url)
+        except ValueError as error:
+            raise WorkspaceHostError("scheduler_url_invalid", str(error)) from error
         try:
             with urlopen(f"{scheduler_url}{edge_path}", timeout=3.0) as response:
                 response.read()
@@ -1755,6 +1828,7 @@ class WorkspaceHost:
                 "runtimeMode": "normal",
                 "domainMode": "local",
                 "backendUrl": None,
+                "schedulerUrl": None,
             }
         if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
             return {
@@ -1763,6 +1837,7 @@ class WorkspaceHost:
                 "runtimeMode": "normal",
                 "domainMode": "local",
                 "backendUrl": None,
+                "schedulerUrl": None,
             }
         configuration = {
             key: value for key, value in payload.items() if key != "schemaVersion"
@@ -1775,6 +1850,9 @@ class WorkspaceHost:
             )
         configuration.setdefault("domainMode", "local")
         configuration.setdefault("backendUrl", None)
+        configuration["schedulerUrl"] = self._normalize_scheduler_url(
+            configuration.get("schedulerUrl")
+        )
         return configuration
 
     def _restore_interrupted_components(self) -> None:

@@ -440,6 +440,100 @@ def test_backend_authority_with_explicit_port_routes_edge_to_scheduler(
     assert edge.metadata["schedulerAddress"] == "http://127.0.0.1:8081"
 
 
+def test_backend_authority_prefers_explicit_scheduler_address(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    ensure_local_token(paths)
+    paths.environment.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "graphPath": "deployment/graphs/graph.json",
+                "runtimeMode": "normal",
+                "domainMode": "backend",
+                "backendUrl": "http://127.0.0.1:8080",
+                "schedulerUrl": "http://scheduler.example.test:9081",
+            }
+        )
+    )
+
+    backend = resolve_backend_launch(
+        paths,
+        backend_port=48_111,
+        hostlink_port=48_112,
+    )
+    edge = resolve_edge_launch(
+        paths,
+        {"address": backend.address, "metadata": backend.metadata},
+    )
+
+    assert backend.metadata["schedulerUrl"] == (
+        "http://scheduler.example.test:9081"
+    )
+    assert edge.environment["UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR"] == (
+        "http://scheduler.example.test:9081"
+    )
+    assert edge.metadata["schedulerAddress"] == (
+        "http://scheduler.example.test:9081"
+    )
+
+
+def test_scheduler_configuration_override_can_return_to_automatic(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+
+    snapshot = host._dispatch(
+        "configuration.update",
+        {"schedulerUrl": "http://127.0.0.1:39081/"},
+    )
+
+    assert snapshot["configuration"]["schedulerUrl"] == "http://127.0.0.1:39081"
+    persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
+    assert persisted["schedulerUrl"] == "http://127.0.0.1:39081"
+
+    automatic = host._dispatch(
+        "configuration.update",
+        {"schedulerUrl": None},
+    )
+
+    assert automatic["configuration"]["schedulerUrl"] is None
+    persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
+    assert persisted["schedulerUrl"] is None
+    host.close()
+
+
+@pytest.mark.parametrize(
+    "scheduler_url",
+    [
+        "scheduler.example.test:8081",
+        "ftp://scheduler.example.test:8081",
+        "http://user:secret@scheduler.example.test:8081",
+        "http://scheduler.example.test:8081/path",
+        "http://scheduler.example.test:8081?debug=1",
+        "http://scheduler.example.test:8081#debug",
+    ],
+)
+def test_scheduler_configuration_rejects_invalid_origins(
+    workspace: Path,
+    scheduler_url: str,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+
+    with pytest.raises(WorkspaceHostError) as raised:
+        host._dispatch("configuration.update", {"schedulerUrl": scheduler_url})
+
+    assert raised.value.code == "scheduler_url_invalid"
+    assert host.snapshot()["configuration"]["schedulerUrl"] is None
+    host.close()
+
+
 @pytest.mark.parametrize(
     ("backend_address", "scheduler_address"),
     [
