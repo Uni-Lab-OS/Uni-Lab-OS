@@ -1966,7 +1966,7 @@ def test_local_action_catalog_is_restored_into_backend_sync_definition() -> None
     ]
 
 
-def test_workspace_host_release_publish_uses_visible_local_backend_and_can_activate(
+def test_workspace_host_release_publish_registers_edge_before_workflow_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -1986,12 +1986,22 @@ def test_workspace_host_release_publish_uses_visible_local_backend_and_can_activ
     captured: dict[str, object] = {}
 
     class Publisher:
+        def __init__(self, before_workflows: object) -> None:
+            self.before_workflows = before_workflows
+
         def publish(self) -> dict[str, object]:
+            assert callable(self.before_workflows)
+            self.before_workflows()
+            # Backend performs this check inside POST /workflows/import.  Keep
+            # the assertion at the same seam so the regression test fails if
+            # publication stages Authority but imports before Edge has
+            # registered the device action catalog.
+            assert started_edges == [True]
             return {"releaseId": "sha256:release-1", "verified": True}
 
     def create_publisher(**kwargs: object) -> Publisher:
         captured.update(kwargs)
-        return Publisher()
+        return Publisher(kwargs.get("before_workflows"))
 
     monkeypatch.setattr(
         "unilabos.workspace_host.release_publish.create_existing_backend_publisher",
@@ -2009,12 +2019,68 @@ def test_workspace_host_release_publish_uses_visible_local_backend_and_can_activ
 
     assert captured["source_address"] == "http://127.0.0.1:18003"
     assert captured["source_workspace"] == workspace
-    before_workflows = captured["before_workflows"]
-    assert callable(before_workflows)
-    before_workflows()
     assert started_edges == [True]
     assert result["activated"] is True
     assert result["authority"] == {"domainMode": "backend"}
+    host.close()
+
+
+def test_workspace_host_release_publish_restores_idle_edge_after_import_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, "host-token", readiness_timeout=1)
+    host._components["backend"].update(  # type: ignore[attr-defined]
+        {"phase": "ready", "address": "http://127.0.0.1:18003"}
+    )
+    host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
+    lifecycle: list[str] = []
+    host._switch_authority = lambda values, **_kwargs: (  # type: ignore[method-assign]
+        lifecycle.append(f"switch:{values['mode']}")
+        or {"domainMode": values["mode"]}
+    )
+    host._start_edge = lambda: lifecycle.append("start:edge") or {}  # type: ignore[method-assign]
+    host._stop_component = lambda name: lifecycle.append(f"stop:{name}") or {}  # type: ignore[method-assign]
+
+    class Publisher:
+        def __init__(self, before_workflows: object) -> None:
+            self.before_workflows = before_workflows
+
+        def publish(self) -> dict[str, object]:
+            assert callable(self.before_workflows)
+            self.before_workflows()
+            lifecycle.append("import:workflow")
+            raise WorkspaceHostError(
+                "release_transport_failed",
+                'device does not declare action "submit_pick_from_s06"',
+            )
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.release_publish.create_existing_backend_publisher",
+        lambda **kwargs: Publisher(kwargs.get("before_workflows")),
+    )
+
+    with pytest.raises(WorkspaceHostError, match="submit_pick_from_s06"):
+        host._dispatch(
+            "release.publish",
+            {
+                "backendUrl": "https://backend.example",
+                "activate": True,
+                "verify": True,
+            },
+        )
+
+    assert lifecycle == [
+        "switch:backend",
+        "start:edge",
+        "import:workflow",
+        "stop:edge",
+        "switch:local",
+    ]
+    host.close()
 
 
 def test_unilab_workspace_publish_dispatches_the_same_host_operation(

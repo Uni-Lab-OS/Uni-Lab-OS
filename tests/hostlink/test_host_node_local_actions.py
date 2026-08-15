@@ -1,6 +1,6 @@
 """HostNode 本地设备动作端点就绪门禁的回归测试。"""
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -287,3 +287,188 @@ def test_local_device_fails_closed_when_a_required_endpoint_is_unavailable(
     assert host._online_devices == set()
     assert reported_locks == []
     assert any("device_action_transport_not_ready" in message for message in logger.messages)
+
+
+def test_managed_dry_run_registers_catalog_device_without_constructing_driver(
+    monkeypatch,
+) -> None:
+    """托管 dry-run Edge 只注册动作目录，不得构造会连接硬件的驱动。
+
+    参数：``monkeypatch`` 隔离进程角色、动作模式和设备 Registry。
+    返回：无；断言设备身份、动作目录和在线事实已建立，而真实初始化入口未调用。
+    异常：dry-run 仍实例化硬件或没有上报动作目录时触发断言失败。
+    """
+
+    # ``device_config`` 模拟物理图中会在真实构造器内主动联网的设备。
+    device_config = SimpleNamespace(
+        res_content=SimpleNamespace(
+            id="plc-a",
+            klass="package.plc",
+            config={"endpoint": "opc.tcp://unresolvable.invalid:4855"},
+        )
+    )
+    # ``catalog_actions`` 是 dry-run 执行与 Edge 注册共同使用的冻结动作合同。
+    catalog_actions = {
+        "submit_pick": {
+            "type": "UniLabJsonCommand",
+            "result": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+        }
+    }
+    monkeypatch.setattr(host_node_module.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(host_node_module.BasicConfig, "action_mode", "simulate")
+    monkeypatch.setattr(
+        host_node_module.lab_registry,
+        "resolve_definition",
+        lambda kind, identity: (
+            {"class": {"action_value_mappings": catalog_actions}}
+            if (kind, identity) == ("device", "package.plc")
+            else None
+        ),
+    )
+
+    initialized: list[str] = []
+    reported_locks: list[list[tuple[str, str]]] = []
+    host = SimpleNamespace(
+        devices_names={},
+        device_machine_names={},
+        devices_instances={},
+        device_status={},
+        device_status_timestamps={},
+        _action_value_mappings={},
+        _online_devices=set(),
+        _simulated_device_keys=set(),
+        initialize_device=lambda device_id, _config: initialized.append(device_id),
+        _report_action_locks_free=lambda pairs: reported_locks.append(pairs),
+        lab_logger=lambda: _Logger(),
+    )
+    host._register_simulated_device = MethodType(  # type: ignore[attr-defined]
+        HostNode._register_simulated_device,
+        host,
+    )
+
+    HostNode._initialize_configured_device(host, "plc-a", device_config)
+
+    assert initialized == []
+    assert host.devices_instances == {}
+    assert host.devices_names == {"plc-a": "/devices/plc-a"}
+    assert host.device_machine_names == {"plc-a": "dry-run"}
+    assert host._action_value_mappings == {"plc-a": catalog_actions}
+    assert host._online_devices == {"/devices/plc-a/plc-a"}
+    assert host._simulated_device_keys == {"/devices/plc-a/plc-a"}
+    assert reported_locks == [[("plc-a", "submit_pick")]]
+
+
+def test_normal_edge_still_constructs_the_selected_device_driver(monkeypatch) -> None:
+    """正常 Edge 保留真实设备初始化，不得被 dry-run 的目录模式降级。
+
+    参数：``monkeypatch`` 把进程设置为正常 Edge。
+    返回：无；断言调用现有真实驱动初始化入口。
+    异常：正常模式误走模拟目录注册时触发断言失败。
+    """
+
+    monkeypatch.setattr(host_node_module.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(host_node_module.BasicConfig, "action_mode", "real")
+    initialized: list[str] = []
+    simulated: list[str] = []
+    host = SimpleNamespace(
+        initialize_device=lambda device_id, _config: initialized.append(device_id),
+        _register_simulated_device=lambda device_id, _config: simulated.append(
+            device_id
+        ),
+    )
+
+    HostNode._initialize_configured_device(
+        host,
+        "plc-a",
+        SimpleNamespace(),
+    )
+
+    assert initialized == ["plc-a"]
+    assert simulated == []
+
+
+def test_managed_dry_run_dynamic_device_uses_the_same_catalog_only_path(
+    monkeypatch,
+) -> None:
+    """托管 dry-run 动态创建设备也不得绕回真实驱动构造。
+
+    参数：``monkeypatch`` 隔离资源树适配器。
+    返回：无；断言动态入口委派统一初始化选择器并保存配置树。
+    异常：入口直接调用真实初始化或未保存设备时触发断言失败。
+    """
+
+    resource = SimpleNamespace()
+    tree = SimpleNamespace()
+    monkeypatch.setattr(
+        host_node_module.ResourceDictInstance,
+        "get_resource_instance_from_dict",
+        lambda _config: resource,
+    )
+    monkeypatch.setattr(
+        host_node_module, "ResourceTreeInstance", lambda _resource: tree
+    )
+    monkeypatch.setattr(
+        host_node_module,
+        "ResourceTreeSet",
+        lambda _trees: SimpleNamespace(to_plr_resources=lambda: []),
+    )
+    selected: list[str] = []
+    real_initialization: list[str] = []
+    host = SimpleNamespace(
+        devices_names={},
+        devices_config=SimpleNamespace(trees=[]),
+        _resource_tracker=SimpleNamespace(add_resource=lambda _resource: None),
+        _initialize_configured_device=lambda device_id, _config: (
+            selected.append(device_id),
+            host.devices_names.__setitem__(device_id, f"/devices/{device_id}"),
+        ),
+        initialize_device=lambda device_id, _config: real_initialization.append(
+            device_id
+        ),
+        lab_logger=lambda: _Logger(),
+    )
+
+    result = HostNode.create_device(
+        host,
+        "plc-a",
+        {"class": "package.plc", "config": {}},
+    )
+
+    assert result == {"success": True, "device_id": "plc-a"}
+    assert selected == ["plc-a"]
+    assert real_initialization == []
+    assert host.devices_config.trees == [tree]
+
+
+def test_destroy_simulated_device_removes_its_persistent_online_fact() -> None:
+    """删除模拟设备必须同步清理 discovery 保留集合和状态投影。
+
+    参数：无。
+    返回：无；断言设备不会在下一轮发现中以幽灵在线事实复活。
+    异常：任一模拟身份或状态残留时触发断言失败。
+    """
+
+    device_key = "/devices/plc-a/plc-a"
+    host = SimpleNamespace(
+        device_id="host_node",
+        devices_names={"plc-a": "/devices/plc-a"},
+        device_machine_names={"plc-a": "dry-run"},
+        devices_instances={},
+        devices_config=SimpleNamespace(trees=[]),
+        device_status={"plc-a": {}},
+        device_status_timestamps={"plc-a": {}},
+        _action_clients={},
+        _action_value_mappings={"plc-a": {"submit_pick": {}}},
+        _online_devices={device_key},
+        _simulated_device_keys={device_key},
+        _resource_tracker=SimpleNamespace(uuid_to_resources={}),
+        lab_logger=lambda: _Logger(),
+    )
+
+    result = HostNode.destroy_device(host, "plc-a")
+
+    assert result == {"success": True, "device_id": "plc-a"}
+    assert host._simulated_device_keys == set()
+    assert host._online_devices == set()
+    assert host.device_status == {}
+    assert host.device_status_timestamps == {}

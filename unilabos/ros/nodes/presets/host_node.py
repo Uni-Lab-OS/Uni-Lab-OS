@@ -402,6 +402,9 @@ class HostNode(BaseROS2DeviceNode):
         self._slave_registry_configs: Dict[str, Dict] = {}  # registry_name -> registry_config(含action_value_mappings)
         self._goals: Dict[str, Any] = {}  # 用来存储多个目标的状态
         self._online_devices: Set[str] = {f"{self.namespace}/{device_id}"}  # 用于跟踪在线设备
+        # 托管 dry-run Edge 只投影设备目录，不创建 ROS/硬件端点；这些设备的
+        # 在线事实不能被周期 ROS 图发现误判为离线。
+        self._simulated_device_keys: Set[str] = set()
         self._last_discovery_time = 0.0  # 上次设备发现的时间
         self._discovery_lock = threading.Lock()  # 设备发现的互斥锁
         self._subscribed_topics = set()  # 用于跟踪已订阅的话题
@@ -431,7 +434,7 @@ class HostNode(BaseROS2DeviceNode):
                     )
                     continue
                 if device_id not in self.devices_names:
-                    self.initialize_device(device_id, device_config)
+                    self._initialize_configured_device(device_id, device_config)
                 else:
                     self.lab_logger().warning(f"[Host Node] Device {device_id} already existed, skipping.")
             self.update_device_status_subscriptions()
@@ -440,7 +443,14 @@ class HostNode(BaseROS2DeviceNode):
                 "[Host Node] Workspace Backend 已就绪，等待独立 Edge Runtime 注册设备"
             )
         # 控制器同样属于设备运行时；Workspace Backend 不实例化硬件控制器。
-        if controllers_config and BasicConfig.process_role != "workspace_backend":
+        if (
+            controllers_config
+            and BasicConfig.process_role != "workspace_backend"
+            and not (
+                BasicConfig.process_role == "edge_runtime"
+                and BasicConfig.action_mode == "simulate"
+            )
+        ):
             update_rate = controllers_config["controller_manager"]["ros__parameters"]["update_rate"]
             for controller_id, controller_config in controllers_config["controller_manager"]["ros__parameters"][
                 "controllers"
@@ -510,7 +520,7 @@ class HostNode(BaseROS2DeviceNode):
         nodes_and_names = self.get_node_names_and_namespaces()
 
         # 跟踪本次发现的设备，用于检测离线设备
-        current_devices = set()
+        current_devices = set(self._simulated_device_keys)
 
         for device_id, namespace in nodes_and_names:
             if not namespace.startswith("/devices/"):
@@ -1070,6 +1080,85 @@ class HostNode(BaseROS2DeviceNode):
                         self.lab_logger().error(f"[Host Node] Failed to create subscription for topic {topic}: {e}")
 
     """设备相关"""
+
+    def _initialize_configured_device(
+        self,
+        device_id: str,
+        device_config: ResourceDictInstance,
+    ) -> None:
+        """按当前进程语义初始化真实驱动或注册无 I/O 的模拟设备。
+
+        参数：``device_id`` 是物理图设备身份；``device_config`` 是冻结的设备实例。
+        返回：无；托管 dry-run Edge 只安装动作目录，其他进程继续调用真实初始化。
+        异常：设备定义无法唯一解析或动作目录结构非法时关闭式失败。
+        """
+
+        if (
+            BasicConfig.process_role == "edge_runtime"
+            and BasicConfig.action_mode == "simulate"
+        ):
+            self._register_simulated_device(device_id, device_config)
+            return
+        self.initialize_device(device_id, device_config)
+
+    def _register_simulated_device(
+        self,
+        device_id: str,
+        device_config: ResourceDictInstance,
+    ) -> None:
+        """从 Registry 投影可调度能力，绝不加载或构造设备驱动。
+
+        参数：``device_id`` 是物理图设备身份；``device_config`` 提供唯一设备定义。
+        返回：无；建立 Edge 注册和模拟动作回执所需的目录与在线事实。
+        异常：定义缺失、歧义或动作目录不是对象时抛出 ``DeviceClassInvalid``。
+        """
+
+        definition_identity = device_config.res_content.klass
+        if not isinstance(definition_identity, str) or not definition_identity.strip():
+            raise DeviceClassInvalid(
+                f"Device [{device_id}] class must be a non-empty string"
+            )
+        try:
+            registry_entry = lab_registry.resolve_definition(
+                "device",
+                definition_identity,
+            )
+        except Exception as error:
+            raise DeviceClassInvalid(
+                f"Device [{device_id}] class {definition_identity} cannot be uniquely resolved"
+            ) from error
+        class_entry = (
+            registry_entry.get("class")
+            if isinstance(registry_entry, dict)
+            else None
+        )
+        action_mappings = (
+            class_entry.get("action_value_mappings")
+            if isinstance(class_entry, dict)
+            else None
+        )
+        if not isinstance(action_mappings, dict):
+            raise DeviceClassInvalid(
+                f"Device [{device_id}] class {definition_identity} has no valid action catalog"
+            )
+
+        namespace = f"/devices/{device_id}"
+        device_key = f"{namespace}/{device_id}"
+        frozen_mappings = deepcopy(action_mappings)
+        self.devices_names[device_id] = namespace
+        self.device_machine_names[device_id] = "dry-run"
+        self._action_value_mappings[device_id] = frozen_mappings
+        self.device_status.setdefault(device_id, {})
+        self.device_status_timestamps.setdefault(device_id, {})
+        self._online_devices.add(device_key)
+        self._simulated_device_keys.add(device_key)
+        self._report_action_locks_free(
+            [(device_id, action_name) for action_name in frozen_mappings]
+        )
+        self.lab_logger().info(
+            f"[Host Node] Dry-run device catalog registered: {device_id} "
+            f"({len(frozen_mappings)} actions); hardware initialization skipped"
+        )
 
     def property_callback(self, msg, device_id: str, property_name: str) -> None:
         """
@@ -2972,7 +3061,7 @@ class HostNode(BaseROS2DeviceNode):
             config.setdefault("machine_name", BasicConfig.machine_name or "本地")
             res_dict = ResourceDictInstance.get_resource_instance_from_dict(config)
 
-            self.initialize_device(device_id, res_dict)
+            self._initialize_configured_device(device_id, res_dict)
 
             if device_id not in self.devices_names:
                 return {"success": False, "error": f"initialize_device failed for {device_id}"}
@@ -3039,9 +3128,12 @@ class HostNode(BaseROS2DeviceNode):
 
             # Clean internal state
             self._online_devices.discard(device_key)
+            self._simulated_device_keys.discard(device_key)
             self.devices_names.pop(device_id, None)
             self.device_machine_names.pop(device_id, None)
             self._action_value_mappings.pop(device_id, None)
+            self.device_status.pop(device_id, None)
+            self.device_status_timestamps.pop(device_id, None)
 
             # Destroy the ROS2 node of the device
             instance = self.devices_instances.pop(device_id, None)
