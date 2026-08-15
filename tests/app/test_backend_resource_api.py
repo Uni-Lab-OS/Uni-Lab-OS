@@ -222,16 +222,39 @@ def test_material_routes_use_backend_envelope_and_soft_delete(tmp_path):
 
 
 def test_material_graph_matches_backend_type_revision_and_template_summary(tmp_path):
-    """Local 物料图必须与 Go Backend 使用同一权威节点读模型。"""
+    """验证直连 OS 的物料图与 Go Backend 使用同一位置和身份读模型。
+
+    Args:
+        tmp_path: pytest 提供的隔离 SQLite 目录。
+
+    Returns:
+        无返回值；物料（Material）身份、修订版本、资源模板或相对位置漂移时失败。
+    """
 
     client, store = _client(tmp_path)
     template_uuid = _sync_template(client)
+    # local_position 是前端直连 OS 时应从公共物料图原样读取的设备包位置。
+    local_position = {
+        "position_x": 10,
+        "position_y": 20,
+        "position_z": 30,
+        "depth": 60,
+        "length": 80,
+        "width": 100,
+        "scale_x": 1,
+        "scale_y": 1,
+        "scale_z": 1,
+        "rotation_x": 0,
+        "rotation_y": 0,
+        "rotation_z": 90,
+    }
     created = client.post(
         "/api/v1/materials",
         json={
             "resource_template_uuid": template_uuid,
             "barcode": "GRAPH-CONTRACT-001",
             "name": "Graph contract material",
+            "relative_position": local_position,
         },
     ).json()["data"]
     with store.transaction() as connection:
@@ -248,6 +271,10 @@ def test_material_graph_matches_backend_type_revision_and_template_summary(tmp_p
 
     assert node["material"]["type"] == "device"
     assert node["material"]["revision"] == 7
+    assert {
+        field: node["relative_position"][field]
+        for field in local_position
+    } == local_position
     assert node["resource_template"] == {
         "uuid": template_uuid,
         "name": "device.pump",

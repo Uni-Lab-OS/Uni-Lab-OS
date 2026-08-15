@@ -503,7 +503,18 @@ def _resolve_available_site_template_identities(
     definitions: list[dict[str, Any]],
     template_uuids: Mapping[str, str],
 ) -> None:
-    """把部署图 Site 的资源类白名单解析为 Backend 稳定模板 UUID。"""
+    """把部署图库位（Site）资源类白名单解析为 Backend 稳定 UUID。
+
+    参数说明：``definitions`` 是待二次原子上传的完整模板定义；
+    ``template_uuids`` 是 Backend 首次上传返回的完整模板名到 UUID 映射。
+    返回：无；成功时就地把库位允许的资源模板（ResourceTemplate）
+    短名替换为 UUID。异常：库位结构、白名单结构或模板身份无法
+    唯一解析时抛出 ``TemplateSyncError``，禁止错误绑定。
+    """
+
+    # ``template_identity_aliases`` 只为全局唯一短名建立别名；
+    # 完整名和 Backend 返回的 UUID 仍是资源模板身份权威。
+    template_identity_aliases = _unique_template_identity_aliases(template_uuids)
 
     for definition in definitions:
         raw_sites = definition.get("available_sites")
@@ -520,9 +531,7 @@ def _resolve_available_site_template_identities(
             allowed_uuids: list[str] = []
             for raw_name in raw_names:
                 template_name = str(raw_name).strip()
-                template_uuid = template_uuids.get(template_name) or template_uuids.get(
-                    template_name.rsplit(".", 1)[-1]
-                )
+                template_uuid = template_identity_aliases.get(template_name)
                 if not template_uuid:
                     raise TemplateSyncError(
                         f"available site references unknown resource template {template_name}"
@@ -530,6 +539,32 @@ def _resolve_available_site_template_identities(
                 if template_uuid not in allowed_uuids:
                     allowed_uuids.append(template_uuid)
             site["allowed_resource_template_uuids"] = allowed_uuids
+
+
+def _unique_template_identity_aliases(
+    template_uuids: Mapping[str, str],
+) -> dict[str, str]:
+    """为 Backend 完整模板名构建精确且无歧义的短名别名。
+
+    参数说明：``template_uuids`` 是完整资源模板（ResourceTemplate）
+    业务名到 Backend UUID 的映射。返回：包含所有精确名、以及仅当
+    名字末段全局唯一时才增加的短名别名；歧义短名不进入结果。
+    """
+
+    aliases = {
+        str(template_name): str(template_uuid)
+        for template_name, template_uuid in template_uuids.items()
+    }
+    # ``short_name_candidates`` 保留同名资源模板的全部 UUID，
+    # 使跨包同名时失败关闭，而不是按遍历顺序偶然选中一个。
+    short_name_candidates: dict[str, set[str]] = {}
+    for template_name, template_uuid in aliases.items():
+        short_name = template_name.rsplit(".", 1)[-1]
+        short_name_candidates.setdefault(short_name, set()).add(template_uuid)
+    for short_name, candidate_uuids in short_name_candidates.items():
+        if short_name not in aliases and len(candidate_uuids) == 1:
+            aliases[short_name] = next(iter(candidate_uuids))
+    return aliases
 
 
 def _site_number(value: Any, label: str, field: str) -> float:

@@ -159,6 +159,36 @@ class FakeRegistry:
         ]
 
 
+class QualifiedIdentityRegistry(FakeRegistry):
+    """模拟工作区发布后模板业务名升级为完整限定名。"""
+
+    def obtain_registry_device_info(self) -> list[dict[str, Any]]:
+        """返回使用完整限定名的设备资源模板（ResourceTemplate）。
+
+        参数：无。返回：从基础测试定义分离后更换为工作区完整名的列表。
+        """
+
+        definitions = super().obtain_registry_device_info()
+        definitions[0] = {
+            **definitions[0],
+            "id": "community.example.pump",
+        }
+        return definitions
+
+    def obtain_registry_resource_info(self) -> list[dict[str, Any]]:
+        """返回使用完整限定名的器材资源模板（ResourceTemplate）。
+
+        参数：无。返回：从基础测试定义分离后更换为工作区完整名的列表。
+        """
+
+        definitions = super().obtain_registry_resource_info()
+        definitions[0] = {
+            **definitions[0],
+            "id": "community.example.tube_15ml",
+        }
+        return definitions
+
+
 class DuplicateDeviceRegistry(FakeRegistry):
     """返回两个相同设备业务名，用于验证完整快照唯一性错误。"""
 
@@ -486,6 +516,68 @@ def test_template_sync_command_projects_graph_sites_as_template_definitions(
             "meta_data": {"geometry_confidence": "surveyed"},
         }
     ]
+
+
+def test_graph_site_short_template_name_resolves_qualified_backend_identity() -> None:
+    """库位（Site）短资源类名必须解析为 Backend 返回的完整模板身份。
+
+    参数：无。返回：无；当完整限定名没有建立短名别名时准确失败。
+    """
+
+    # ``backend_identities`` 是 Backend 首次原子上传返回的稳定模板 UUID。
+    backend_identities = {
+        "code": 0,
+        "data": {
+            "templates": [
+                {
+                    "uuid": "device-template-uuid",
+                    "name": "community.example.pump",
+                },
+                {
+                    "uuid": "resource-template-uuid",
+                    "name": "community.example.tube_15ml",
+                },
+            ]
+        },
+    }
+    # ``deployment_graph`` 复现 SZ 设备图：节点类使用完整名，库位白名单使用短名。
+    deployment_graph = {
+        "nodes": [
+            {
+                "id": "tube_mount",
+                "class": "community.example.tube_15ml",
+                "config": {
+                    "sites": [
+                        {
+                            "label": "S01",
+                            "content_type": ["tube_15ml"],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    session = FakeSession(FakeResponse(payload=backend_identities))
+    synchronizer = TemplateSynchronizer(
+        "http://backend:8080",
+        "developer-secret",
+        session=session,
+    )
+
+    synchronizer.sync(
+        QualifiedIdentityRegistry(),
+        deployment_graph=deployment_graph,
+    )
+
+    final_payload = json.loads(gzip.decompress(session.calls[-1][1]["data"]))
+    tube_template = next(
+        resource
+        for resource in final_payload["resources"]
+        if resource["id"] == "community.example.tube_15ml"
+    )
+    assert tube_template["available_sites"][0][
+        "allowed_resource_template_uuids"
+    ] == ["resource-template-uuid"]
 
 
 def test_legacy_startup_registration_is_read_only() -> None:
