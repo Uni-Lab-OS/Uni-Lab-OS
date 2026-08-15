@@ -289,7 +289,13 @@ class WorkspaceHost:
         if command == "configuration.update":
             return self._update_configuration(parameters)
         if command == "authority.switch":
-            return self._switch_authority(parameters)
+            bootstrap = parameters.pop("bootstrap", True)
+            if not isinstance(bootstrap, bool):
+                raise WorkspaceHostError(
+                    "authority_parameters_invalid",
+                    "Authority bootstrap 必须是 boolean",
+                )
+            return self._switch_authority(parameters, bootstrap=bootstrap)
         if command == "release.publish":
             return self._publish_release(parameters)
         if command == "release.inspect":
@@ -599,12 +605,17 @@ class WorkspaceHost:
 
         from unilabos.app.edge_control.store import EdgeControlStore
 
-        state_path = self.paths.runtime / "edge" / "edge_control.db"
-        store = EdgeControlStore(str(state_path))
-        try:
-            store.reset_transient_state()
-        finally:
-            store.close()
+        edge_state_directory = self.paths.runtime / "edge"
+        state_paths = sorted(edge_state_directory.glob("edge_control*.db"))
+        local_state_path = edge_state_directory / "edge_control.db"
+        if local_state_path not in state_paths:
+            state_paths.insert(0, local_state_path)
+        for state_path in state_paths:
+            store = EdgeControlStore(str(state_path))
+            try:
+                store.reset_transient_state()
+            finally:
+                store.close()
 
     def _reset_local_state(self, parameters: dict[str, object]) -> object:
         """Rebuild Local Domain state only after durable facts are quiescent."""
@@ -990,7 +1001,11 @@ class WorkspaceHost:
             backend_url = self._normalize_backend_url(backend_url)
             self._preflight_backend_authority(backend_url)
         else:
-            backend_url = None
+            # Authority mode and publication target are separate concerns.  A
+            # user must be able to return to Local, keep authoring against the
+            # workspace database, and publish a later release to the same
+            # centralized Backend without re-entering its address.
+            backend_url = current_url
         if current_mode == mode and current_url == backend_url:
             return self.snapshot()
         if current_mode == "backend" and mode == "backend":
@@ -1076,6 +1091,7 @@ class WorkspaceHost:
         with self._lock:
             domain_mode = str(self._configuration.get("domainMode") or "local")
             backend_ready = self._components["backend"]["phase"] == "ready"
+            edge_ready = self._components["edge"]["phase"] == "ready"
         if domain_mode != "local":
             raise WorkspaceHostError(
                 "release_source_not_local", "WorkspaceRelease 只能从 Local Authority 构建"
@@ -1111,6 +1127,13 @@ class WorkspaceHost:
                     {"mode": "backend", "backendUrl": backend_url},
                     bootstrap=False,
                 )
+                # Backend validates imported device-action nodes against the
+                # instance capabilities currently registered by Edge.  A
+                # release must therefore bring up the managed Edge even when
+                # it was stopped in Local mode; waiting for ``_start_edge``
+                # also guarantees registration completed before workflow
+                # import begins.
+                self._start_edge()
 
             with self._lock:
                 self._publish_locked(
@@ -1128,6 +1151,8 @@ class WorkspaceHost:
                 ).publish()
             except BaseException:
                 if staged_authority is not None:
+                    if not edge_ready:
+                        self._stop_component("edge")
                     self._switch_authority({"mode": "local"})
                 raise
             with self._lock:

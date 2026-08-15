@@ -88,6 +88,16 @@ def validate_material_graph(
             "material_flow_fan_out",
             "同一个物料占位符（ResourceSlot）输出不能连接多个物理消费者",
         )
+    incoming_by_target = {
+        (
+            str(_field(edge, "target_node_uuid")),
+            str(_field(edge, "target_handle_uuid")),
+        ): edge
+        for edge in edges
+    }
+    producer_schema_cache: dict[
+        tuple[str, str], WorkflowValueSchema | Mapping[str, Any]
+    ] = {}
     for edge in edges:
         source_node_uuid = _field(edge, "source_node_uuid")
         source_handle_uuid = _field(edge, "source_handle_uuid")
@@ -101,12 +111,16 @@ def validate_material_graph(
             or not _is_resource_slot_handle(target_handle)
         ):
             continue
-        producer_schema = _producer_schema(
-            node=node_by_uuid[source_node_uuid],
-            source_handle=source_handle,
+        producer_schema = _resolved_producer_schema(
+            node_uuid=source_node_uuid,
+            source_handle_uuid=source_handle_uuid,
+            nodes=node_by_uuid,
             templates=templates,
             handles=handles,
-            effective_param=effective_params[source_node_uuid],
+            effective_params=effective_params,
+            incoming_by_target=incoming_by_target,
+            cache=producer_schema_cache,
+            resolving=set(),
         )
         consumer_schema = handle_value_schema(target_handle)
         if not schema_is_assignable(producer_schema, consumer_schema):
@@ -261,6 +275,60 @@ def _producer_schema(
         )
         return handle_value_schema(passthrough_input)
     return handle_value_schema(source_handle)
+
+
+def _resolved_producer_schema(
+    *,
+    node_uuid: str,
+    source_handle_uuid: str,
+    nodes: Mapping[str, Any],
+    templates: Mapping[str, Mapping[str, Any]],
+    handles: Mapping[str, Mapping[str, Any]],
+    effective_params: Mapping[str, Mapping[str, Any]],
+    incoming_by_target: Mapping[tuple[str, str], Any],
+    cache: dict[tuple[str, str], WorkflowValueSchema | Mapping[str, Any]],
+    resolving: set[tuple[str, str]],
+) -> WorkflowValueSchema | Mapping[str, Any]:
+    """解析组合调用显式同名输出沿父图输入继承的精确物料保证。"""
+
+    key = (node_uuid, source_handle_uuid)
+    if key in cache:
+        return cache[key]
+    if key in resolving:
+        raise TypeError("组合工作流物料透传形成循环")
+    node = nodes[node_uuid]
+    source_handle = handles[source_handle_uuid]
+    resolving.add(key)
+    try:
+        if _field(node, "type") == "workflow":
+            target_handle = _same_name_input(source_handle, handles=handles)
+            target_handle_uuid = str(_field(target_handle, "uuid"))
+            incoming = incoming_by_target.get((node_uuid, target_handle_uuid))
+            if incoming is not None:
+                schema = _resolved_producer_schema(
+                    node_uuid=str(_field(incoming, "source_node_uuid")),
+                    source_handle_uuid=str(_field(incoming, "source_handle_uuid")),
+                    nodes=nodes,
+                    templates=templates,
+                    handles=handles,
+                    effective_params=effective_params,
+                    incoming_by_target=incoming_by_target,
+                    cache=cache,
+                    resolving=resolving,
+                )
+                cache[key] = schema
+                return schema
+        schema = _producer_schema(
+            node=node,
+            source_handle=source_handle,
+            templates=templates,
+            handles=handles,
+            effective_param=effective_params[node_uuid],
+        )
+        cache[key] = schema
+        return schema
+    finally:
+        resolving.remove(key)
 
 
 def _validate_workflow_input_linearity(
