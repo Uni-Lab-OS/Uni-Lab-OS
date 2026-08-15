@@ -196,6 +196,7 @@ class _ConfigSiteResourceTree:
                             {
                                 "label": "Slot 1",
                                 "position": {"x": 10, "y": 20, "z": 30},
+                                "rotation": {"x": 0, "y": 0, "z": 72},
                                 "size": {"width": 100, "height": 90, "depth": 80},
                                 "content_type": ["m2b_child"],
                                 "occupied_by": "m2b_child",
@@ -456,6 +457,7 @@ def test_config_sites_project_ordered_occupied_inventory_sites() -> None:
     )
     assert receipt["site_count"] == 1
     assert owner["sites"][0]["name"] == "Slot 1"
+    assert owner["sites"][0]["meta_data"]["rotation_deg_xyz"] == [0, 0, 72]
     assert owner["sites"][0]["occupied_material_uuid"] == child["material"]["uuid"]
     assert child["current_site_uuid"] == owner["sites"][0]["uuid"]
 

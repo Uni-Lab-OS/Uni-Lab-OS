@@ -375,6 +375,7 @@ def _compile_projection(
                     "source": "resource-tree-set",
                     "source_node_id": node_id,
                     "source_runtime_uuid": runtime_uuid,
+                    "rotation_deg_xyz": _site_rotation_deg_xyz(node),
                 },
                 "allowed_template_names": _site_content_types(node, aliases),
                 "allowed_template_uuids": [],
@@ -424,6 +425,7 @@ def _compile_projection(
             site_pose = {
                 "pose": {
                     "position": site.get("position"),
+                    "rotation": site.get("rotation"),
                     "size": site.get("size"),
                 }
             }
@@ -440,6 +442,7 @@ def _compile_projection(
                     "meta_data": {
                         "source": "resource-tree-set-config",
                         "source_node_id": owner_node_id,
+                        "rotation_deg_xyz": _site_rotation_deg_xyz(site_pose),
                     },
                     "allowed_template_names": _site_content_types(
                         {"config": {"content_type": site.get("content_type", [])}},
@@ -973,6 +976,17 @@ def _site_pose(node: Mapping[str, Any]) -> dict[str, float]:
             "width",
         )
     }
+
+
+def _site_rotation_deg_xyz(node: Mapping[str, Any]) -> list[float]:
+    """返回校验后的 Site 局部 XYZ 旋转，同时保持现有 Site 表字段不变。"""
+
+    pose = _json_object(node.get("pose"), "site.pose")
+    rotation = _json_object(pose.get("rotation"), "site.pose.rotation")
+    return [
+        _number(rotation.get(axis), f"site.pose.rotation.{axis}")
+        for axis in ("x", "y", "z")
+    ]
 
 
 def _fingerprint(
