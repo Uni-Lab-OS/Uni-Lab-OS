@@ -297,6 +297,68 @@ def read_registered_source(
     return _source_document(raw_source, metadata.st_mtime)
 
 
+def read_declared_exact_graph(
+    *,
+    package_root: str | Path,
+    package_root_identity: tuple[int, int],
+    relative_path: str,
+) -> bytes:
+    """安全读取 manifest 声明的 ``workflows/*.json`` 精确图 sidecar。
+
+    参数：包目录、发现时固定的目录身份和包内 JSON 相对路径。
+    返回：受 8 MiB 预算约束的稳定文件字节。
+    异常：路径、根身份、普通文件或读取稳定性不符合合同时抛
+    ``SourceWorkspaceError``。
+    """
+
+    relative = PurePosixPath(relative_path)
+    if (
+        relative.is_absolute()
+        or len(relative.parts) != 2
+        or relative.parts[0] != "workflows"
+        or relative.suffix != ".json"
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or "\\" in relative_path
+        or "\x00" in relative_path
+    ):
+        raise SourceWorkspaceError("invalid_input")
+    root = Path(os.path.abspath(package_root))
+    if not _DIRECTORY_FD_PATHS_SUPPORTED:
+        try:
+            snapshot = read_registered_source_by_path(
+                root,
+                relative,
+                expected_root_identity=package_root_identity,
+                byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+            )
+        except StableFileAccessError:
+            raise SourceWorkspaceError("invalid_input") from None
+        if snapshot is None:
+            raise SourceWorkspaceError("invalid_input")
+        return snapshot.content
+    with _source_parent_descriptor(
+        root,
+        relative,
+        expected_root_identity=package_root_identity,
+        create=False,
+    ) as source_parent:
+        if source_parent is None:
+            raise SourceWorkspaceError("invalid_input")
+        parent_descriptor, filename = source_parent
+        descriptor = -1
+        try:
+            descriptor = os.open(filename, _file_flags(), dir_fd=parent_descriptor)
+            return read_stable_descriptor(
+                descriptor,
+                byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+            ).content
+        except (OSError, StableFileAccessError):
+            raise SourceWorkspaceError("invalid_input") from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
 def registered_source_signature(
     registration: Mapping[str, Any],
 ) -> tuple[Any, ...]:
@@ -695,6 +757,7 @@ __all__ = [
     "SourceWorkspaceConflict",
     "SourceWorkspaceError",
     "pin_package_roots",
+    "read_declared_exact_graph",
     "read_package_root",
     "read_registered_source",
     "registered_source_signature",

@@ -41,6 +41,12 @@ from unilabos.workflow.debug_launch import (
     scope_debug_task_input,
 )
 from unilabos.workflow.event_reader import DurableEventReader
+from unilabos.workflow.exact_graph_sidecar import (
+    ExactGraphSidecarError,
+    apply_declared_exact_graph,
+    build_exact_graph_from_live,
+    load_declared_exact_graph,
+)
 from unilabos.workflow.execution_plan import ExecutionPlanBuilder
 from unilabos.workflow.graph_validation import GraphValidationError
 from unilabos.workflow.models import (
@@ -369,6 +375,9 @@ class WorkflowService:
         # 源码（Workflow Source）；SQLite 注册行仅保留跨启动历史身份。
         self._active_sources_lock = threading.RLock()
         self._active_source_workflow_uuids: frozenset[str] = frozenset()
+        self._active_source_registrations: Dict[
+            str, EditableSourceRegistration
+        ] = {}
         # ``_catalog_generation_tracker`` 隐藏本进程目录编译基线、变化判定和源码
         # 观测签名组合；工作流服务只在编译事务接缝提交已验证指纹。
         self._catalog_generation_tracker = CatalogAuthoringGenerationTracker()
@@ -1161,6 +1170,7 @@ class WorkflowService:
         registered_roots = {
             registration.package_root for registration in plan.registrations
         }
+        root_identity_by_path = dict(plan.root_identities)
         if (
             len(root_paths) != len(set(root_paths))
             or any(not package_root.is_absolute() for package_root in root_paths)
@@ -1168,6 +1178,16 @@ class WorkflowService:
             or any(
                 registration.source_uri
                 != (f"package://{registration.package_id}/{registration.relative_path}")
+                for registration in plan.registrations
+            )
+            or any(
+                registration.package_root_identity
+                != root_identity_by_path.get(registration.package_root)
+                for registration in plan.registrations
+            )
+            or any(
+                (registration.exact_graph_relative_path is None)
+                != (registration.exact_graph_content_hash is None)
                 for registration in plan.registrations
             )
         ):
@@ -1212,6 +1232,9 @@ class WorkflowService:
                 # 在所有相关创作锁释放前一次发布，撤权返回后不得再有旧操作读写路径。
                 with self._active_sources_lock:
                     self._active_source_workflow_uuids = incoming_workflow_uuids
+                    self._active_source_registrations = {
+                        item.workflow_uuid: item for item in plan.registrations
+                    }
             return registered
 
     def replace_active_editable_source_authorization(
@@ -1254,6 +1277,10 @@ class WorkflowService:
                     package_root=root,
                     relative_path=normalized_relative_path,
                     source_uri=source_uri,
+                    package_root_identity=(
+                        root_metadata.st_dev,
+                        root_metadata.st_ino,
+                    ),
                 ),
             ),
             root_identities=(((root, (root_metadata.st_dev, root_metadata.st_ino))),),
@@ -1320,10 +1347,9 @@ class WorkflowService:
                 if not isinstance(candidate_hash, str) or not candidate_hash:
                     raise WorkflowError("candidate_invalid")
                 try:
-                    result = self.apply_authoring(
+                    result = self._apply_managed_registered_source(
                         workflow_uuid,
                         candidate_hash=candidate_hash,
-                        preserve_author_source=True,
                     )
                     self._require_workspace_activation_apply_complete(result)
                 except WorkflowError as error:
@@ -1804,12 +1830,46 @@ class WorkflowService:
         candidate_hash: str,
         preserve_author_source: bool = False,
     ) -> Dict[str, Any]:
+        """应用普通 Python 作者候选；精确图包来源关闭式拒绝此入口。"""
+
+        return self._apply_authoring_impl(
+            workflow_uuid,
+            candidate_hash=candidate_hash,
+            preserve_author_source=preserve_author_source,
+            managed_exact_graph_activation=False,
+        )
+
+    def _apply_managed_registered_source(
+        self,
+        workflow_uuid: str,
+        *,
+        candidate_hash: str,
+    ) -> Dict[str, Any]:
+        """仅供固定点启动把注册 serial seed 与冻结 sidecar 一起门禁。"""
+
+        return self._apply_authoring_impl(
+            workflow_uuid,
+            candidate_hash=candidate_hash,
+            preserve_author_source=True,
+            managed_exact_graph_activation=True,
+        )
+
+    def _apply_authoring_impl(
+        self,
+        workflow_uuid: str,
+        *,
+        candidate_hash: str,
+        preserve_author_source: bool = False,
+        managed_exact_graph_activation: bool,
+    ) -> Dict[str, Any]:
         """按服务端候选哈希线性化应用可信工作流创作结果。
 
         参数：``workflow_uuid`` 是工作流（Workflow）稳定身份；``candidate_hash``
         是服务端持久并签发的候选哈希（Candidate Hash），客户端不得重述草稿、
         工作流修订或候选包；``preserve_author_source`` 仅供启动固定点激活，
-        禁止把自动扫描变成未确认的规范化编辑。返回：应用结果与最新创作聚合。
+        禁止把自动扫描变成未确认的规范化编辑；
+        ``managed_exact_graph_activation`` 仅允许组合根把 serial seed 与已冻结
+        sidecar 作为一个 readiness 门禁应用。返回：应用结果与最新创作聚合。
         异常：候选、源码权威（Source Authority）、工作流修订（Workflow
         Revision）或目录指纹已变化时抛出稳定 ``WorkflowConflict``；候选无效时
         抛出 ``WorkflowError``。
@@ -1820,6 +1880,18 @@ class WorkflowService:
         with self._authoring_lock(workflow_uuid):
             workflow = self._get_authoring_workflow(workflow_uuid)
             registration = self._registration(workflow_uuid)
+            with self._active_sources_lock:
+                exact_registration = self._active_source_registrations.get(
+                    workflow_uuid
+                )
+            if (
+                exact_registration is not None
+                and exact_registration.exact_graph_relative_path is not None
+                and not managed_exact_graph_activation
+            ):
+                # 精确图是不可由 Python DSL 表达的包拓扑权威；普通 Apply 只能
+                # 覆盖为 serial seed，因此必须在任何图写入前关闭式拒绝。
+                raise WorkflowError("candidate_invalid")
             record = self._store.get_authoring_record(workflow_uuid)
             candidate = record.get("candidate")
             if candidate is None:
@@ -1901,6 +1973,24 @@ class WorkflowService:
             if revalidated["candidate_hash"] != candidate_hash:
                 raise WorkflowConflict("candidate_hash_conflict")
 
+            if exact_registration is not None:
+                try:
+                    declared_exact_graph = load_declared_exact_graph(
+                        exact_registration
+                    )
+                    if declared_exact_graph is not None:
+                        build_exact_graph_from_live(
+                            workflow_uuid=workflow_uuid,
+                            sidecar=declared_exact_graph,
+                            live_graph=candidate["graph"],
+                        )
+                except ExactGraphSidecarError:
+                    raise WorkflowError(
+                        "internal_error"
+                        if managed_exact_graph_activation
+                        else "candidate_invalid"
+                    ) from None
+
             def validate_authoring_authorities(
                 linearized_draft_hash: str,
                 linearized_catalog_fingerprint: str,
@@ -1953,6 +2043,31 @@ class WorkflowService:
                 raise WorkflowConflict("workflow_revision_conflict") from None
             except (StoreConflict, ValidationError):
                 raise WorkflowError("candidate_invalid") from None
+
+            applied_source_revision = resulting_revision
+            if exact_registration is not None:
+                try:
+                    exact_receipt = apply_declared_exact_graph(
+                        service=self,
+                        registration=exact_registration,
+                    )
+                except ExactGraphSidecarError:
+                    # 作者图已经提交，sidecar 基础设施失败不能降级为某个来源的
+                    # 可隔离草稿错误；启动组合根必须失败关闭并在冷恢复重试。
+                    raise WorkflowError("internal_error") from None
+                if exact_receipt["status"] != "not_declared":
+                    resulting_revision = self.get_workflow(workflow_uuid)["revision"]
+                    try:
+                        self._store.align_applied_source_workflow_revision(
+                            workflow_uuid=workflow_uuid,
+                            expected_source_hash=normalized_hash,
+                            expected_workflow_revision=applied_source_revision,
+                            workflow_revision=resulting_revision,
+                        )
+                    except (StoreConflict, StoreRevisionConflict):
+                        # serial seed 与 frozen exact graph 共同构成一个 managed
+                        # 来源束；最终修订不能对齐时组合根必须失败关闭。
+                        raise WorkflowError("internal_error") from None
 
             warnings: List[Dict[str, str]] = []
             if self._compiler_rebuilder is not None:
@@ -3020,11 +3135,43 @@ class WorkflowService:
         return {
             "workflow_uuid": workflow["uuid"],
             "workflow_revision": workflow["revision"],
+            "topology_authoring": self.topology_authoring_capability(
+                str(workflow["uuid"])
+            ),
             "state": state,
             "applied_graph": graph,
             "draft": draft,
             "candidate": candidate,
             "applied_source": applied_source,
+        }
+
+    def topology_authoring_capability(
+        self,
+        workflow_uuid: str,
+    ) -> Dict[str, str]:
+        """返回当前活动来源对图创作能力的稳定公共投影。
+
+        参数：``workflow_uuid`` 是已注册工作流身份。返回：普通 Python 来源支持
+        图双向编辑；声明冻结精确图（Exact Graph）的 managed 来源只允许读取已
+        应用图，且不声称 arbitrary DAG 能生成等价 Python。异常：无；失去活动
+        exact 声明时回到普通来源能力，绝不从工作流业务 metadata 猜测。
+        """
+
+        with self._active_sources_lock:
+            registration = self._active_source_registrations.get(workflow_uuid)
+        if (
+            registration is not None
+            and registration.exact_graph_relative_path is not None
+        ):
+            return {
+                "authority": "managed_exact_graph",
+                "graph_mode": "read_only",
+                "graph_to_python": "unsupported",
+            }
+        return {
+            "authority": "python_source",
+            "graph_mode": "read_write",
+            "graph_to_python": "supported",
         }
 
     def _authoring_lock(self, workflow_uuid: str) -> threading.RLock:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Any, ClassVar
@@ -10,7 +11,8 @@ import pytest
 
 from unilabos.workflow import composition
 from unilabos.workflow.models import CandidateCompilation
-from unilabos.workflow.service import WorkflowService
+from unilabos.workflow.service import WorkflowError, WorkflowService
+from unilabos.workflow.source_discovery import discover_editable_sources
 from unilabos.workflow.store import WorkflowStore
 
 # 两个 UUID 表示启动前已经由其他明确流程创建的工作流（Workflow）定义。
@@ -209,6 +211,43 @@ def _write_package(
     )
 
 
+def _write_exact_package(selected_root: Path) -> Path:
+    """创建一个空图但带公开 metadata 的精确 sidecar 包。"""
+
+    _write_package(
+        selected_root,
+        package_id="alpha_lab",
+        workflow_uuid=WORKFLOW_A_UUID,
+    )
+    exact_path = selected_root / "alpha_lab" / "workflows" / "demo.exact.json"
+    exact_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "uuid": WORKFLOW_A_UUID,
+                    "meta_data": {"exact_test_marker": True},
+                },
+                "nodes": [],
+                "edges": [],
+                "node_templates": [],
+                "handle_templates": [],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    selected_root.joinpath("package.yaml").write_text(
+        "package:\n"
+        "  name: alpha_lab\n"
+        "workflows:\n"
+        f"  - workflow_uuid: {WORKFLOW_A_UUID}\n"
+        "    source: alpha_lab/workflows/demo.py\n"
+        "    exact_graph: alpha_lab/workflows/demo.exact.json\n",
+        encoding="utf-8",
+    )
+    return exact_path
+
+
 def _seed_workflows(working_dir: Path, *workflow_uuids: str) -> None:
     """在组合启动前创建明确的工作流（Workflow）定义。
 
@@ -266,6 +305,132 @@ def test_startup_registers_recovers_publishes_then_starts_monitor(
             "published": True,
         }
     ]
+
+
+def test_managed_startup_applies_exact_sidecar_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fixed-point activation publishes only after sidecar metadata round-trips."""
+
+    working_dir = tmp_path / "runtime"
+    selected_root = tmp_path / "editable"
+    _write_exact_package(selected_root)
+    plan = discover_editable_sources((selected_root,))
+    _seed_workflows(working_dir, WORKFLOW_A_UUID)
+    monkeypatch.setattr(composition, "WorkflowSourceMonitor", RecordingMonitor)
+
+    service = composition.compose_workflow_runtime(
+        working_dir,
+        compiler=SourceOnlyCompiler(),
+        editable_source_discovery_plan=plan,
+    )
+
+    assert composition.get_workflow_service() is service
+    assert service.get_workflow(WORKFLOW_A_UUID)["meta_data"][
+        "exact_test_marker"
+    ] is True
+    first_authoring = service.get_authoring(WORKFLOW_A_UUID)
+    assert first_authoring["topology_authoring"] == {
+        "authority": "managed_exact_graph",
+        "graph_mode": "read_only",
+        "graph_to_python": "unsupported",
+    }
+    assert first_authoring["applied_source"]["workflow_revision"] == (
+        first_authoring["workflow_revision"]
+    )
+    assert first_authoring["state"] == "applied"
+    first_revision = service.get_workflow(WORKFLOW_A_UUID)["revision"]
+
+    composition.reset_workflow_service_for_test()
+    repeated = composition.compose_workflow_runtime(
+        working_dir,
+        compiler=SourceOnlyCompiler(),
+        editable_source_discovery_plan=plan,
+    )
+    assert repeated.get_workflow(WORKFLOW_A_UUID)["meta_data"][
+        "exact_test_marker"
+    ] is True
+    repeated_authoring = repeated.get_authoring(WORKFLOW_A_UUID)
+    assert repeated_authoring["topology_authoring"] == (
+        first_authoring["topology_authoring"]
+    )
+    assert repeated_authoring["applied_source"]["workflow_revision"] == (
+        repeated_authoring["workflow_revision"]
+    )
+    assert repeated_authoring["state"] == "applied"
+    assert repeated.get_workflow(WORKFLOW_A_UUID)["revision"] >= first_revision
+
+
+def test_sidecar_toc_tou_failure_blocks_publication_and_next_cold_start_repairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hash drift is fatal to readiness and a restored cold start is retryable."""
+
+    working_dir = tmp_path / "runtime"
+    selected_root = tmp_path / "editable"
+    exact_path = _write_exact_package(selected_root)
+    original = exact_path.read_bytes()
+    plan = discover_editable_sources((selected_root,))
+    _seed_workflows(working_dir, WORKFLOW_A_UUID)
+    monkeypatch.setattr(composition, "WorkflowSourceMonitor", RecordingMonitor)
+    exact_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(WorkflowError) as caught:
+        composition.compose_workflow_runtime(
+            working_dir,
+            compiler=SourceOnlyCompiler(),
+            editable_source_discovery_plan=plan,
+        )
+    assert caught.value.code == "internal_error"
+    assert composition.get_workflow_service() is None
+
+    composition.reset_workflow_service_for_test()
+    exact_path.write_bytes(original)
+    service = composition.compose_workflow_runtime(
+        working_dir,
+        compiler=SourceOnlyCompiler(),
+        editable_source_discovery_plan=plan,
+    )
+    assert service.get_workflow(WORKFLOW_A_UUID)["meta_data"][
+        "exact_test_marker"
+    ] is True
+
+
+def test_legacy_roots_reject_exact_graph_without_applying_any_source(
+    tmp_path: Path,
+) -> None:
+    """Legacy roots lack a same-generation Catalog and never auto-apply drafts."""
+
+    working_dir = tmp_path / "runtime"
+    exact_root = tmp_path / "exact"
+    ordinary_root = tmp_path / "ordinary"
+    _write_exact_package(exact_root)
+    _write_package(
+        ordinary_root,
+        package_id="beta_lab",
+        workflow_uuid=WORKFLOW_B_UUID,
+    )
+    _seed_workflows(working_dir, WORKFLOW_A_UUID, WORKFLOW_B_UUID)
+
+    with pytest.raises(RuntimeError, match="PackageCatalog"):
+        composition.compose_workflow_runtime(
+            working_dir,
+            compiler=SourceOnlyCompiler(),
+            editable_package_roots=(exact_root, ordinary_root),
+        )
+    assert composition.get_workflow_service() is None
+
+    store = WorkflowStore(working_dir / "workflow_history.db")
+    service = WorkflowService(store)
+    try:
+        assert service.get_workflow(WORKFLOW_A_UUID)["revision"] == 1
+        assert service.get_workflow(WORKFLOW_B_UUID)["revision"] == 1
+        assert service.get_graph(WORKFLOW_A_UUID)["nodes"] == []
+        assert service.get_graph(WORKFLOW_B_UUID)["nodes"] == []
+    finally:
+        service.close()
 
 
 def test_service_is_not_published_until_startup_recovery_finishes(

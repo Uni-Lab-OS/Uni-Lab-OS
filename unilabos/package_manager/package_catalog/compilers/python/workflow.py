@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
+import json
 
 from unilabos.workflow.authoring_ast import (
     ActionDeclaration,
@@ -108,10 +110,66 @@ def compile_workflow_definitions(
                     ],
                     "source_uri": (f"package://{import_package}/{entry.relative_path}"),
                     "workflow_uuid": workflow_uuid,
+                    **_exact_graph_details(
+                        source=source,
+                        import_package=import_package,
+                        workflow_uuid=workflow_uuid,
+                        relative_path=entry.exact_graph_relative_path,
+                        content_hashes=content_hashes,
+                    ),
                 },
             )
         )
     return tuple(sorted(definitions, key=_definition_fqid))
+
+
+def _exact_graph_details(
+    *,
+    source: WorkspaceSource,
+    import_package: str,
+    workflow_uuid: str,
+    relative_path: str | None,
+    content_hashes: Mapping[str, str],
+) -> dict[str, str]:
+    """冻结并关闭式校验可选精确图 sidecar 的目录证据。"""
+
+    if relative_path is None:
+        return {}
+    logical_path = f"{import_package}/{relative_path}"
+    try:
+        payload = source.read_bytes(logical_path)
+        digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+        if digest != content_hashes[logical_path]:
+            raise ValueError("exact graph changed during compilation")
+        document = json.loads(payload.decode("utf-8"))
+        if not isinstance(document, dict) or set(document) != {
+            "workflow",
+            "nodes",
+            "edges",
+            "node_templates",
+            "handle_templates",
+        }:
+            raise ValueError("invalid exact graph five-set")
+        workflow = document.get("workflow")
+        if not isinstance(workflow, dict) or workflow.get("uuid") != workflow_uuid:
+            raise ValueError("exact graph workflow identity mismatch")
+        for field in ("nodes", "edges", "node_templates", "handle_templates"):
+            if not isinstance(document.get(field), list):
+                raise ValueError("invalid exact graph collection")
+    except (KeyError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        raise PackageCompileError(
+            (
+                PackageDiagnostic(
+                    code="workflow_exact_graph_invalid",
+                    message="工作流精确图 sidecar 无法静态校验",
+                    path=logical_path,
+                ),
+            )
+        ) from error
+    return {
+        "exact_graph_relative_path": relative_path,
+        "exact_graph_content_hash": digest,
+    }
 
 
 def _definition_fqid(definition: PackageDefinition) -> str:

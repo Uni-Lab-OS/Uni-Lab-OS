@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -200,12 +201,12 @@ def test_catalog_generation_change_recompiles_unchanged_workspace_source(
 def test_workspace_activation_isolates_invalid_candidate_and_keeps_progressing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """单个候选应用失败必须成为该工作流诊断，不能阻断同包其他来源。
 
     参数：``tmp_path`` 隔离真实来源和 SQLite；``monkeypatch`` 只让父工作流应用
-    稳定失败；``capsys`` 验证启动日志携带可定位身份。返回：无；子工作流仍被
+    稳定失败；``caplog`` 验证启动日志携带可定位身份。返回：无；子工作流仍被
     应用，父候选被撤销并保存原错误码，日志包含父 UUID。异常：若固定点把单项
     业务错误传播到组合根，测试保持 RED。
     """
@@ -219,23 +220,28 @@ def test_workspace_activation_isolates_invalid_candidate_and_keeps_progressing(
         editable_package_roots=(package_root,),
         start_source_monitor=False,
     )
-    original_apply = service.apply_authoring
+    original_apply = service._apply_managed_registered_source
 
     def fail_parent_candidate(
         workflow_uuid: str,
         *,
         candidate_hash: str,
-        preserve_author_source: bool = False,
     ) -> dict[str, Any]:
         if workflow_uuid == PARENT_WORKFLOW_UUID:
             raise WorkflowError("candidate_invalid")
         return original_apply(
             workflow_uuid,
             candidate_hash=candidate_hash,
-            preserve_author_source=preserve_author_source,
         )
 
-    monkeypatch.setattr(service, "apply_authoring", fail_parent_candidate)
+    monkeypatch.setattr(
+        service,
+        "_apply_managed_registered_source",
+        fail_parent_candidate,
+    )
+    service_logger = logging.getLogger("unilabos.workflow.service")
+    monkeypatch.setattr(service_logger, "propagate", True)
+    caplog.set_level(logging.WARNING, logger="unilabos.workflow.service")
 
     service.activate_registered_sources_to_fixed_point()
 
@@ -246,7 +252,7 @@ def test_workspace_activation_isolates_invalid_candidate_and_keeps_progressing(
         "candidate_invalid"
     }
     assert child["state"] == "applied"
-    assert PARENT_WORKFLOW_UUID in capsys.readouterr().err
+    assert PARENT_WORKFLOW_UUID in caplog.text
 
 
 def test_workspace_recovery_propagates_catalog_infrastructure_failure(
@@ -309,12 +315,11 @@ def test_workspace_activation_propagates_authority_conflict(
         workflow_uuid: str,
         *,
         candidate_hash: str,
-        preserve_author_source: bool = False,
     ) -> dict[str, Any]:
-        del workflow_uuid, candidate_hash, preserve_author_source
+        del workflow_uuid, candidate_hash
         raise WorkflowConflict("template_catalog_conflict")
 
-    monkeypatch.setattr(service, "apply_authoring", fail_apply)
+    monkeypatch.setattr(service, "_apply_managed_registered_source", fail_apply)
 
     with pytest.raises(WorkflowConflict) as captured:
         service.activate_registered_sources_to_fixed_point()

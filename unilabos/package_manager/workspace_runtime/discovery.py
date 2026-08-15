@@ -359,7 +359,15 @@ def _validate_workflow_manifest(
         source_snapshot = validate_declared_sources(
             root_snapshot,
             package_id=manifest.package_id,
-            relative_paths=(workflow.relative_path for workflow in manifest.workflows),
+            relative_paths=(
+                path
+                for workflow in manifest.workflows
+                for path in (
+                    workflow.relative_path,
+                    workflow.exact_graph_relative_path,
+                )
+                if path is not None
+            ),
         )
     except (SourceManifestError, SourceWorkspaceError) as error:
         raise ValueError("工作区 package.yaml 或工作流源码声明无效") from error

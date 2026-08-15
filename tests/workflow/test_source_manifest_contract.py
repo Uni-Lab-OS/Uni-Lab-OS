@@ -10,6 +10,31 @@ from unilabos.workflow.source_discovery import (
 )
 
 
+def test_discovery_accepts_optional_closed_exact_graph_sidecar(tmp_path: Path) -> None:
+    """The manifest freezes one same-package workflows JSON sidecar."""
+
+    selected_root = tmp_path / "selected"
+    workflows = selected_root / "demo" / "workflows"
+    workflows.mkdir(parents=True)
+    workflows.joinpath("demo.py").write_text("# source\n", encoding="utf-8")
+    workflows.joinpath("demo.exact.json").write_text("{}\n", encoding="utf-8")
+    selected_root.joinpath("package.yaml").write_text(
+        "package: {name: demo}\n"
+        "workflows:\n"
+        "  - workflow_uuid: 11111111-1111-4111-8111-111111111111\n"
+        "    source: demo/workflows/demo.py\n"
+        "    exact_graph: demo/workflows/demo.exact.json\n",
+        encoding="utf-8",
+    )
+
+    plan = discover_editable_sources((selected_root,))
+
+    assert plan.registrations[0].exact_graph_relative_path == (
+        "workflows/demo.exact.json"
+    )
+    assert len(plan.registrations[0].exact_graph_content_hash or "") == 71
+
+
 @pytest.mark.parametrize(
     "manifest_text",
     (

@@ -479,6 +479,7 @@ def workflow_source_plan_from_catalog(
             definition=definition,
             catalog=catalog,
             package_root=package_root,
+            package_root_identity=root_identity,
         )
         for definition in catalog.definitions.workflows
     )
@@ -493,6 +494,7 @@ def _workflow_source_registration(
     definition: PackageDefinition,
     catalog: PackageCatalog,
     package_root: Path,
+    package_root_identity: tuple[int, int],
 ) -> EditableSourceRegistration:
     """把一个冻结工作流目录定义转换为源码登记身份。
 
@@ -507,10 +509,23 @@ def _workflow_source_registration(
         raise ValueError("源码登记只接受工作流目录定义")
     workflow_uuid = definition.details.get("workflow_uuid")
     source_uri = definition.details.get("source_uri")
+    exact_graph_relative_path = definition.details.get(
+        "exact_graph_relative_path"
+    )
+    exact_graph_content_hash = definition.details.get("exact_graph_content_hash")
     if not isinstance(workflow_uuid, str) or not workflow_uuid:
         raise ValueError("工作流目录定义缺少 workflow_uuid")
     if not isinstance(source_uri, str) or not source_uri:
         raise ValueError("工作流目录定义缺少 source_uri")
+    if (exact_graph_relative_path is None) != (exact_graph_content_hash is None):
+        raise ValueError("工作流精确图声明不完整")
+    if exact_graph_relative_path is not None and (
+        not isinstance(exact_graph_relative_path, str)
+        or not isinstance(exact_graph_content_hash, str)
+        or len(exact_graph_content_hash) != 71
+        or not exact_graph_content_hash.startswith("sha256:")
+    ):
+        raise ValueError("工作流精确图声明无效")
     declaring_path = PurePosixPath(definition.declaring_file)
     expected_prefix = (catalog.import_package,)
     if (
@@ -530,6 +545,9 @@ def _workflow_source_registration(
         module=definition.module,
         symbol=definition.symbol,
         definition_content_hash=definition.content_hash,
+        exact_graph_relative_path=exact_graph_relative_path,
+        exact_graph_content_hash=exact_graph_content_hash,
+        package_root_identity=package_root_identity,
     )
 
 

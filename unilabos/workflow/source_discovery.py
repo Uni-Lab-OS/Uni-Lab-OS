@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 
 from unilabos.workflow.source_manifest import (
@@ -12,6 +13,7 @@ from unilabos.workflow.source_manifest import (
 )
 from unilabos.workflow.source_workspace import (
     SourceWorkspaceError,
+    read_declared_exact_graph,
     read_package_root,
     validate_declared_sources,
 )
@@ -51,6 +53,9 @@ class EditableSourceRegistration:
     module: str | None = None
     symbol: str | None = None
     definition_content_hash: str | None = None
+    exact_graph_relative_path: str | None = None
+    exact_graph_content_hash: str | None = None
+    package_root_identity: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,7 +85,15 @@ def discover_editable_sources(
             source_snapshot = validate_declared_sources(
                 snapshot,
                 package_id=manifest.package_id,
-                relative_paths=(entry.relative_path for entry in manifest.workflows),
+                relative_paths=(
+                    path
+                    for entry in manifest.workflows
+                    for path in (
+                        entry.relative_path,
+                        entry.exact_graph_relative_path,
+                    )
+                    if path is not None
+                ),
             )
         except (SourceWorkspaceError, SourceManifestError) as error:
             raise SourceDeclarationError(error.code) from None
@@ -88,16 +101,32 @@ def discover_editable_sources(
         # 实际 Python 包目录是源码来源身份的一部分，不能由扫描结果替代。
         package_root = source_snapshot.package_root
         root_identities.append((package_root, source_snapshot.identity))
-        registrations.extend(
-            EditableSourceRegistration(
+        for entry in manifest.workflows:
+            exact_graph_content_hash = None
+            if entry.exact_graph_relative_path is not None:
+                try:
+                    exact_graph_bytes = read_declared_exact_graph(
+                        package_root=package_root,
+                        package_root_identity=source_snapshot.identity,
+                        relative_path=entry.exact_graph_relative_path,
+                    )
+                except SourceWorkspaceError:
+                    raise SourceDeclarationError("invalid_workflow_source") from None
+                exact_graph_content_hash = (
+                    f"sha256:{hashlib.sha256(exact_graph_bytes).hexdigest()}"
+                )
+            registrations.append(
+                EditableSourceRegistration(
                 workflow_uuid=entry.workflow_uuid,
                 package_id=manifest.package_id,
                 package_root=package_root,
                 relative_path=entry.relative_path,
                 source_uri=(f"package://{manifest.package_id}/{entry.relative_path}"),
+                exact_graph_relative_path=entry.exact_graph_relative_path,
+                exact_graph_content_hash=exact_graph_content_hash,
+                package_root_identity=source_snapshot.identity,
+                )
             )
-            for entry in manifest.workflows
-        )
     _validate_unique_registrations(registrations)
     return EditableSourceDiscoveryPlan(
         registrations=tuple(registrations),

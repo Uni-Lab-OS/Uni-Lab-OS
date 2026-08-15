@@ -92,6 +92,7 @@ class WorkflowSourceEntry:
 
     workflow_uuid: str
     relative_path: str
+    exact_graph_relative_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,7 +198,9 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     异常：字段、UUID 或路径不符合合同时抛出 ``SourceManifestError``。
     """
 
-    if not isinstance(raw, dict) or set(raw) != {"workflow_uuid", "source"}:
+    if not isinstance(raw, dict) or not {"workflow_uuid", "source"} <= set(raw):
+        raise SourceManifestError("invalid_workflow_source")
+    if not set(raw) <= {"workflow_uuid", "source", "exact_graph"}:
         raise SourceManifestError("invalid_workflow_source")
     raw_uuid = raw["workflow_uuid"]
     raw_source = raw["source"]
@@ -222,9 +225,33 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     ):
         raise SourceManifestError("invalid_workflow_source")
     relative_path = PurePosixPath(*source_path.parts[1:]).as_posix()
+    exact_graph_relative_path: str | None = None
+    if "exact_graph" in raw:
+        raw_exact_graph = raw["exact_graph"]
+        if (
+            not isinstance(raw_exact_graph, str)
+            or "\\" in raw_exact_graph
+            or "\x00" in raw_exact_graph
+        ):
+            raise SourceManifestError("invalid_workflow_source")
+        exact_graph_path = PurePosixPath(raw_exact_graph)
+        if (
+            exact_graph_path.is_absolute()
+            or len(exact_graph_path.parts) != 3
+            or any(part in {"", ".", ".."} for part in exact_graph_path.parts)
+            or exact_graph_path.parts[0] != package_id
+            or exact_graph_path.parts[1] != "workflows"
+            or exact_graph_path.suffix != ".json"
+            or not exact_graph_path.stem
+        ):
+            raise SourceManifestError("invalid_workflow_source")
+        exact_graph_relative_path = PurePosixPath(
+            *exact_graph_path.parts[1:]
+        ).as_posix()
     return WorkflowSourceEntry(
         workflow_uuid=workflow_uuid,
         relative_path=relative_path,
+        exact_graph_relative_path=exact_graph_relative_path,
     )
 
 

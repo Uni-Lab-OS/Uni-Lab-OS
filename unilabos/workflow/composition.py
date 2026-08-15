@@ -218,9 +218,18 @@ def compose_workflow_runtime(
                 else discover_editable_sources(configured_roots)
             )
             new_service.replace_discovered_source_authorizations(discovery_plan)
+            exact_graph_declared = any(
+                registration.exact_graph_relative_path is not None
+                for registration in discovery_plan.registrations
+            )
+            if exact_graph_declared and editable_source_discovery_plan is None:
+                raise RuntimeError(
+                    "精确图 sidecar 只允许同代 PackageCatalog 预编译计划激活"
+                )
             if editable_source_discovery_plan is not None:
                 # managed-local 工作区把同代 PackageCatalog 当作激活权威；OS
-                # 只有在子到父的组合依赖全部推进到固定点后才能发布 ready。
+                # 只有在子到父的组合依赖与可选精确图全部推进到固定点后才能
+                # 发布 ready。遗留 roots 不拥有同代 Catalog，禁止激活 sidecar。
                 new_service.activate_registered_sources_to_fixed_point()
             else:
                 # 遗留显式目录入口继续保留候选/人工应用语义。

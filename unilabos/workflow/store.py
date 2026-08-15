@@ -2342,6 +2342,81 @@ class WorkflowStore:
             )
         return resulting_revision, writeback_generation
 
+    def align_applied_source_workflow_revision(
+        self,
+        *,
+        workflow_uuid: str,
+        expected_source_hash: str,
+        expected_workflow_revision: int,
+        workflow_revision: int,
+    ) -> None:
+        """把同一 managed 来源束绑定到精确图应用后的最终修订。
+
+        参数：``workflow_uuid`` 是来源工作流；``expected_source_hash`` 与
+        ``expected_workflow_revision`` 锁定刚应用的 serial seed 来源；
+        ``workflow_revision`` 是冻结 exact sidecar 完成公开 round-trip 后的最终
+        修订。返回：无。异常：源码、旧修订或当前工作流修订漂移时事务回滚。
+
+        该操作只改变 ``applied_source`` 的修订坐标，不修改图、候选、草稿或
+        writeback 世代；Python 与 exact 声明共同构成一个 managed package source
+        bundle，不能在最终图已经发布后留下永久 ``applied_source_stale``。
+        """
+
+        if (
+            type(expected_workflow_revision) is not int
+            or type(workflow_revision) is not int
+            or expected_workflow_revision < 1
+            or workflow_revision < expected_workflow_revision
+        ):
+            raise StoreConflict("受管来源修订坐标无效")
+        now = utc_now()
+        with self.transaction() as conn:
+            workflow = self.get_workflow(workflow_uuid, conn=conn)
+            if workflow["revision"] != workflow_revision:
+                raise StoreRevisionConflict("精确图应用后工作流修订已变化")
+            row = conn.execute(
+                """
+                SELECT observed_draft_hash, applied_source
+                FROM workflow_authoring
+                WHERE workflow_uuid = ?
+                """,
+                (workflow_uuid,),
+            ).fetchone()
+            if row is None:
+                raise StoreConflict("受管来源缺少创作记录")
+            applied_source = _load(row["applied_source"], None)
+            if not isinstance(applied_source, dict):
+                raise StoreConflict("受管来源缺少已应用源码")
+            if applied_source.get("source_hash") != expected_source_hash:
+                raise StoreConflict("受管来源源码身份已变化")
+            current_revision = applied_source.get("workflow_revision")
+            if current_revision == workflow_revision:
+                return
+            if current_revision != expected_workflow_revision:
+                raise StoreRevisionConflict("精确图应用后已应用源码修订已变化")
+            applied_source["workflow_revision"] = workflow_revision
+            applied_source["update_time"] = now
+            conn.execute(
+                """
+                UPDATE workflow_authoring
+                SET applied_source = ?, update_time = ?
+                WHERE workflow_uuid = ?
+                """,
+                (_json(applied_source), now, workflow_uuid),
+            )
+            self._append_event(
+                conn,
+                event="workflow.authoring.changed",
+                data={
+                    "workflow_uuid": workflow_uuid,
+                    "cause": "managed_exact_graph_applied",
+                    "workflow_revision": workflow_revision,
+                    "draft_hash": row["observed_draft_hash"],
+                    "candidate_hash": None,
+                },
+                now=now,
+            )
+
     def _ensure_authoring_catalog_projection(
         self,
         conn: sqlite3.Connection,
