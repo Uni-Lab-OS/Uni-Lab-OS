@@ -37,16 +37,28 @@ class BackendAuthorityBootstrapper:
         target_address: str,
         credential: str,
         *,
-        source_workspace: Path | None = None,
         session: requests.Session | None = None,
         timeout: float = 30.0,
     ) -> None:
+        """配置 Local Backend 到目标 Backend Authority 的同步边界。
+
+        Args:
+            source_address: 当前工作区 Local Backend 的公开 API 地址。
+            target_address: 接收模板和物料（Material）的目标 Backend 地址。
+            credential: 目标 Backend 的操作凭据。
+            session: 可选 HTTP 会话；测试或连接复用时注入。
+            timeout: 单次 HTTP 请求超时秒数。
+
+        Returns:
+            无返回值；保存规范 API 地址、凭据和请求配置。
+
+        Raises:
+            WorkspaceHostError: 操作凭据为空时抛出。
+        """
+
         self.source_api = _api_base(source_address)
         self.target_api = _api_base(target_address)
         self.credential = str(credential or "").strip()
-        self.source_workspace = (
-            str(source_workspace.resolve()) if source_workspace is not None else None
-        )
         if not self.credential:
             raise WorkspaceHostError(
                 "backend_authority_credentials_missing",
@@ -56,7 +68,20 @@ class BackendAuthorityBootstrapper:
         self.timeout = timeout
 
     def bootstrap(self, graph_path: Path) -> AuthorityBootstrapReport:
-        """Synchronize templates and graph materials without starting an Edge."""
+        """把 Local Backend 模板和设备图幂等收敛到目标 Backend Authority。
+
+        Args:
+            graph_path: 当前设备包选中的设备图 JSON 路径。
+
+        Returns:
+            本轮同步的模板数、新建物料数和复用物料数。
+
+        Raises:
+            WorkspaceHostError: 设备图、模板响应或物料（Material）同步失败时抛出。
+
+        已存在的发行物料仍必须进入实例同步；设备包声明的位置属于部署图事实，
+        不能因为物料身份已经发布就跳过后续位置收敛。
+        """
 
         try:
             graph = json.loads(graph_path.read_text(encoding="utf-8"))
@@ -69,19 +94,6 @@ class BackendAuthorityBootstrapper:
             raise WorkspaceHostError(
                 "backend_authority_bootstrap_failed",
                 "当前设备图根必须是 JSON object",
-            )
-        graph_node_ids = {
-            str(node.get("id") or "").strip()
-            for node in graph.get("nodes", [])
-            if isinstance(node, Mapping) and str(node.get("id") or "").strip()
-        }
-        released_node_ids = self._target_released_node_ids()
-        released_graph_node_ids = graph_node_ids & released_node_ids
-        if released_graph_node_ids:
-            return AuthorityBootstrapReport(
-                template_count=0,
-                created_material_count=0,
-                existing_material_count=len(released_graph_node_ids),
             )
 
         definitions = [
@@ -123,57 +135,6 @@ class BackendAuthorityBootstrapper:
             created_material_count=material_report.created_count,
             existing_material_count=material_report.existing_count,
         )
-
-    def _target_released_node_ids(self) -> set[str]:
-        """Return graph node identities already installed by a verified release."""
-
-        released: set[str] = set()
-        page_number = 1
-        while True:
-            response = self.session.get(
-                f"{self.target_api}/materials",
-                params={
-                    "page": page_number,
-                    "page_size": 100,
-                    "with_children": "true",
-                },
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            page = _response_data(response, "Backend Authority 物料列表")
-            raw_items = page.get("items")
-            if not isinstance(raw_items, list):
-                raise WorkspaceHostError(
-                    "backend_authority_bootstrap_failed",
-                    "Backend Authority 物料列表结构无效",
-                )
-            for item in raw_items:
-                if not isinstance(item, Mapping):
-                    continue
-                metadata = item.get("meta_data")
-                if not isinstance(metadata, Mapping):
-                    continue
-                release = metadata.get("unilab_release")
-                if not isinstance(release, Mapping):
-                    continue
-                if (
-                    self.source_workspace is not None
-                    and str(release.get("source_workspace") or "")
-                    != self.source_workspace
-                ):
-                    continue
-                node_id = str(metadata.get("source_node_id") or "").strip()
-                if node_id:
-                    released.add(node_id)
-            total = page.get("total")
-            if (
-                isinstance(total, int)
-                and not isinstance(total, bool)
-                and page_number * 100 < total
-            ):
-                page_number += 1
-                continue
-            return released
 
     def _source_templates(self) -> list[Mapping[str, Any]]:
         items: list[Mapping[str, Any]] = []

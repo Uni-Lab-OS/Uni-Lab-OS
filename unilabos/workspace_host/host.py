@@ -1214,7 +1214,17 @@ class WorkspaceHost:
         ).inspect()
 
     def _bootstrap_backend_authority(self, backend_url: str) -> None:
-        """Initialize a target from the current Local Backend projection."""
+        """用当前 Local Backend 投影初始化并收敛目标 Backend Authority。
+
+        Args:
+            backend_url: 目标 Backend 的规范服务地址。
+
+        Returns:
+            无返回值；成功计数通过 Workspace Host 事件发布。
+
+        Raises:
+            WorkspaceHostError: Local Backend、设备图、凭据或目标同步失败时抛出。
+        """
 
         from .authority_sync import BackendAuthorityBootstrapper
 
@@ -1241,7 +1251,6 @@ class WorkspaceHost:
             source_address,
             backend_url,
             credential,
-            source_workspace=self.paths.workspace,
             timeout=self.readiness_timeout,
         ).bootstrap(Path(graph_path))
         with self._lock:

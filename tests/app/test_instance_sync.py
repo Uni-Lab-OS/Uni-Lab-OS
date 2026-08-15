@@ -102,11 +102,34 @@ class FakeSession:
 
 
 class ExistingSession(FakeSession):
+    def __init__(self, *, relative_position=None):
+        """构造包含一个既有物料及其可选云端相对位置的 HTTP 测试替身。
+
+        Args:
+            relative_position: Backend 物料图当前保存的相对位置；``None`` 表示尚未定位。
+
+        Returns:
+            无返回值；初始化请求记录和物料图快照。
+        """
+        super().__init__()
+        # relative_position 表示 Backend 当前持久化的物料位置，用于验证设备包权威同步。
+        self.relative_position = relative_position
+
     def put(self, url, **kwargs):
         self.calls.append(("PUT", url, kwargs))
         return FakeResponse({"code": 0, "data": {"sites": []}})
 
     def get(self, url, **kwargs):
+        """返回既有物料列表、物料图位置或父类提供的资源模板响应。
+
+        Args:
+            url: 当前读取的 Backend API 地址。
+            kwargs: 查询参数、认证头和超时配置。
+
+        Returns:
+            与请求路径匹配的 Backend-shaped 测试响应。
+        """
+
         if url.endswith("/materials"):
             self.calls.append(("GET", url, kwargs))
             return FakeResponse(
@@ -118,6 +141,7 @@ class ExistingSession(FakeSession):
                                 "uuid": "existing-pump-uuid",
                                 "resource_template_uuid": "pump-template-uuid",
                                 "barcode": "DEV-PUMP-01",
+                                "revision": 7,
                             }
                         ],
                         "total": 1,
@@ -126,7 +150,49 @@ class ExistingSession(FakeSession):
                     },
                 }
             )
+        if url.endswith("/materials/graph"):
+            self.calls.append(("GET", url, kwargs))
+            return FakeResponse(
+                {
+                    "code": 0,
+                    "data": {
+                        "nodes": [
+                            {
+                                "material": {
+                                    "uuid": "existing-pump-uuid",
+                                    "revision": 7,
+                                },
+                                "relative_position": self.relative_position,
+                                "sites": [],
+                            }
+                        ]
+                    },
+                }
+            )
         return super().get(url, **kwargs)
+
+
+class RevisionConflictSession(ExistingSession):
+    """模拟设备包位置同步遇到 Backend 修订版本冲突。"""
+
+    def put(self, url, **kwargs):
+        """拒绝位置更新，同时保留请求证据供失败关闭断言。
+
+        Args:
+            url: 待调用的 Backend Edge 路径。
+            kwargs: 请求头、超时和 JSON 更新命令。
+
+        Returns:
+            位置更新返回 HTTP 409；其他路径沿用既有物料测试替身。
+        """
+
+        if url.endswith("/edge/materials/existing-pump-uuid"):
+            self.calls.append(("PUT", url, kwargs))
+            return FakeResponse(
+                {"code": 409, "error": "material revision conflict"},
+                status_code=409,
+            )
+        return super().put(url, **kwargs)
 
 
 def test_instance_sync_creates_device_and_instrument_through_material_api() -> None:
@@ -366,11 +432,11 @@ def test_instance_sync_rejects_invalid_graph_geometry(
     assert session.calls == []
 
 
-def test_instance_sync_does_not_overwrite_existing_material_geometry() -> None:
-    """验证已存在物料复用身份且不覆盖平台相对位置。
+def test_instance_sync_updates_existing_material_geometry_from_device_graph() -> None:
+    """验证设备图声明的位置会更新云端已存在物料。
 
-    测试不接收参数且无返回值；允许最新 OS 补齐资源模板（ResourceTemplate）
-    声明的库位（Site），但禁止创建重复物料或发送位置更新。
+    测试不接收参数且无返回值；设备包位置与云端不一致时，OS 必须通过 Edge
+    写接口携带乐观并发版本和幂等身份更新，再补齐资源模板声明的库位（Site）。
     """
     graph = {
         "nodes": [
@@ -385,8 +451,23 @@ def test_instance_sync_does_not_overwrite_existing_material_geometry() -> None:
             }
         ]
     }
-    # session 提供一个已存在物料，用于验证幂等复用边界。
-    session = ExistingSession()
+    # cloud_position 是 Backend 当前持久位置，刻意与设备图声明不同。
+    cloud_position = {
+        "position_x": 1.0,
+        "position_y": 2.0,
+        "position_z": 3.0,
+        "width": 4.0,
+        "length": 5.0,
+        "depth": 6.0,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "scale_z": 1.0,
+        "rotation_x": 0.0,
+        "rotation_y": 0.0,
+        "rotation_z": 0.0,
+    }
+    # session 提供一个已存在物料，用于验证设备包权威的位置更新边界。
+    session = ExistingSession(relative_position=cloud_position)
     synchronizer = InstanceSynchronizer(
         "http://backend:8080/api/v1",
         "operator-secret",
@@ -398,14 +479,128 @@ def test_instance_sync_does_not_overwrite_existing_material_geometry() -> None:
     assert report.created_count == 0
     assert report.existing_count == 1
     assert report.material_uuids == {"pump_01": "existing-pump-uuid"}
-    write_calls = [call for call in session.calls if call[0] != "GET"]
-    assert [(call[0], call[1], call[2]["json"]) for call in write_calls] == [
+    put_calls = [call for call in session.calls if call[0] == "PUT"]
+    assert [call[1] for call in put_calls] == [
+        "http://backend:8080/api/v1/edge/materials/existing-pump-uuid",
         (
-            "PUT",
             "http://backend:8080/api/v1/edge/materials/"
-            "existing-pump-uuid/sites/from-template",
-            {},
+            "existing-pump-uuid/sites/from-template"
+        ),
+    ]
+    # position_request 是携带设备包声明、并发版本和审计来源的 Edge 更新命令。
+    position_request = put_calls[0][2]["json"]
+    assert position_request["relative_position"] == {
+        "position_x": 10.0,
+        "position_y": 20.0,
+        "position_z": 30.0,
+        "width": 100.0,
+        "length": 80.0,
+        "depth": 60.0,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "scale_z": 1.0,
+        "rotation_x": 0.0,
+        "rotation_y": 0.0,
+        "rotation_z": 0.0,
+    }
+    assert position_request["expected_revision"] == 7
+    assert position_request["idempotency_key"].startswith(
+        "instance-position/existing-pump-uuid/7/"
+    )
+    assert position_request["extension"] == {
+        "source": "device_package_graph",
+        "edge_local_id": "pump_01",
+    }
+    assert put_calls[1][2]["json"] == {}
+
+
+def test_instance_sync_skips_unchanged_existing_material_geometry() -> None:
+    """验证设备包位置与云端一致时不产生重复位置写入。
+
+    测试不接收参数且无返回值；相同几何仍补齐库位（Site），但不创建位置台账、
+    不增加物料修订版本，也不创建重复物料。
+    """
+    # device_position 同时作为设备图声明和 Backend 当前持久位置。
+    device_position = {
+        "position_x": 10.0,
+        "position_y": 20.0,
+        "position_z": 30.0,
+        "width": 100.0,
+        "length": 80.0,
+        "depth": 60.0,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "scale_z": 1.0,
+        "rotation_x": 0.0,
+        "rotation_y": 0.0,
+        "rotation_z": 0.0,
+    }
+    graph = {
+        "nodes": [
+            {
+                "id": "pump_01",
+                "name": "模拟注射泵",
+                "type": "device",
+                "class": "community.example.virtual_transfer_pump",
+                "barcode": "DEV-PUMP-01",
+                "position": {"x": 10, "y": 20, "z": 30},
+                "config": {"size_x": 100, "size_y": 80, "size_z": 60},
+            }
+        ]
+    }
+    session = ExistingSession(relative_position=device_position)
+    synchronizer = InstanceSynchronizer(
+        "http://backend:8080/api/v1",
+        "operator-secret",
+        session=session,
+    )
+
+    report = synchronizer.sync_graph(graph)
+
+    assert report.created_count == 0
+    assert report.existing_count == 1
+    put_calls = [call for call in session.calls if call[0] == "PUT"]
+    assert [call[1] for call in put_calls] == [
+        (
+            "http://backend:8080/api/v1/edge/materials/"
+            "existing-pump-uuid/sites/from-template"
         )
+    ]
+
+
+def test_instance_sync_fails_closed_on_material_revision_conflict() -> None:
+    """验证并发修订冲突不会继续补库位或盲目覆盖云端物料。
+
+    测试不接收参数且无返回值；Backend 在位置读取后发生并发写入时，OS 必须
+    保留同一设备包命令身份并失败关闭，等待下一次完整同步重新读取权威事实。
+    """
+    graph = {
+        "nodes": [
+            {
+                "id": "pump_01",
+                "name": "模拟注射泵",
+                "type": "device",
+                "class": "community.example.virtual_transfer_pump",
+                "barcode": "DEV-PUMP-01",
+                "position": {"x": 10, "y": 20, "z": 30},
+                "config": {"size_x": 100, "size_y": 80, "size_z": 60},
+            }
+        ]
+    }
+    # session 返回未定位的云端物料，并在 Edge 更新时模拟 revision 冲突。
+    session = RevisionConflictSession(relative_position=None)
+    synchronizer = InstanceSynchronizer(
+        "http://backend:8080/api/v1",
+        "operator-secret",
+        session=session,
+    )
+
+    with pytest.raises(InstanceSyncError, match="HTTP 409"):
+        synchronizer.sync_graph(graph)
+
+    put_calls = [call for call in session.calls if call[0] == "PUT"]
+    assert [call[1] for call in put_calls] == [
+        "http://backend:8080/api/v1/edge/materials/existing-pump-uuid"
     ]
 
 
@@ -514,6 +709,12 @@ def test_read_only_check_blocks_edge_until_instances_exist():
 
 
 def test_instance_sync_reconciles_template_sites_for_existing_material():
+    """验证未声明位置的既有物料只补齐资源模板库位（Site）。
+
+    测试不接收参数且无返回值；OS 不得读取物料图或清空云端位置，只调用幂等
+    库位补齐接口并复用既有物料（Material）身份。
+    """
+
     graph = {
         "nodes": [
             {
@@ -540,3 +741,7 @@ def test_instance_sync_reconciles_template_sites_for_existing_material():
         "http://backend:8080/api/v1/edge/materials/existing-pump-uuid/sites/from-template"
     ]
     assert put_calls[0][2]["json"] == {}
+    assert not any(
+        call[0] == "GET" and call[1].endswith("/materials/graph")
+        for call in session.calls
+    )

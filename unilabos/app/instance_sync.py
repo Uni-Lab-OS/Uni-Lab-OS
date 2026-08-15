@@ -16,6 +16,10 @@ from unilabos.app.instance_geometry import (
     default_host_relative_position,
     relative_position_from_graph_node,
 )
+from unilabos.app.instance_position_sync import (
+    InstancePositionSyncError,
+    position_update_request,
+)
 from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 from unilabos.utils.tracing import inject_trace_context, span
 
@@ -51,7 +55,7 @@ class InstanceSynchronizer:
         self.timeout = timeout
 
     def sync_graph(self, graph: Mapping[str, Any]) -> InstanceSyncReport:
-        """把设备图中的缺失节点按父子顺序创建为云端物料（Material）。
+        """按父子顺序把设备图收敛为云端物料（Material）及其部署位置。
 
         Args:
             graph: 包含节点、父子关系和可选几何信息的设备图。
@@ -62,6 +66,10 @@ class InstanceSynchronizer:
         Raises:
             InstanceSyncError: 认证、设备图、模板、父子关系或云端响应
                 不满足实例同步合同时抛出。
+
+        设备图声明相对位置时，设备包是该部署几何的权威：新物料在创建请求中
+        携带位置，既有物料只在位置不一致时通过 Edge 写接口更新；设备图未声明
+        位置时不清空云端事实。
         """
 
         if not self.operator_token:
@@ -82,6 +90,17 @@ class InstanceSynchronizer:
             for material in existing_materials
             if material.get("barcode")
         }
+        # current_positions_by_material_uuid 是 Backend 的批量位置快照，只在既有物料
+        # 确实声明设备包位置时读取，避免首次初始化产生无用查询。
+        current_positions_by_material_uuid = (
+            self._material_positions()
+            if any(
+                node.get("relative_position") is not None
+                and node["barcode"] in materials_by_barcode
+                for node in nodes
+            )
+            else {}
+        )
 
         material_uuids: Dict[str, str] = {}
         pending: Dict[str, Dict[str, Any]] = {
@@ -117,6 +136,21 @@ class InstanceSynchronizer:
                     if not material_uuid:
                         raise InstanceSyncError(
                             f"existing material {node['barcode']} has no UUID"
+                        )
+                    try:
+                        update_request = position_update_request(
+                            node,
+                            existing,
+                            current_positions_by_material_uuid.get(material_uuid),
+                        )
+                    except InstancePositionSyncError as exc:
+                        raise InstanceSyncError(str(exc)) from exc
+                    if update_request is not None:
+                        self._request(
+                            "PUT",
+                            f"/edge/materials/{material_uuid}",
+                            route="/api/v1/edge/materials/:material_uuid",
+                            json=update_request,
                         )
                     self._request(
                         "PUT",
@@ -249,6 +283,40 @@ class InstanceSynchronizer:
             if len(materials) >= total or not page_materials:
                 return materials
             page += 1
+
+    def _material_positions(self) -> Dict[str, Optional[Mapping[str, Any]]]:
+        """批量读取 Backend 物料图中的当前相对位置。
+
+        Returns:
+            以物料 UUID 为键、相对位置对象或 ``None`` 为值的完整快照。
+
+        Raises:
+            InstanceSyncError: Backend 响应失败时由统一 HTTP 解码边界抛出。
+        """
+
+        result = self._request(
+            "GET",
+            "/materials/graph",
+            route="/api/v1/materials/graph",
+        )
+        # positions_by_material_uuid 把批量图节点变成同步循环可直接查询的位置索引。
+        positions_by_material_uuid: Dict[
+            str, Optional[Mapping[str, Any]]
+        ] = {}
+        for graph_node in _mapping_list(result.get("nodes")):
+            material = graph_node.get("material")
+            if not isinstance(material, Mapping):
+                continue
+            material_uuid = str(material.get("uuid") or "").strip()
+            if not material_uuid:
+                continue
+            relative_position = graph_node.get("relative_position")
+            positions_by_material_uuid[material_uuid] = (
+                relative_position
+                if isinstance(relative_position, Mapping)
+                else None
+            )
+        return positions_by_material_uuid
 
     def _request(
         self,
