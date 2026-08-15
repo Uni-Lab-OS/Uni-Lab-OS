@@ -819,7 +819,14 @@ def install_workflow_api(
             create_authoring_transform_router,
         )
 
-        app.include_router(create_authoring_transform_router(authoring_transform))
+        app.include_router(
+            create_authoring_transform_router(
+                authoring_transform,
+                topology_authoring_provider=(
+                    service.topology_authoring_capability
+                ),
+            )
+        )
 
 
 def create_workflow_app(

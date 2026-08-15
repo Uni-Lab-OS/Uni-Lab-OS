@@ -6,7 +6,7 @@ import logging
 import re
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any, Protocol, Self
+from typing import Any, Callable, Protocol, Self
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -36,6 +36,9 @@ from unilabos.workflow.source_coordinates import require_utf8_text, source_range
 _LOGGER = logging.getLogger(__name__)
 _INT64_MAX = (1 << 63) - 1
 _FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_GRAPH_TO_PYTHON_UNSUPPORTED_MESSAGE = (
+    "受管精确图是只读拓扑，不能生成等价 Python 作者源码"
+)
 _WORKFLOW_FIELDS = {
     "uuid",
     "create_time",
@@ -420,8 +423,17 @@ def _transform_response(
         return workflow_error_response(WorkflowError("internal_error"))
 
 
-def create_authoring_transform_router(engine: AuthoringTransform) -> APIRouter:
-    """创建三个纯可信创作转换路由；参数是转换端口，返回无写操作的 Router。"""
+def create_authoring_transform_router(
+    engine: AuthoringTransform,
+    *,
+    topology_authoring_provider: Callable[[str], Mapping[str, str]] | None = None,
+) -> APIRouter:
+    """创建三个纯可信创作转换路由。
+
+    参数：``engine`` 是转换端口；``topology_authoring_provider`` 可选读取当前
+    工作流的图创作能力。返回无写操作的 Router。managed exact arbitrary DAG
+    在进入引擎前稳定拒绝 graph-to-Python，不把只读拓扑伪装成可往返源码。
+    """
 
     router = APIRouter(
         prefix="/api/v1/authoring",
@@ -453,6 +465,40 @@ def create_authoring_transform_router(engine: AuthoringTransform) -> APIRouter:
     @router.post("/generate-python")
     def generate_authoring_python(body: AuthoringGeneratePythonRequest) -> JSONResponse:
         """生成规范 Python；返回已证明等价的结构化图与源码。"""
+
+        if topology_authoring_provider is not None:
+            capability = topology_authoring_provider(body.workflow_uuid)
+            if capability.get("graph_to_python") == "unsupported":
+                try:
+                    compiler_version = str(getattr(engine, "compiler_version"))
+                    fingerprint = str(
+                        getattr(engine, "template_catalog_fingerprint")
+                    )
+                    if (
+                        not compiler_version.strip()
+                        or _FINGERPRINT.fullmatch(fingerprint) is None
+                    ):
+                        raise ValueError("创作转换版本无效")
+                except Exception:
+                    _LOGGER.exception("读取只读精确图转换版本失败")
+                    return workflow_error_response(WorkflowError("internal_error"))
+                return workflow_success_response(
+                    {
+                        "diagnostics": [
+                            {
+                                "severity": "error",
+                                "code": "graph_to_python_unsupported",
+                                "message": _GRAPH_TO_PYTHON_UNSUPPORTED_MESSAGE,
+                            }
+                        ],
+                        "graph": None,
+                        "normalized_python_source": None,
+                        "source_map": [],
+                        "changeset": None,
+                        "compiler_version": compiler_version,
+                        "template_catalog_fingerprint": fingerprint,
+                    }
+                )
 
         values = {
             "workflow_uuid": body.workflow_uuid,
@@ -496,8 +542,12 @@ def create_authoring_transform_router(engine: AuthoringTransform) -> APIRouter:
     return router
 
 
-def create_authoring_transform_app(engine: AuthoringTransform) -> FastAPI:
-    """创建聚焦纯转换应用；参数是转换端口，返回统一错误形状的 FastAPI 应用。"""
+def create_authoring_transform_app(
+    engine: AuthoringTransform,
+    *,
+    topology_authoring_provider: Callable[[str], Mapping[str, str]] | None = None,
+) -> FastAPI:
+    """创建聚焦纯转换应用；参数是转换端口与可选能力读取器。"""
 
     app = FastAPI(title="Uni-Lab Authoring Transform", version="0.1.0")
 
@@ -510,7 +560,12 @@ def create_authoring_transform_app(engine: AuthoringTransform) -> FastAPI:
 
         return workflow_error_response(WorkflowError("invalid_input"))
 
-    app.include_router(create_authoring_transform_router(engine))
+    app.include_router(
+        create_authoring_transform_router(
+            engine,
+            topology_authoring_provider=topology_authoring_provider,
+        )
+    )
     return app
 
 

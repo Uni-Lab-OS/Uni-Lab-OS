@@ -145,6 +145,11 @@ def test_authoring_http_keeps_backend_response_envelope(
     assert set(payload) == {"code", "data"}
     assert payload["code"] == 0
     assert payload["data"]["candidate"]["candidate_hash"].startswith("sha256:")
+    assert payload["data"]["topology_authoring"] == {
+        "authority": "python_source",
+        "graph_mode": "read_write",
+        "graph_to_python": "supported",
+    }
 
 
 def test_same_content_cas_compiles_external_draft_without_rewriting_source(

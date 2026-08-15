@@ -76,6 +76,9 @@ def _source_only_changeset() -> dict[str, Any]:
 class RecordingTransformEngine:
     """记录纯转换调用，并可注入非法出站结果验证适配器关闭失败。"""
 
+    compiler_version = "f05-c7-spy/v1"
+    template_catalog_fingerprint = FINGERPRINT
+
     def __init__(
         self,
         mode: Literal[
@@ -304,6 +307,39 @@ def test_three_routes_are_closed_and_call_the_engine_once(
     assert set(values) == expected_keys
     assert values["workflow_uuid"] == WORKFLOW_UUID
     assert values["workflow_revision"] == 7
+
+
+def test_managed_exact_graph_generation_is_explicitly_unsupported_and_read_only(
+) -> None:
+    """受管精确图必须在引擎调用前稳定拒绝 graph-to-Python。"""
+
+    engine = RecordingTransformEngine()
+    client = TestClient(
+        create_authoring_transform_app(
+            engine,
+            topology_authoring_provider=lambda _workflow_uuid: {
+                "authority": "managed_exact_graph",
+                "graph_mode": "read_only",
+                "graph_to_python": "unsupported",
+            },
+        )
+    )
+
+    response = client.post(
+        "/api/v1/authoring/generate-python",
+        json=_generate_body(),
+    )
+
+    assert response.status_code == 200
+    data = _assert_success(response.json())
+    assert engine.calls == []
+    assert data["graph"] is None
+    assert data["normalized_python_source"] is None
+    assert data["source_map"] == []
+    assert data["changeset"] is None
+    assert [item["code"] for item in data["diagnostics"]] == [
+        "graph_to_python_unsupported"
+    ]
 
 
 def test_router_contains_only_the_three_pure_routes() -> None:
