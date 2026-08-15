@@ -47,6 +47,7 @@ from unilabos.registry.action_policy import (
 )
 from unilabos.registry.placeholder_type import ResourceSlotRawInput
 from unilabos.ros.nodes.resource_slot_hydration import (
+    PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA,
     hydrate_resource_slot_nodes_sync,
     hydrate_resource_slot_tree_async,
     plan_resource_slot_parent_context,
@@ -149,6 +150,36 @@ def _stable_resource_uuid(value: Any) -> str:
         or getattr(value, "id", None)
         or ""
     )
+
+
+def _production_runtime_uuid(value: Any) -> str:
+    """Read the Edge-private local UUID retained in a Backend projection."""
+
+    if isinstance(value, dict):
+        extra = value.get("extra")
+    else:
+        extra = getattr(value, "unilabos_extra", None)
+    if not isinstance(extra, dict):
+        return ""
+    return str(extra.get(PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA) or "").strip()
+
+
+def _resolve_production_runtime_resource(tracker: Any, value: Any) -> Any:
+    """Resolve a Backend-projected resource to the exact local runtime object."""
+
+    runtime_uuid = _production_runtime_uuid(value)
+    if not runtime_uuid:
+        return None
+    matches = []
+    for root in getattr(tracker, "resources", ()) or ():
+        match = tracker.loop_find_with_uuid(root, runtime_uuid)
+        if match is not None and all(match is not existing for existing in matches):
+            matches.append(match)
+    if len(matches) > 1:
+        raise ValueError(
+            f"生产资源投影的本地 UUID={runtime_uuid} 对应多个运行时实例: {matches}"
+        )
+    return matches[0] if matches else None
 
 
 def _device_root_mapping(tree: Any) -> Optional[Dict[str, Any]]:
@@ -2761,9 +2792,19 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             # 等待 action 完成
             if future is not None:
                 if isinstance(future, Task):
-                    # rclpy Task：直接 await，完成瞬间唤醒
+                    # rclpy Task 的 done callback 可能由当前 Action 所在的同一
+                    # executor worker 触发。长耗时动作下直接 await 偶尔不会重新
+                    # 调度外层 Action 协程，导致驱动已返回但 ROS result 永不发布。
+                    # 用短时 rclpy timer 主动让出 executor，并在 Task 完成后读取
+                    # 结果，保证 HostNode 一定能收到终态。
+                    while not future.done():
+                        await ROS2DeviceNode.async_wait_for(
+                            self,
+                            0.05,
+                            callback_group=self.callback_group,
+                        )
                     try:
-                        _raw_result = await future
+                        _raw_result = future.result()
                     except Exception as e:
                         _raw_result = e
                 else:
@@ -3198,8 +3239,14 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                 continue
             res = self.resource_tracker.figure_resource(plr_resource, try_mode=True)
             if len(res) == 0:
-                self.lab_logger().warning(f"资源转换未能索引到实例: {tree.root_node.res_content}，返回新建实例")
-                resolved_resource = plr_resource
+                runtime_resource = _resolve_production_runtime_resource(
+                    self.resource_tracker, plr_resource
+                )
+                if runtime_resource is None:
+                    self.lab_logger().warning(f"资源转换未能索引到实例: {tree.root_node.res_content}，返回新建实例")
+                    resolved_resource = plr_resource
+                else:
+                    resolved_resource = runtime_resource
             elif len(res) == 1:
                 resolved_resource = res[0]
             else:
@@ -3233,6 +3280,12 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                         continue
                     if source_match is source_root:
                         found = resolved_root
+                        break
+                    runtime_resource = _resolve_production_runtime_resource(
+                        self.resource_tracker, source_match
+                    )
+                    if runtime_resource is not None:
+                        found = runtime_resource
                         break
                     local_matches = self.resource_tracker.figure_resource(
                         source_match, try_mode=True

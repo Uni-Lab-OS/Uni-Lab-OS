@@ -485,6 +485,58 @@ def test_authority_preflight_explains_unavailable_scheduler(
         host.close()
         server.shutdown()
         server.server_close()
+def test_authority_switch_can_reconnect_to_an_existing_release_without_bootstrap(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    calls: list[str] = []
+    host._preflight_backend_authority = lambda url: calls.append(f"preflight:{url}")  # type: ignore[method-assign]
+    host._bootstrap_backend_authority = lambda url: calls.append(f"bootstrap:{url}")  # type: ignore[method-assign]
+
+    snapshot = host._dispatch(
+        "authority.switch",
+        {
+            "mode": "backend",
+            "backendUrl": "http://127.0.0.1:8080/",
+            "bootstrap": False,
+        },
+    )
+
+    assert calls == ["preflight:http://127.0.0.1:8080"]
+    assert snapshot["configuration"]["domainMode"] == "backend"
+    assert snapshot["configuration"]["backendUrl"] == "http://127.0.0.1:8080"
+    host.close()
+
+
+def test_authority_switch_back_to_local_preserves_backend_publication_target(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    paths.environment.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "domainMode": "backend",
+                "backendUrl": "http://127.0.0.1:8080",
+            }
+        ),
+        encoding="utf-8",
+    )
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+
+    snapshot = host._dispatch(
+        "authority.switch",
+        {"mode": "local", "bootstrap": False},
+    )
+
+    assert snapshot["configuration"]["domainMode"] == "local"
+    assert snapshot["configuration"]["backendUrl"] == "http://127.0.0.1:8080"
+    persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
+    assert persisted["backendUrl"] == "http://127.0.0.1:8080"
+    host.close()
 
 
 def test_plc_launch_preserves_explicit_handshake_workflow(workspace: Path) -> None:
@@ -644,6 +696,9 @@ def test_local_reset_state_clears_edge_work_but_preserves_identity(
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()
     state_path = paths.runtime / "edge" / "edge_control.db"
+    backend_state_path = (
+        paths.runtime / "edge" / "edge_control-backend-test-authority.db"
+    )
     store = EdgeControlStore(str(state_path))
     instance_uuid = store.get_or_create_instance_uuid()
     command_uuid = "50000000-0000-4000-8000-000000000201"
@@ -666,6 +721,17 @@ def test_local_reset_state_clears_edge_work_but_preserves_identity(
         command_uuid,
     )
     store.close()
+    backend_store = EdgeControlStore(str(backend_state_path))
+    backend_instance_uuid = backend_store.get_or_create_instance_uuid()
+    backend_store.record_command(
+        {
+            "message_uuid": "50000000-0000-4000-8000-000000000211",
+            "sequence": 9,
+            "type": "job.start",
+            "payload": {"job_uuid": "50000000-0000-4000-8000-000000000212"},
+        }
+    )
+    backend_store.close()
     local_domain = paths.runtime / "backend" / "local-domain"
     local_domain.mkdir(parents=True)
     local_domain_databases = [
@@ -695,6 +761,10 @@ def test_local_reset_state_clears_edge_work_but_preserves_identity(
     assert reopened.get_or_create_instance_uuid() == instance_uuid
     assert reopened.get_job(job_uuid) is None
     reopened.close()
+    reopened_backend = EdgeControlStore(str(backend_state_path))
+    assert reopened_backend.get_or_create_instance_uuid() == backend_instance_uuid
+    assert reopened_backend.last_ack_command_sequence() == 0
+    reopened_backend.close()
     assert all(not database.exists() for database in local_domain_databases)
     assert all(
         not database.with_name(f"{database.name}-wal").exists()

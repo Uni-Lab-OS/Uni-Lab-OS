@@ -7,9 +7,13 @@ from pathlib import Path
 import pytest
 
 from unilabos.workflow.service import WorkflowError
+from unilabos.workflow.material_graph_validation import (
+    validate_material_graph_projection,
+)
 
 from .f05_material_graph_fixtures import (
     INCOMPATIBLE_TEMPLATE_UUID,
+    PASSTHROUGH_NODE_UUID,
     PASSTHROUGH_SOURCE_UUID,
     PASSTHROUGH_TEMPLATE_UUID,
     candidate_with_prepare_allowlist,
@@ -202,3 +206,34 @@ def test_implicit_same_name_output_inherits_input_schema_guarantee() -> None:
         if handle["uuid"] == PASSTHROUGH_SOURCE_UUID
     )
     assert output["meta_data"]["unilab"].get("allowed_resource_template_uuids") is None
+
+
+def test_composite_same_name_output_inherits_connected_input_guarantee() -> None:
+    """组合调用的显式同名输出应保留父图输入物料的精确模板保证。"""
+
+    engine = material_graph_engine(
+        include_passthrough=True,
+        prepare_allowlist=(PLATE_TEMPLATE_UUID,),
+        passthrough_input_allowlist=None,
+        passthrough_output_allowlist=None,
+        passthrough_implicit=True,
+    )
+    result = compile_material_source_graph(engine, passthrough_chain_source())
+    assert result.valid and result.graph is not None, result.diagnostics
+    graph = result.graph
+    invocation = next(
+        node for node in graph["nodes"] if node["uuid"] == PASSTHROUGH_NODE_UUID
+    )
+    invocation["type"] = "workflow"
+    invocation["meta_data"]["unilab"].get("output_schema_overrides", {}).pop(
+        PASSTHROUGH_SOURCE_UUID,
+        None,
+    )
+    output = next(
+        handle
+        for handle in graph["handle_templates"]
+        if handle["uuid"] == PASSTHROUGH_SOURCE_UUID
+    )
+    output["meta_data"]["unilab"]["implicit_passthrough"] = False
+
+    validate_material_graph_projection(graph)

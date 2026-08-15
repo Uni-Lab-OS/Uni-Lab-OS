@@ -99,6 +99,10 @@ class FakeSession:
 
 
 class ExistingSession(FakeSession):
+    def put(self, url, **kwargs):
+        self.calls.append(("PUT", url, kwargs))
+        return FakeResponse({"code": 0, "data": {"sites": []}})
+
     def get(self, url, **kwargs):
         if url.endswith("/materials"):
             self.calls.append(("GET", url, kwargs))
@@ -294,3 +298,32 @@ def test_read_only_check_blocks_edge_until_instances_exist():
     assert report.material_uuids == {"pump_01": "existing-pump-uuid"}
     assert not any(call[0] == "POST" for call in session.calls)
     assert all("Authorization" not in call[2]["headers"] for call in session.calls)
+
+
+def test_instance_sync_reconciles_template_sites_for_existing_material():
+    graph = {
+        "nodes": [
+            {
+                "id": "pump_01",
+                "name": "模拟注射泵",
+                "type": "device",
+                "class": "virtual_transfer_pump",
+                "barcode": "DEV-PUMP-01",
+            }
+        ]
+    }
+    session = ExistingSession()
+    synchronizer = InstanceSynchronizer(
+        "http://backend:8080/api/v1",
+        "operator-secret",
+        session=session,
+    )
+
+    report = synchronizer.sync_graph(graph)
+
+    assert report.existing_count == 1
+    put_calls = [call for call in session.calls if call[0] == "PUT"]
+    assert [call[1] for call in put_calls] == [
+        "http://backend:8080/api/v1/edge/materials/existing-pump-uuid/sites/from-template"
+    ]
+    assert put_calls[0][2]["json"] == {}

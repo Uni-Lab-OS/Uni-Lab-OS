@@ -672,6 +672,18 @@ class RegistryTemplateProjection:
         if not isinstance(contract, Mapping) or contract.get("version") != 2:
             raise RegistryTemplateProjectionError("只接受第 2 版动作合同")
         node_business_key = (resource_template_uuid, action_name)
+        unilab_metadata: dict[str, Any] = {
+            "contract_kind": "typed",
+            "action_contract_schema": dict(schema),
+            "resource_template": {
+                "uuid": resource_template_uuid,
+                "name": resource_name,
+                "display_name": resource_display_name,
+            },
+        }
+        executor_kind = str(action.get("executor_kind") or "").strip()
+        if executor_kind:
+            unilab_metadata["executor_kind"] = executor_kind
         node = {
             "resource_template_uuid": resource_template_uuid,
             "name": action_name,
@@ -686,18 +698,8 @@ class RegistryTemplateProjection:
             "result": dict(action.get("result") or {}),
             "schema": goal_parameter_schema(schema),
             "type": action.get("type") or "UniLabJsonCommand",
-            "node_type": "ILab",
-            "meta_data": {
-                "unilab": {
-                    "contract_kind": "typed",
-                    "action_contract_schema": dict(schema),
-                    "resource_template": {
-                        "uuid": resource_template_uuid,
-                        "name": resource_name,
-                        "display_name": resource_display_name,
-                    },
-                }
-            },
+            "node_type": action.get("node_type") or "ILab",
+            "meta_data": {"unilab": unilab_metadata},
         }
         if action.get("uuid") is not None:
             try:
