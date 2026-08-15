@@ -15,7 +15,7 @@ from pathlib import Path
 
 from unilabos.app.edge_control.addressing import derive_scheduler_address
 
-from .model import WorkspaceHostError, WorkspacePaths
+from .model import WorkspaceHostError, WorkspacePaths, atomic_write_json
 
 
 @dataclass(frozen=True)
@@ -297,6 +297,12 @@ def resolve_edge_launch(
             ),
         }
     )
+    edge_graph = Path(str(metadata["validatedGraphPath"]))
+    if mode == "dry-run":
+        edge_graph = runtime_directory / "selected-graph.json"
+        _write_dry_run_edge_graph(
+            Path(str(metadata["validatedGraphPath"])), edge_graph
+        )
     command = (
         sys.executable,
         "-m",
@@ -304,7 +310,7 @@ def resolve_edge_launch(
         "--workspace",
         str(paths.workspace),
         "--graph",
-        str(metadata["validatedGraphPath"]),
+        str(edge_graph),
         "--config",
         str(metadata["localConfigPath"]),
         "--working_dir",
@@ -347,6 +353,27 @@ def resolve_edge_launch(
             "readyFilePath": str(ready_file),
         },
     )
+
+
+def _write_dry_run_edge_graph(source: Path, target: Path) -> None:
+    """Detach dry-run Edge drivers from real endpoints without changing authority data."""
+
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkspaceHostError(
+            "graph_invalid", "无法生成 Dry-run Edge 设备图"
+        ) from error
+    nodes = payload.get("nodes") if isinstance(payload, dict) else None
+    if isinstance(nodes, list):
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            config = node.get("config")
+            if isinstance(config, dict) and "auto_connect" in config:
+                config["auto_connect"] = False
+    atomic_write_json(target, payload)
+    os.chmod(target, 0o600)
 
 
 def resolve_plc_launch(paths: WorkspacePaths) -> LaunchPlan:

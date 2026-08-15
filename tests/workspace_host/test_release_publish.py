@@ -189,6 +189,40 @@ def test_publish_runs_plan_apply_verify_and_records_only_verified_release(
     assert (tmp_path / "sha256-release-1.json").is_file()
 
 
+def test_publish_accepts_a_prebuilt_release_without_reading_source_twice(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    release = _release()
+
+    class Builder:
+        def build(self) -> WorkspaceRelease:
+            calls.append("build")
+            return release
+
+    class Target:
+        def plan(self, candidate: WorkspaceRelease) -> DeploymentPlan:
+            calls.append("plan")
+            return DeploymentPlan(candidate, "https://backend.example/api/v1", 1, 0, 0)
+
+        def apply(self, plan: DeploymentPlan) -> DeploymentResult:
+            calls.append("apply")
+            return DeploymentResult(plan.release.release_id, plan.target_address, {}, {}, {})
+
+    class Verifier:
+        def verify(self, *_args: object) -> VerificationReport:
+            calls.append("verify")
+            return VerificationReport(True, 1, 0, 0, ())
+
+    publisher = WorkspaceReleasePublisher(
+        Builder(), Target(), Verifier(), deployment_directory=tmp_path
+    )
+    prepared = publisher.build()
+    publisher.publish(prepared)
+
+    assert calls == ["build", "plan", "apply", "verify"]
+
+
 def test_publish_fails_closed_and_does_not_record_unverified_release(
     tmp_path: Path,
 ) -> None:
@@ -1989,7 +2023,9 @@ def test_workspace_host_release_publish_registers_edge_before_workflow_import(
         def __init__(self, before_workflows: object) -> None:
             self.before_workflows = before_workflows
 
-        def publish(self) -> dict[str, object]:
+        def publish(
+            self, _release: WorkspaceRelease | None = None
+        ) -> dict[str, object]:
             assert callable(self.before_workflows)
             self.before_workflows()
             # Backend performs this check inside POST /workflows/import.  Keep
@@ -2081,6 +2117,67 @@ def test_workspace_host_release_publish_restores_idle_edge_after_import_failure(
         "switch:local",
     ]
     host.close()
+
+
+def test_reset_publish_does_not_clear_backend_when_activation_preflight_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, "host-token", readiness_timeout=1)
+    host._components["backend"].update(  # type: ignore[attr-defined]
+        {"phase": "ready", "address": "http://127.0.0.1:18003"}
+    )
+    host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
+    switched: list[str] = []
+    def fail_authority_switch(values: dict[str, object], **_kwargs: object) -> object:
+        switched.append(str(values["mode"]))
+        raise RuntimeError("authority switch failed")
+
+    host._switch_authority = fail_authority_switch  # type: ignore[method-assign]
+    calls: list[str] = []
+
+    class Publisher:
+        def build(self) -> WorkspaceRelease:
+            calls.append("build")
+            return _release()
+
+        def publish(self, _release: WorkspaceRelease | None = None) -> dict[str, object]:
+            calls.append("publish")
+            return {"verified": True}
+
+    class Target:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def clear(self) -> None:
+            calls.append("clear")
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.release_publish.create_existing_backend_publisher",
+        lambda **_kwargs: Publisher(),
+    )
+    monkeypatch.setattr(
+        "unilabos.workspace_host.release_publish.ExistingBackendDeploymentTarget",
+        Target,
+    )
+
+    with pytest.raises(RuntimeError, match="authority switch failed"):
+        host._dispatch(
+            "release.publish",
+            {
+                "backendUrl": "https://backend.example",
+                "activate": True,
+                "verify": True,
+                "resetTarget": True,
+                "confirmation": "CLEAR_BACKEND",
+            },
+        )
+
+    assert calls == ["build"]
+    assert switched == ["backend"]
 
 
 def test_unilab_workspace_publish_dispatches_the_same_host_operation(

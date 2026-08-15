@@ -458,6 +458,44 @@ def test_scheduler_address_derivation_preserves_ingress_and_ipv6(
     assert derive_scheduler_address(backend_address) == scheduler_address
 
 
+def test_dry_run_edge_disables_device_auto_connect_in_detached_runtime_graph(
+    workspace: Path,
+) -> None:
+    graph_path = workspace / "deployment" / "graphs" / "graph.json"
+    graph_path.write_text(json.dumps({
+        "nodes": [{
+            "id": "plc",
+            "config": {
+                "url": "opc.tcp://plc-sim:4855/xuse_sim",
+                "auto_connect": True,
+            },
+        }],
+    }))
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    ensure_local_token(paths)
+    paths.environment.write_text(json.dumps({
+        "schemaVersion": 1,
+        "graphPath": "deployment/graphs/graph.json",
+        "runtimeMode": "dry-run",
+        "domainMode": "local",
+    }))
+
+    backend = resolve_backend_launch(
+        paths, backend_port=48_131, hostlink_port=48_132
+    )
+    edge = resolve_edge_launch(
+        paths, {"address": backend.address, "metadata": backend.metadata}
+    )
+    edge_graph = Path(_argument_value(edge.command, "--graph"))
+
+    assert edge_graph != Path(str(backend.metadata["validatedGraphPath"]))
+    assert json.loads(edge_graph.read_text())["nodes"][0]["config"] == {
+        "url": "opc.tcp://plc-sim:4855/xuse_sim",
+        "auto_connect": False,
+    }
+
+
 def test_authority_switch_preflights_before_restart_and_persists_mode(
     workspace: Path,
 ) -> None:

@@ -101,8 +101,15 @@ class WorkspaceReleasePublisher:
         self.verifier = verifier
         self.deployment_directory = deployment_directory
 
-    def publish(self) -> dict[str, Any]:
-        release = self.builder.build()
+    def build(self) -> WorkspaceRelease:
+        """Freeze the source before any destructive target operation begins."""
+
+        return self.builder.build()
+
+    def publish(self, release: WorkspaceRelease | None = None) -> dict[str, Any]:
+        """Apply and verify a release, reusing a safely prebuilt source if supplied."""
+
+        release = release or self.build()
         plan = self.target.plan(release)
         result = self.target.apply(plan)
         verification = self.verifier.verify(release, result)

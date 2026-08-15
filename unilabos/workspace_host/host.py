@@ -1133,45 +1133,54 @@ class WorkspaceHost:
                 )
             from .release_publish import create_existing_backend_publisher
 
-            if reset_target:
-                from .release_publish import ExistingBackendDeploymentTarget
-
-                ExistingBackendDeploymentTarget(
-                    backend_url,
-                    os.environ.get("UNILAB_BACKEND_API_KEY") or self.token,
-                    timeout=self.readiness_timeout,
-                ).clear()
-
             staged_authority: dict[str, object] | None = None
 
             def stage_device_authority() -> None:
                 nonlocal staged_authority
+                if staged_authority is not None:
+                    return
                 staged_authority = self._switch_authority(
                     {"mode": "backend", "backendUrl": backend_url},
                     bootstrap=False,
                 )
-                # Backend validates imported device-action nodes against the
-                # instance capabilities currently registered by Edge.  A
-                # release must therefore bring up the managed Edge even when
-                # it was stopped in Local mode; waiting for ``_start_edge``
-                # also guarantees registration completed before workflow
-                # import begins.
-                self._start_edge()
+                # ``_switch_authority`` already reconnects an Edge that was
+                # running before the transition.  Do not manufacture a second
+                # local Edge when this Workspace had none: Backend deployments
+                # commonly own their Edge in Kubernetes, and duplicate
+                # registration must remain an error.  Workflow import will
+                # validate against whichever Edge capabilities are already
+                # active on the target authority.
 
+            publisher = create_existing_backend_publisher(
+                source_address=source_address,
+                source_workspace=self.paths.workspace,
+                target_address=backend_url,
+                credential=os.environ.get("UNILAB_BACKEND_API_KEY") or self.token,
+                deployment_directory=self.paths.root / "deployments",
+                timeout=self.readiness_timeout,
+                before_workflows=stage_device_authority if activate else None,
+            )
+            prepared_release = None
             with self._lock:
                 self._publish_locked(
                     "release.publish.started", {"backendUrl": backend_url}
                 )
             try:
-                receipt = create_existing_backend_publisher(
-                    source_address=source_address,
-                    source_workspace=self.paths.workspace,
-                    target_address=backend_url,
-                    credential=os.environ.get("UNILAB_BACKEND_API_KEY") or self.token,
-                    deployment_directory=self.paths.root / "deployments",
-                    timeout=self.readiness_timeout,
-                    before_workflows=stage_device_authority if activate else None,
-                ).publish()
+                if reset_target:
+                    # Freeze every Local fact and prove the managed Backend/Edge
+                    # can start before deleting target data.  A startup failure
+                    # must leave the existing Backend untouched.
+                    prepared_release = publisher.build()
+                    if activate:
+                        stage_device_authority()
+                    from .release_publish import ExistingBackendDeploymentTarget
+
+                    ExistingBackendDeploymentTarget(
+                        backend_url,
+                        os.environ.get("UNILAB_BACKEND_API_KEY") or self.token,
+                        timeout=self.readiness_timeout,
+                    ).clear()
+                receipt = publisher.publish(prepared_release)
             except BaseException:
                 if staged_authority is not None:
                     if not edge_ready:
