@@ -1,4 +1,5 @@
 import copy
+import math
 import threading
 from collections.abc import Mapping
 from enum import Enum
@@ -42,6 +43,12 @@ from sensor_msgs.msg import JointState
 from shape_msgs.msg import Mesh, MeshTriangle, SolidPrimitive
 from std_msgs.msg import Header, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from unilabos.devices.ros_dev.moveit_plan_retry import (
+    is_retryable_plan_failure,
+    plan_attempt_limit,
+    plan_retry_attempts,
+)
 
 
 class MoveIt2State(Enum):
@@ -300,6 +307,8 @@ class MoveIt2:
         self.motion_suceeded = False
         self.__execution_goal_handle = None
         self.__last_error_code = None
+        self.__saved_move_action_goal = None
+        self.__plan_retries_remaining = 0
         self.__wait_until_executed_rate = self._node.create_rate(1000.0)
         self.__execution_mutex = threading.Lock()
 
@@ -419,7 +428,7 @@ class MoveIt2:
                     self.joint_state
                 )
             # Send to goal to the server (async) - both planning and execution
-            self._send_goal_async_move_action()
+            self._begin_move_action_with_plan_retry()
             # Clear all previous goal constrains
             self.clear_goal_constraints()
             self.clear_path_constraints()
@@ -477,7 +486,7 @@ class MoveIt2:
                     self.joint_state
                 )
             # Send to goal to the server (async) - both planning and execution
-            self._send_goal_async_move_action()
+            self._begin_move_action_with_plan_retry()
             # Clear all previous goal constrains
             self.clear_goal_constraints()
             self.clear_path_constraints()
@@ -517,29 +526,36 @@ class MoveIt2:
         cartesian_fraction_threshold: float = 0.0,
     ) -> Optional[JointTrajectory]:
         """
-        Call plan_async and wait on future
+        Call plan_async and wait on future. Planning failures retry
+        ``MoveItConfig.plan_retry_attempts`` times after the first try.
         """
-        future = self.plan_async(
-            **{
-                key: value
-                for key, value in locals().items()
-                if key not in ["self", "cartesian_fraction_threshold"]
-            }
-        )
-
-        if future is None:
-            return None
-
-        # 100ms sleep
+        plan_kwargs = {
+            key: value
+            for key, value in locals().items()
+            if key not in ["self", "cartesian_fraction_threshold"]
+        }
+        attempts = plan_attempt_limit()
         rate = self._node.create_rate(10)
-        while not future.done():
-            rate.sleep()
-
-        return self.get_trajectory(
-            future,
-            cartesian=cartesian,
-            cartesian_fraction_threshold=cartesian_fraction_threshold,
-        )
+        for attempt in range(1, attempts + 1):
+            future = self.plan_async(**plan_kwargs)
+            if future is None:
+                self._log_plan_retry(attempt, attempts, "规划请求未发出")
+                continue
+            while not future.done():
+                rate.sleep()
+            trajectory = self.get_trajectory(
+                future,
+                cartesian=cartesian,
+                cartesian_fraction_threshold=cartesian_fraction_threshold,
+            )
+            if trajectory is not None:
+                if attempt > 1:
+                    self._node.get_logger().info(
+                        f"MoveIt 规划在第 {attempt}/{attempts} 次尝试成功"
+                    )
+                return trajectory
+            self._log_plan_retry(attempt, attempts, "规划失败")
+        return None
 
     def plan_async(
         self,
@@ -701,7 +717,9 @@ class MoveIt2:
         if cartesian:
             if MoveItErrorCodes.SUCCESS == res.error_code.val:
                 if res.fraction >= cartesian_fraction_threshold:
-                    return res.solution.joint_trajectory
+                    trajectory = res.solution.joint_trajectory
+                    self._sanitize_joint_trajectory(trajectory)
+                    return trajectory
                 else:
                     self._node.get_logger().warn(
                         f"Planning failed! Cartesian planner completed {res.fraction} "
@@ -737,6 +755,9 @@ class MoveIt2:
             )
             return
 
+        if joint_trajectory is not None:
+            self._sanitize_joint_trajectory(joint_trajectory)
+
         execute_trajectory_goal = init_execute_trajectory_goal(
             joint_trajectory=joint_trajectory
         )
@@ -748,6 +769,38 @@ class MoveIt2:
             return
 
         self._send_goal_async_execute_trajectory(goal=execute_trajectory_goal)
+
+    def _sanitize_joint_trajectory(self, joint_trajectory: JointTrajectory) -> None:
+        """展开回转轴最短角；跳变超阈值时失败关闭。"""
+
+        from unilabos.devices.ros_dev.joint_trajectory_validation import (
+            DEFAULT_REVOLUTE_JUMP_THRESHOLD_RAD,
+            unwrap_and_validate_trajectory_points,
+        )
+
+        names = tuple(str(name) for name in getattr(joint_trajectory, "joint_names", ()))
+        points = tuple(
+            tuple(float(value) for value in point.positions)
+            for point in getattr(joint_trajectory, "points", ())
+        )
+        current = self.joint_state
+        current_positions = (
+            dict(zip(tuple(str(name) for name in current.name), tuple(float(value) for value in current.position)))
+            if current is not None
+            else {}
+        )
+        threshold = self.cartesian_revolute_jump_threshold
+        if not math.isfinite(threshold) or threshold <= 0:
+            threshold = DEFAULT_REVOLUTE_JUMP_THRESHOLD_RAD
+        unwrapped = unwrap_and_validate_trajectory_points(
+            joint_names=names,
+            points=points,
+            current_positions=current_positions,
+            revolute_joint_names=tuple(self.__joint_names),
+            jump_threshold_rad=threshold,
+        )
+        for point, positions in zip(joint_trajectory.points, unwrapped, strict=True):
+            point.positions = list(positions)
 
     def wait_until_executed(self) -> bool:
         """
@@ -1961,6 +2014,23 @@ class MoveIt2:
 
         self.__collision_object_publisher.publish(msg)
 
+    def planning_scene_joint_positions(self) -> dict[str, float]:
+        """返回 PlanningScene 当前 robot_state 的完全限定关节位置。"""
+
+        if not self._get_planning_scene_service.service_is_ready():
+            return {}
+        request = GetPlanningScene.Request()
+        request.components.components = PlanningSceneComponents.ROBOT_STATE
+        scene = self._get_planning_scene_service.call(request).scene
+        joint_state = getattr(getattr(scene, "robot_state", None), "joint_state", None)
+        if joint_state is None:
+            return {}
+        names = tuple(str(name) for name in getattr(joint_state, "name", ()))
+        positions = tuple(float(value) for value in getattr(joint_state, "position", ()))
+        if len(names) != len(positions):
+            return {}
+        return dict(zip(names, positions, strict=True))
+
     def update_planning_scene(self) -> bool:
         """
         Gets the current planning scene. Returns whether the service call was
@@ -2203,64 +2273,123 @@ class MoveIt2:
             self.__cartesian_path_request
         )
 
-    def _send_goal_async_move_action(self):
-        self.__execution_mutex.acquire()
-        stamp = self._node.get_clock().now().to_msg()
-        self.__move_action_goal.request.workspace_parameters.header.stamp = stamp
-        if not self.__move_action_client.server_is_ready():
+    def _log_plan_retry(self, attempt: int, attempts: int, reason: str) -> None:
+        if attempt < attempts:
             self._node.get_logger().warn(
-                f"Action server '{self.__move_action_client._action_name}' is not yet available. Better luck next time!"
+                f"MoveIt {reason}，重试 {attempt}/{attempts}"
             )
             return
+        self._node.get_logger().warn(
+            f"MoveIt {reason}，已达 {attempts} 次上限"
+        )
 
-        self.__last_error_code = None
+    def _begin_move_action_with_plan_retry(self) -> None:
+        """保存本次 MoveGroup 目标，规划失败时按全局次数重发。"""
+
+        self.__saved_move_action_goal = copy.deepcopy(self.__move_action_goal)
+        self.__plan_retries_remaining = plan_retry_attempts()
+        self._send_goal_async_move_action()
+
+    def _resend_saved_move_action_goal(self) -> None:
+        if self.__saved_move_action_goal is None:
+            return
+        self.__move_action_goal = copy.deepcopy(self.__saved_move_action_goal)
+        if self.joint_state is not None:
+            self.__move_action_goal.request.start_state.joint_state = self.joint_state
+        self._send_goal_async_move_action()
+
+    def _consume_move_action_plan_retry(self, reason: str) -> bool:
+        if self.__plan_retries_remaining <= 0 or self.__saved_move_action_goal is None:
+            return False
+        retries = plan_retry_attempts()
+        used = retries - self.__plan_retries_remaining + 1
+        self.__plan_retries_remaining -= 1
         self.__is_motion_requested = True
-        self.__send_goal_future_move_action = self.__move_action_client.send_goal_async(
-            goal=self.__move_action_goal,
-            feedback_callback=None,
-        )
+        self.__is_executing = False
+        self.__execution_goal_handle = None
+        self.motion_suceeded = False
+        self._node.get_logger().warn(f"MoveIt {reason}，重试 {used}/{retries}")
+        return True
 
-        self.__send_goal_future_move_action.add_done_callback(
-            self.__response_callback_move_action
-        )
+    def _send_goal_async_move_action(self):
+        self.__execution_mutex.acquire()
+        try:
+            stamp = self._node.get_clock().now().to_msg()
+            self.__move_action_goal.request.workspace_parameters.header.stamp = stamp
+            if not self.__move_action_client.server_is_ready():
+                self._node.get_logger().warn(
+                    f"Action server '{self.__move_action_client._action_name}' is not yet available. Better luck next time!"
+                )
+                self.__is_motion_requested = False
+                return
 
-        self.__execution_mutex.release()
+            self.__last_error_code = None
+            self.__is_motion_requested = True
+            self.__send_goal_future_move_action = (
+                self.__move_action_client.send_goal_async(
+                    goal=self.__move_action_goal,
+                    feedback_callback=None,
+                )
+            )
+            self.__send_goal_future_move_action.add_done_callback(
+                self.__response_callback_move_action
+            )
+        finally:
+            if self.__execution_mutex.locked():
+                self.__execution_mutex.release()
 
     def __response_callback_move_action(self, response):
         self.__execution_mutex.acquire()
-        goal_handle = response.result()
-        if not goal_handle.accepted:
-            self._node.get_logger().warn(
-                f"Action '{self.__move_action_client._action_name}' was rejected."
-            )
+        try:
+            goal_handle = response.result()
+            if not goal_handle.accepted:
+                self._node.get_logger().warn(
+                    f"Action '{self.__move_action_client._action_name}' was rejected."
+                )
+                if self._consume_move_action_plan_retry("规划请求被拒绝"):
+                    self.__execution_mutex.release()
+                    self._resend_saved_move_action_goal()
+                    return
+                self.__is_motion_requested = False
+                self.motion_suceeded = False
+                return
+
+            self.__execution_goal_handle = goal_handle
+            self.__is_executing = True
             self.__is_motion_requested = False
-            return
 
-        self.__execution_goal_handle = goal_handle
-        self.__is_executing = True
-        self.__is_motion_requested = False
-
-        self.__get_result_future_move_action = goal_handle.get_result_async()
-        self.__get_result_future_move_action.add_done_callback(
-            self.__result_callback_move_action
-        )
-        self.__execution_mutex.release()
+            self.__get_result_future_move_action = goal_handle.get_result_async()
+            self.__get_result_future_move_action.add_done_callback(
+                self.__result_callback_move_action
+            )
+        finally:
+            if self.__execution_mutex.locked():
+                self.__execution_mutex.release()
 
     def __result_callback_move_action(self, res):
         self.__execution_mutex.acquire()
-        if res.result().status != GoalStatus.STATUS_SUCCEEDED:
-            self._node.get_logger().warn(
-                f"Action '{self.__move_action_client._action_name}' was unsuccessful: {res.result().status}."
-            )
-            self.motion_suceeded = False
-        else:
-            self.motion_suceeded = True
+        try:
+            status_ok = res.result().status == GoalStatus.STATUS_SUCCEEDED
+            self.__last_error_code = res.result().result.error_code
+            if status_ok:
+                self.motion_suceeded = True
+            else:
+                self._node.get_logger().warn(
+                    f"Action '{self.__move_action_client._action_name}' was unsuccessful: {res.result().status}."
+                )
+                self.motion_suceeded = False
+                if is_retryable_plan_failure(
+                    succeeded=False, error_code=self.__last_error_code
+                ) and self._consume_move_action_plan_retry("规划失败"):
+                    self.__execution_mutex.release()
+                    self._resend_saved_move_action_goal()
+                    return
 
-        self.__last_error_code = res.result().result.error_code
-
-        self.__execution_goal_handle = None
-        self.__is_executing = False
-        self.__execution_mutex.release()
+            self.__execution_goal_handle = None
+            self.__is_executing = False
+        finally:
+            if self.__execution_mutex.locked():
+                self.__execution_mutex.release()
 
     def _send_goal_async_execute_trajectory(
         self,
@@ -2477,37 +2606,71 @@ class MoveIt2:
     def allowed_planning_time(self, value: float):
         self.__move_action_goal.request.allowed_planning_time = value
 
+    def _cartesian_path_field_owner(self, field: str):
+        request = self.__cartesian_path_request
+        if hasattr(request, field):
+            return request
+        nested = getattr(request, "request", None)
+        if nested is not None and hasattr(nested, field):
+            return nested
+        return None
+
+    def _get_cartesian_path_field(self, field: str, default: float | bool = 0.0):
+        owner = self._cartesian_path_field_owner(field)
+        if owner is None:
+            return default
+        return getattr(owner, field)
+
+    def _set_cartesian_path_field(self, field: str, value) -> None:
+        request = self.__cartesian_path_request
+        written = False
+        if hasattr(request, field):
+            setattr(request, field, value)
+            written = True
+        nested = getattr(request, "request", None)
+        if nested is not None and hasattr(nested, field):
+            setattr(nested, field, value)
+            written = True
+        if not written:
+            raise AttributeError(f"GetCartesianPath.Request 没有字段 {field}")
+
     @property
     def cartesian_avoid_collisions(self) -> bool:
-        return self.__cartesian_path_request.request.avoid_collisions
+        return bool(self._get_cartesian_path_field("avoid_collisions", True))
 
     @cartesian_avoid_collisions.setter
     def cartesian_avoid_collisions(self, value: bool):
-        self.__cartesian_path_request.avoid_collisions = value
+        self._set_cartesian_path_field("avoid_collisions", value)
 
     @property
     def cartesian_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.jump_threshold
+        return float(self._get_cartesian_path_field("jump_threshold", 0.0))
 
     @cartesian_jump_threshold.setter
     def cartesian_jump_threshold(self, value: float):
-        self.__cartesian_path_request.jump_threshold = value
+        self._set_cartesian_path_field("jump_threshold", value)
 
     @property
     def cartesian_prismatic_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.prismatic_jump_threshold
+        return float(self._get_cartesian_path_field("prismatic_jump_threshold", 0.0))
 
     @cartesian_prismatic_jump_threshold.setter
     def cartesian_prismatic_jump_threshold(self, value: float):
-        self.__cartesian_path_request.prismatic_jump_threshold = value
+        self._set_cartesian_path_field("prismatic_jump_threshold", value)
 
     @property
     def cartesian_revolute_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.revolute_jump_threshold
+        owner = self._cartesian_path_field_owner("revolute_jump_threshold")
+        if owner is not None:
+            return float(getattr(owner, "revolute_jump_threshold"))
+        return float(self._get_cartesian_path_field("jump_threshold", 0.0))
 
     @cartesian_revolute_jump_threshold.setter
     def cartesian_revolute_jump_threshold(self, value: float):
-        self.__cartesian_path_request.revolute_jump_threshold = value
+        if self._cartesian_path_field_owner("revolute_jump_threshold") is not None:
+            self._set_cartesian_path_field("revolute_jump_threshold", value)
+            return
+        self._set_cartesian_path_field("jump_threshold", value)
 
     @property
     def pipeline_id(self) -> int:

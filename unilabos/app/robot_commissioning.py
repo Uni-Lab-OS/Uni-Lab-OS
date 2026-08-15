@@ -644,6 +644,10 @@ def _http_call(function: Any, *args: Any) -> Any:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
 
 _SERVICE = RobotCommissioningService()

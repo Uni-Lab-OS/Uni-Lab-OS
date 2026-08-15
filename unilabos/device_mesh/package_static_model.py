@@ -165,6 +165,18 @@ def resolve_graph_world_pose(
     return xyz_m, rpy_rad
 
 
+def resolve_graph_local_pose(
+    node: Mapping[str, Any],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """返回 Graph 节点相对其声明 parent 的局部位姿，不合成祖先。"""
+
+    if not isinstance(node, Mapping):
+        raise TypeError("Graph node must be a Mapping")
+    matrix = _local_pose_matrix(node)
+    xyz_m = (float(matrix[0][3]), float(matrix[1][3]), float(matrix[2][3]))
+    return xyz_m, _matrix_rpy(matrix)
+
+
 def _validate_visual_urdf(
     visual_urdf: str,
     *,
@@ -339,5 +351,6 @@ __all__ = [
     "PackageStaticModelBundle",
     "instantiate_package_static_model",
     "load_package_static_model",
+    "resolve_graph_local_pose",
     "resolve_graph_world_pose",
 ]

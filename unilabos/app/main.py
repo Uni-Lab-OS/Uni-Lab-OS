@@ -1325,6 +1325,7 @@ def main():
     )
     from unilabos.device_mesh.package_moveit_model import (
         collect_package_joint_state_owners,
+        get_package_render_model,
     )
 
     # Graph node.id 是运动学实例的唯一稳定、可读命名空间。
@@ -1355,6 +1356,9 @@ def main():
             "qualified_joint_names": list(owner.qualified_joint_names),
             "stale_after_s": owner.stale_after_s,
         }
+        model = get_package_render_model(owner.device_id)
+        if model is not None and model.mount_link:
+            rendering["kinematics"]["mount_link"] = model.mount_link
         config["rendering"] = rendering
         resource.config = config
 

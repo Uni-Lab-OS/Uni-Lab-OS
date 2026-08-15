@@ -233,7 +233,14 @@ def create_backend_resource_router(
 
     @router.get("/materials/graph")
     def get_material_graph() -> JSONResponse:
-        return _call(service.material_graph)
+        def _graph() -> Dict[str, Any]:
+            from unilabos.device_mesh.package_moveit_model import (
+                overlay_material_graph_kinematics,
+            )
+
+            return overlay_material_graph_kinematics(service.material_graph())
+
+        return _call(_graph)
 
     @router.get("/materials/{material_uuid}")
     def get_material(material_uuid: UUID) -> JSONResponse:

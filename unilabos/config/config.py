@@ -75,6 +75,13 @@ class EdgeControlConfig:
     event_retry_interval = 5.0
 
 
+class MoveItConfig:
+    # 规划失败后的重试次数。0 = 不重试，1 = 再试 1 次。
+    # 也可在 local_config.py 覆盖，或设环境变量
+    # UNILABOS_MOVEITCONFIG_PLAN_RETRY_ATTEMPTS。
+    plan_retry_attempts = 10
+
+
 # HTTP配置
 class HTTPConfig:
     remote_addr = "https://leap-lab.bohrium.com/api/v1"

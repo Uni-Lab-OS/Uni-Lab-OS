@@ -36,6 +36,12 @@ class HostLinkConfig:
     ros_discovery_port = 0  # 0=复用 HostLink 数字端口（TCP/UDP 各自监听）
 
 
+class MoveItConfig:
+    # 规划失败后的重试次数。0 = 不重试，1 = 再试 1 次。
+    # 环境变量：UNILABOS_MOVEITCONFIG_PLAN_RETRY_ATTEMPTS
+    plan_retry_attempts = 10
+
+
 # OpenTelemetry/SigNoz 默认关闭。生产环境建议用环境变量注入 endpoint/headers，
 # 不要把 token 或认证 header 写进配置文件。
 class OTelConfig:

@@ -22,6 +22,44 @@ try:
 except ModuleNotFoundError:  # 兼容 launch 以脚本路径直接启动控制器。
     from simulated_trajectory_timing import play_trajectory
 
+try:
+    from unilabos.devices.ros_dev.joint_trajectory_validation import (
+        DEFAULT_CONTROLLER_JUMP_THRESHOLD_RAD,
+        first_step_exceeds_jump,
+    )
+except ModuleNotFoundError:
+    DEFAULT_CONTROLLER_JUMP_THRESHOLD_RAD = math.pi
+
+    def first_step_exceeds_jump(
+        current_positions: Any,
+        first_positions: Any,
+        *,
+        threshold_rad: float = math.pi,
+    ) -> bool:
+        if len(current_positions) != len(first_positions):
+            return True
+        return any(
+            abs(float(target) - float(current)) > float(threshold_rad)
+            for current, target in zip(
+                current_positions, first_positions, strict=True
+            )
+        )
+
+
+def goal_has_excessive_first_step(
+    current_positions: Any,
+    first_positions: Any,
+    *,
+    threshold_rad: float = DEFAULT_CONTROLLER_JUMP_THRESHOLD_RAD,
+) -> bool:
+    """第一点相对当前观测若超过回转跳变阈值，则拒绝执行。"""
+
+    return first_step_exceeds_jump(
+        current_positions,
+        first_positions,
+        threshold_rad=threshold_rad,
+    )
+
 
 def load_controller_specs(path: Path) -> tuple[dict[str, Any], ...]:
     """读取 OS 生成的受限 controller 配置，不接受任意 ROS 参数。"""
@@ -88,15 +126,18 @@ class SimulatedTrajectoryController(Node):
         names = tuple(str(value) for value in trajectory.joint_names)
         if set(names) != set(spec["joints"]) or not trajectory.points:
             return GoalResponse.REJECT
-        return (
-            GoalResponse.ACCEPT
-            if all(
-                len(point.positions) == len(names)
-                and all(math.isfinite(float(value)) for value in point.positions)
-                for point in trajectory.points
-            )
-            else GoalResponse.REJECT
-        )
+        if not all(
+            len(point.positions) == len(names)
+            and all(math.isfinite(float(value)) for value in point.positions)
+            for point in trajectory.points
+        ):
+            return GoalResponse.REJECT
+        with self._lock:
+            current = tuple(self._positions[name] for name in names)
+        first = tuple(float(value) for value in trajectory.points[0].positions)
+        if goal_has_excessive_first_step(current, first):
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
 
     def _execute(self, spec: dict[str, Any], goal_handle: Any) -> Any:
         trajectory = goal_handle.request.trajectory

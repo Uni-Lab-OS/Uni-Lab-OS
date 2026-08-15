@@ -9,6 +9,7 @@ from tf2_ros import Buffer, TransformListener
 from unilabos_msgs.action import SendCmd
 
 from unilabos.devices.ros_dev.moveit2 import MoveIt2
+from unilabos.devices.ros_dev.moveit_plan_retry import plan_retry_attempts
 from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode
 
 
@@ -111,7 +112,7 @@ class MoveitInterface:
         return result
 
     def moveit_task(
-        self, move_group, position, quaternion, speed=1, retry=10, cartesian=False, target_link=None, offsets=[0, 0, 0]
+        self, move_group, position, quaternion, speed=1, retry=None, cartesian=False, target_link=None, offsets=[0, 0, 0]
     ):
 
         speed_ = float(max(0.1, min(speed, 1)))
@@ -122,25 +123,21 @@ class MoveitInterface:
         re_ = False
 
         pose_result = [x + y for x, y in zip(position, offsets)]
-        # print(pose_result)
+        _ = retry
 
-        while retry > -1 and not re_:
-
-            self.moveit2[move_group].move_to_pose(
-                target_link=target_link,
-                position=pose_result,
-                quat_xyzw=quaternion,
-                cartesian=cartesian,
-                # cartesian_fraction_threshold=0.0,
-                cartesian_max_step=0.01,
-                weight_position=1.0,
-            )
-            re_ = self.moveit2[move_group].wait_until_executed()
-            retry += -1
+        self.moveit2[move_group].move_to_pose(
+            target_link=target_link,
+            position=pose_result,
+            quat_xyzw=quaternion,
+            cartesian=cartesian,
+            cartesian_max_step=0.01,
+            weight_position=1.0,
+        )
+        re_ = self.moveit2[move_group].wait_until_executed()
 
         return re_
 
-    def moveit_joint_task(self, move_group, joint_positions, joint_names=None, speed=1, retry=10):
+    def moveit_joint_task(self, move_group, joint_positions, joint_names=None, speed=1, retry=None):
 
         re_ = False
 
@@ -150,14 +147,10 @@ class MoveitInterface:
 
         self.moveit2[move_group].max_velocity = speed_
         self.moveit2[move_group].max_acceleration = speed_
+        _ = retry
 
-        while retry > -1 and not re_:
-
-            self.moveit2[move_group].move_to_configuration(joint_positions=joint_positions_, joint_names=joint_names)
-            re_ = self.moveit2[move_group].wait_until_executed()
-
-            retry += -1
-            print(self.moveit2[move_group].compute_fk(joint_positions))
+        self.moveit2[move_group].move_to_configuration(joint_positions=joint_positions_, joint_names=joint_names)
+        re_ = self.moveit2[move_group].wait_until_executed()
         return re_
 
     def resource_manager(self, resource, parent_link):
@@ -239,7 +232,7 @@ class MoveitInterface:
 
                 if "lift_height" in cmd_dict.keys():
                     retval = None
-                    retry = config.get("retry", 10)
+                    retry = 1 + int(config.get("retry", plan_retry_attempts()))
                     while retval is None and retry > 0:
                         retval = self.moveit2[cmd_dict["move_group"]].compute_fk(joint_positions_)
                         time.sleep(0.1)
@@ -293,7 +286,7 @@ class MoveitInterface:
                         end_pose = deep_pose
 
                     retval_ik = None
-                    retry = config.get("retry", 10)
+                    retry = 1 + int(config.get("retry", plan_retry_attempts()))
                     while retval_ik is None and retry > 0:
                         retval_ik = self.moveit2[cmd_dict["move_group"]].compute_ik(
                             position=end_pose, quat_xyzw=quaternion, constraints=Constraints(joint_constraints=constraints)

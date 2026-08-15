@@ -20,10 +20,17 @@ from lxml import etree
 
 from unilabos.device_mesh.motion_runtime_plan import node_requests_moveit
 from unilabos.device_mesh.package_moveit_model import (
+    apply_graph_local_mount,
     apply_graph_world_mount,
     get_ros_model_type,
+    graph_parent_member_id,
+    instantiate_joint_state_model,
     load_package_moveit_model,
     merge_package_moveit_parameters,
+    namespace_link_names,
+    parent_mount_collision_exclusions,
+    parent_moving_mount_link,
+    retarget_world_mount_parent,
 )
 from unilabos.device_mesh.package_static_model import (
     instantiate_package_static_model,
@@ -298,6 +305,12 @@ class ResourceVisualization:
                             self.legacy_moveit_nodes[node["id"]] = model_config['mesh']
                     elif model_type is not None:
                         print("错误的注册表类型！")
+                    if (
+                        model_type != "package_moveit"
+                        and str(model_config.get("joint_state_provider") or "").strip()
+                    ):
+                        self._add_joint_state_kinematic_model(node, model_config, device)
+        self._disable_parent_mount_collisions(device)
         re = etree.tostring(self.root, encoding="unicode")
         doc = xacro.parse(re)
         xacro.process_doc(doc)
@@ -355,16 +368,30 @@ class ResourceVisualization:
         """把 distribution Provider 的六轴模型并入本进程唯一 Launch 描述。
 
         参数：``node`` 是 Graph Device；``model_config`` 是已发布 Catalog 模型
-        声明；``graph_nodes`` 用于按 Issue #183 合成世界安装。返回：无。
-        异常：Provider 摘要、XML 或控制器形状无效时传播。安全：Provider 只
-        贡献型号模型和执行参数，不接收导轨轴；RViz 仍由 OS 独立开关拥有。
+        声明；``graph_nodes`` 用于按 Issue #183 合成安装。若 Graph parent 有
+        独立可动轴，机械臂按局部位姿挂到该运动 link，而不是把父级平移烤进
+        world。返回：无。异常：Provider 摘要、XML 或控制器形状无效时传播。
+        安全：不把导轨轴写入机械臂规划组或 controller。
         """
 
-        bundle = load_package_moveit_model(
-            model_config,
-            apply_graph_world_mount(node, graph_nodes),
+        parent_link = parent_moving_mount_link(
+            node,
+            graph_nodes,
+            lab_registry.device_type_registry,
         )
-        robot = etree.fromstring(bundle.urdf.encode("utf-8"))
+        if parent_link:
+            bundle = load_package_moveit_model(
+                model_config,
+                apply_graph_local_mount(node),
+            )
+            robot = etree.fromstring(bundle.urdf.encode("utf-8"))
+            retarget_world_mount_parent(robot, parent_link)
+        else:
+            bundle = load_package_moveit_model(
+                model_config,
+                apply_graph_world_mount(node, graph_nodes),
+            )
+            robot = etree.fromstring(bundle.urdf.encode("utf-8"))
         for child in robot:
             self.root.append(child)
         if not enable_motion:
@@ -401,6 +428,48 @@ class ResourceVisualization:
         robot = etree.fromstring(fragment.encode("utf-8"))
         for child in robot:
             self.root.append(child)
+
+    def _add_joint_state_kinematic_model(
+        self,
+        node: dict,
+        model_config: dict,
+        graph_nodes: dict,
+    ) -> None:
+        """把独立关节模型挂进 robot_description，供 RViz 跟随 /joint_states。
+
+        参数：``node`` 是 Graph 成员；``model_config`` 含 ``joint_state_provider``；
+        ``graph_nodes`` 用于世界安装。返回：无。安全：不写入 MoveIt 规划组或
+        controller，导轨轴保持独立 device_id。
+        """
+
+        fragment = instantiate_joint_state_model(model_config, node, graph_nodes)
+        robot = etree.fromstring(fragment.encode("utf-8"))
+        for child in robot:
+            self.root.append(child)
+
+    def _disable_parent_mount_collisions(self, graph_nodes: dict) -> None:
+        """螺栓在独立父轴上的机械臂，不与父级壳体/滑座做碰撞检查。
+
+        参数：``graph_nodes`` 是整张 Graph。返回：无。安全：不关闭与其它工位
+        外壳的碰撞；导轨轴仍不进入机械臂规划组。
+        """
+
+        registry = lab_registry.device_type_registry
+        for node in graph_nodes.values():
+            if not parent_moving_mount_link(node, graph_nodes, registry):
+                continue
+            parent_id = graph_parent_member_id(node, graph_nodes)
+            child_id = str(node.get("id") or "").strip()
+            if not parent_id or not child_id:
+                continue
+            for child_link, parent_link in parent_mount_collision_exclusions(
+                child_links=namespace_link_names(self.root, child_id),
+                parent_links=namespace_link_names(self.root, parent_id),
+            ):
+                exclusion = etree.SubElement(self.root_srdf, "disable_collisions")
+                exclusion.set("link1", child_link)
+                exclusion.set("link2", parent_link)
+                exclusion.set("reason", "Never")
 
 
     def create_launch_description(self) -> LaunchDescription:
