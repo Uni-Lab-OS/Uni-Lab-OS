@@ -18,7 +18,7 @@ from unilabos.app.control_plane import (
     start_control_plane_runtime,
     validate_control_plane_arguments,
 )
-from unilabos.app.main import parse_args
+from unilabos.app.main import parse_args, resolve_resource_graph_source_id
 from unilabos.app.runtime_topology import (
     RuntimeProcessRole,
     publish_edge_runtime_ready_signal,
@@ -32,6 +32,27 @@ def test_control_plane_defaults_to_local_debug() -> None:
 
     assert arguments["control_plane"] == "local"
     assert validate_control_plane_arguments(arguments) is ControlPlaneMode.LOCAL
+
+
+def test_resource_graph_source_id_preserves_workspace_original_name() -> None:
+    arguments = vars(
+        parse_args().parse_args(
+            ["--resource_graph_source_id", "local-debug.json"]
+        )
+    )
+
+    assert (
+        resolve_resource_graph_source_id(
+            arguments, "/runtime/generation/selected-graph.json"
+        )
+        == "local-debug.json"
+    )
+    assert (
+        resolve_resource_graph_source_id(
+            {}, "/runtime/generation/selected-graph.json"
+        )
+        == "/runtime/generation/selected-graph.json"
+    )
 
 
 def test_workbench_split_runtime_roles_are_orthogonal_to_local_authority() -> None:

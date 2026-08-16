@@ -262,6 +262,16 @@ def parse_args():
 
     parser.add_argument("-g", "--graph", help="Physical setup graph file path.")
     parser.add_argument(
+        "--resource_graph_source_id",
+        "--resource-graph-source-id",
+        dest="resource_graph_source_id",
+        default=None,
+        help=(
+            "资源图（ResourceGraph）的稳定来源标识；工作区宿主（Workspace Host）"
+            "用它保留被复制到运行目录前的原始图名称。"
+        ),
+    )
+    parser.add_argument(
         "--workspace",
         type=str,
         nargs="?",
@@ -694,6 +704,21 @@ def parse_args():
     register_workflow_domain_subcommands(workflow_grp_subparsers)
 
     return parser
+
+
+def resolve_resource_graph_source_id(
+    arguments: dict[str, Any], graph_file_path: Optional[str]
+) -> str:
+    """解析资源图（ResourceGraph）的稳定来源标识。
+
+    工作区宿主（Workspace Host）会把已验证的图复制为 ``selected-graph.json``；
+    此时显式参数保留原始来源。直接启动时继续以实际文件路径作为兼容回退。
+    """
+
+    explicit_source_id = str(
+        arguments.get("resource_graph_source_id") or ""
+    ).strip()
+    return explicit_source_id or str(graph_file_path or "remote-startup.json")
 
 
 def main():
@@ -1477,7 +1502,9 @@ def main():
                 working_dir=working_dir,
                 resource_tree_set=resource_tree_set,
                 registry=lab_registry,
-                graph_source_id=str(file_path or "remote-startup.json"),
+                graph_source_id=resolve_resource_graph_source_id(
+                    args_dict, file_path
+                ),
                 material_shapes=workspace_material_shapes,
                 material_model_catalog=workspace_material_models,
                 material_shapes_by_template=(
@@ -1525,7 +1552,9 @@ def main():
                 working_dir=working_dir,
                 resource_tree_set=resource_tree_set,
                 registry=lab_registry,
-                graph_source_id=str(file_path or "remote-startup.json"),
+                graph_source_id=resolve_resource_graph_source_id(
+                    args_dict, file_path
+                ),
                 material_shapes=workspace_material_shapes,
                 material_model_catalog=workspace_material_models,
                 material_shapes_by_template=(
