@@ -248,6 +248,12 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     )
     assert "--process_role" in backend.command
     assert "workspace_backend" in backend.command
+    assert _argument_value(
+        backend.command, "--resource_graph_source_id"
+    ) == "graph.json"
+    assert _argument_value(
+        first_edge.command, "--resource_graph_source_id"
+    ) == "graph.json"
     assert "edge_control" in first_edge.command
     assert "fastapi" not in first_edge.command
     assert "--is_slave" not in first_edge.command
