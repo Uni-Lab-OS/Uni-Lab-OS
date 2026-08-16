@@ -152,12 +152,18 @@ class TransferManualReturn(TypedDict):
     site: str
 
 
-def _dump_resource_slot(resource: Any) -> List[List[ResourceDictType]]:
-    """序列化 PLR 物料或设备型父资源原始映射。"""
+def _dump_resource_slot(resource: Any) -> Dict[str, str]:
+    """把单个物料序列化为工作流 ``ResourceSlot`` 的规范 UUID 引用。
 
-    if isinstance(resource, dict):
-        return [[dict(resource)]]
-    return ResourceTreeSet.from_plr_resources([resource]).dump()
+    ``ResourceSlot`` 在已发布动作合同中是一个对象，而不是资源树数组。设备动作
+    的入参水合仍可在执行边界根据 UUID 取回完整资源树；返回完整树会令下游严格
+    JSON Schema 收到 ``[[resource]]``，从而把合法的单物料连接误判为数组。
+    """
+
+    resource_uuid = _stable_resource_uuid(resource).strip()
+    if not resource_uuid:
+        raise ValueError("物料占位符缺少稳定 UUID")
+    return {"uuid": resource_uuid}
 
 
 class TestLatencyReturn(TypedDict):
@@ -2672,7 +2678,7 @@ class HostNode(BaseROS2DeviceNode):
             site: 目标父物料中的库位（Site）名称；空串表示使用默认排布。
 
         Returns:
-            保留旧调用兼容的四键字典；物料和目标父物料仍用原扁平树形态返回，
+            返回四键字典；物料和目标父物料使用规范 ``ResourceSlot`` UUID 引用，
             ``site`` 回传库位名，``result`` 是底层转移结果的稳定字符串。
 
         Raises:

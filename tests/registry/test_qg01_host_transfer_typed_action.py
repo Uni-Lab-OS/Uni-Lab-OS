@@ -274,8 +274,8 @@ async def test_host_transfer_commits_edge_inventory_after_resource_tree_transfer
     assert result["result"] == "转运完成"
 
 
-def test_transfer_result_preserves_device_root_mapping_shape() -> None:
-    """设备型库位父资源必须保持物料占位符（ResourceSlot）的嵌套树形状。"""
+def test_transfer_result_projects_device_root_to_resource_slot_reference() -> None:
+    """设备型父资源也必须输出与合同一致的单 ResourceSlot UUID 对象。"""
 
     mount = {
         "uuid": "50000000-0000-4000-8000-000000000009",
@@ -283,4 +283,13 @@ def test_transfer_result_preserves_device_root_mapping_shape() -> None:
         "class": "community.szlab_poly_studio.szlab_mixer_pipetting_station",
     }
 
-    assert _dump_resource_slot(mount) == [[mount]]
+    assert _dump_resource_slot(mount) == {
+        "uuid": "50000000-0000-4000-8000-000000000009"
+    }
+
+
+def test_transfer_result_rejects_resource_without_stable_uuid() -> None:
+    """单 ResourceSlot 缺少稳定 UUID 时失败关闭，不回退为资源树数组。"""
+
+    with pytest.raises(ValueError, match="缺少稳定 UUID"):
+        _dump_resource_slot({"name": "unstable-resource"})
