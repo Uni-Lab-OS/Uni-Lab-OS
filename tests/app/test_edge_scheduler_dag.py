@@ -110,6 +110,64 @@ class TestAdvance:
         assert run.ready_nodes() == []
         assert run.node_state("A") is NodeState.FAILED
 
+    def test_finish_only_updates_direct_dependents(self):
+        class RejectUnrelatedDiscard(set):
+            def discard(self, value):
+                if value == "A":
+                    raise AssertionError("unrelated dependency set was scanned")
+                return super().discard(value)
+
+        spec = WorkflowSpec(
+            workflow_id="wf-independent-branches",
+            nodes=[_node("A"), _node("B"), _node("X"), _node("Y")],
+            edges=[_edge("A", "B"), _edge("X", "Y")],
+        )
+        run = WorkflowRun(spec)
+        run.mark_dispatched("A")
+        run.mark_dispatched("X")
+        run._pending_parents["Y"] = RejectUnrelatedDiscard({"X"})
+
+        run.mark_finished("A")
+
+        assert [node.id for node in run.ready_nodes()] == ["B"]
+
+    def test_ready_query_does_not_scan_unrelated_pending_nodes(self):
+        class RejectTruthiness(set):
+            def __bool__(self):
+                raise AssertionError("unrelated pending node was scanned")
+
+        spec = WorkflowSpec(
+            workflow_id="wf-ready-frontier",
+            nodes=[_node("A"), _node("B"), _node("X"), _node("Y")],
+            edges=[_edge("A", "B"), _edge("X", "Y")],
+        )
+        run = WorkflowRun(spec)
+        run.mark_dispatched("A")
+        run.mark_dispatched("X")
+        run.mark_finished("A")
+        run._pending_parents["Y"] = RejectTruthiness({"X"})
+
+        assert [node.id for node in run.ready_nodes()] == ["B"]
+
+    def test_finish_does_not_scan_all_node_states_for_terminal_status(self):
+        class RejectValuesScan(dict):
+            def values(self):
+                raise AssertionError("all node states were scanned")
+
+        run = WorkflowRun(
+            WorkflowSpec(
+                workflow_id="wf-terminal-count",
+                nodes=[_node("A"), _node("B")],
+                edges=[_edge("A", "B")],
+            )
+        )
+        run.mark_dispatched("A")
+        run._node_states = RejectValuesScan(run._node_states)
+
+        run.mark_finished("A")
+
+        assert run.state is WorkflowState.RUNNING
+
 
 class TestHandlePairFiltering:
     """Go buildNodeHandlePair 的过滤规则。"""

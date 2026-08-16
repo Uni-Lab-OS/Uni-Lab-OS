@@ -43,8 +43,14 @@ class WorkflowRun:
         )
 
         self._nodes: Dict[str, WorkflowNode] = {}
+        self._node_order: Dict[str, int] = {}
         # node_id -> 未完成父节点集合（Go d.dependencies 等价，入度表）
         self._pending_parents: Dict[str, Set[str]] = {}
+        # parent node_id -> direct child node ids.  Completion advances only this
+        # adjacency frontier instead of scanning every remaining dependency set.
+        self._children: Dict[str, Set[str]] = {}
+        # 当前入度为 0 且尚未下发的节点。ready_nodes 只读取这一增量前沿。
+        self._ready_candidates: Set[str] = set()
         # 已消费（已进入 ready 下发流程）的节点（Go d.consumedNode 等价）
         self._consumed: Set[str] = set()
         self._node_states: Dict[str, NodeState] = {}
@@ -53,6 +59,7 @@ class WorkflowRun:
         # node_id -> 执行返回值（Go nodeMap[..].ReturnInfo.ReturnValue 等价）
         self._ret_values: Dict[str, Any] = {}
         self._failed_nodes: Set[str] = set()
+        self._unfinished_count = 0
 
         self._build()
 
@@ -63,6 +70,7 @@ class WorkflowRun:
         for node in spec.nodes:
             if node.disabled:
                 continue
+            self._node_order[node.id] = len(self._node_order)
             self._nodes[node.id] = node
             self._node_states[node.id] = NodeState.PENDING
 
@@ -95,8 +103,6 @@ class WorkflowRun:
                     return by_key.get(handle_key)
             return None
 
-        children: Dict[str, List[str]] = {}
-
         for node_id in self._nodes:
             self._pending_parents[node_id] = set()
 
@@ -106,7 +112,7 @@ class WorkflowRun:
             if src not in self._nodes or dst not in self._nodes:
                 continue
             self._pending_parents[dst].add(src)
-            children.setdefault(src, []).append(dst)
+            self._children.setdefault(src, set()).add(dst)
 
             # 传参边过滤规则与 Go buildNodeHandlePair 一致
             source_handle = find_handle(edge.source_handle_uuid, src, edge.source_handle_key)
@@ -129,9 +135,15 @@ class WorkflowRun:
                 )
             )
 
-        self._detect_cycle(children)
+        self._detect_cycle(self._children)
+        self._ready_candidates = {
+            node_id
+            for node_id, parents in self._pending_parents.items()
+            if not parents
+        }
+        self._unfinished_count = len(self._nodes)
 
-    def _detect_cycle(self, children: Dict[str, List[str]]) -> None:
+    def _detect_cycle(self, children: Dict[str, Set[str]]) -> None:
         visited: Set[str] = set()
         rec_stack: Set[str] = set()
 
@@ -161,17 +173,17 @@ class WorkflowRun:
         if self.state is not WorkflowState.RUNNING:
             return []
         ready: List[WorkflowNode] = []
-        for node_id, parents in self._pending_parents.items():
-            if parents:
-                continue
-            if node_id in self._consumed:
-                continue
+        for node_id in sorted(
+            self._ready_candidates,
+            key=self._node_order.__getitem__,
+        ):
             ready.append(self._nodes[node_id])
             self._node_states[node_id] = NodeState.READY
         return ready
 
     def mark_dispatched(self, node_id: str) -> None:
         """节点已下发（Go canRunNodes 的 consumedNode 标记 + createJobs）。"""
+        self._ready_candidates.discard(node_id)
         self._consumed.add(node_id)
         self._node_states[node_id] = NodeState.DISPATCHED
 
@@ -179,12 +191,25 @@ class WorkflowRun:
         """节点成功完成：记录返回值并从依赖表中清除（Go clearFinishedNode）。"""
         if node_id not in self._nodes:
             return
+        previous_state = self._node_states[node_id]
+        self._ready_candidates.discard(node_id)
         self._consumed.add(node_id)
         self._ret_values[node_id] = ret_value
         self._node_states[node_id] = NodeState.SUCCESS
         self._pending_parents.pop(node_id, None)
-        for parents in self._pending_parents.values():
+        for child_id in self._children.get(node_id, set()):
+            parents = self._pending_parents.get(child_id)
+            if parents is None:
+                continue
             parents.discard(node_id)
+            if not parents and child_id not in self._consumed:
+                self._ready_candidates.add(child_id)
+        if previous_state not in (
+            NodeState.SUCCESS,
+            NodeState.FAILED,
+            NodeState.CANCELED,
+        ):
+            self._unfinished_count -= 1
         if self._is_all_done():
             self.state = WorkflowState.SUCCESS
 
@@ -192,22 +217,29 @@ class WorkflowRun:
         """节点失败：整个工作流失败（对齐 Go errChan → jobsCtxCancel 全停语义）。"""
         if node_id not in self._nodes:
             return
+        previous_state = self._node_states[node_id]
+        self._ready_candidates.discard(node_id)
         self._consumed.add(node_id)
         self._failed_nodes.add(node_id)
         self._node_states[node_id] = NodeState.FAILED
+        if previous_state not in (
+            NodeState.SUCCESS,
+            NodeState.FAILED,
+            NodeState.CANCELED,
+        ):
+            self._unfinished_count -= 1
         self.state = WorkflowState.FAILED
 
     def cancel(self) -> None:
         self.state = WorkflowState.CANCELED
+        self._ready_candidates.clear()
         for node_id, state in self._node_states.items():
             if state in (NodeState.PENDING, NodeState.READY, NodeState.DISPATCHED):
                 self._node_states[node_id] = NodeState.CANCELED
+        self._unfinished_count = 0
 
     def _is_all_done(self) -> bool:
-        return all(
-            state in (NodeState.SUCCESS, NodeState.FAILED, NodeState.CANCELED)
-            for state in self._node_states.values()
-        )
+        return self._unfinished_count == 0
 
     # ── 传参（Go parsePreNodeParam 等价） ─────────────────────
 
