@@ -359,14 +359,13 @@ def _validate_workflow_manifest(
         source_snapshot = validate_declared_sources(
             root_snapshot,
             package_id=manifest.package_id,
-            relative_paths=(
-                path
+            source_relative_paths=(
+                workflow.relative_path for workflow in manifest.workflows
+            ),
+            exact_graph_relative_paths=(
+                workflow.exact_graph_relative_path
                 for workflow in manifest.workflows
-                for path in (
-                    workflow.relative_path,
-                    workflow.exact_graph_relative_path,
-                )
-                if path is not None
+                if workflow.exact_graph_relative_path is not None
             ),
         )
     except (SourceManifestError, SourceWorkspaceError) as error:

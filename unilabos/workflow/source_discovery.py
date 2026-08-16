@@ -85,14 +85,13 @@ def discover_editable_sources(
             source_snapshot = validate_declared_sources(
                 snapshot,
                 package_id=manifest.package_id,
-                relative_paths=(
-                    path
+                source_relative_paths=(
+                    entry.relative_path for entry in manifest.workflows
+                ),
+                exact_graph_relative_paths=(
+                    entry.exact_graph_relative_path
                     for entry in manifest.workflows
-                    for path in (
-                        entry.relative_path,
-                        entry.exact_graph_relative_path,
-                    )
-                    if path is not None
+                    if entry.exact_graph_relative_path is not None
                 ),
             )
         except (SourceWorkspaceError, SourceManifestError) as error:

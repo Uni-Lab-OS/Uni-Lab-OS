@@ -8,6 +8,10 @@ from unilabos.workflow.source_discovery import (
     SourceDeclarationError,
     discover_editable_sources,
 )
+from unilabos.workflow.source_workspace import (
+    EXACT_GRAPH_BYTE_LIMIT,
+    WORKFLOW_SOURCE_BYTE_LIMIT,
+)
 
 
 def test_discovery_accepts_optional_closed_exact_graph_sidecar(tmp_path: Path) -> None:
@@ -33,6 +37,35 @@ def test_discovery_accepts_optional_closed_exact_graph_sidecar(tmp_path: Path) -
         "workflows/demo.exact.json"
     )
     assert len(plan.registrations[0].exact_graph_content_hash or "") == 71
+
+
+def test_discovery_applies_a_separate_bounded_exact_graph_budget(
+    tmp_path: Path,
+) -> None:
+    """Large exact DAGs do not weaken the smaller editable Python budget."""
+
+    selected_root = tmp_path / "selected"
+    workflows = selected_root / "demo" / "workflows"
+    workflows.mkdir(parents=True)
+    workflows.joinpath("demo.py").write_text("# source\n", encoding="utf-8")
+    exact_graph = workflows / "demo.exact.json"
+    exact_graph.write_bytes(b"x" * (WORKFLOW_SOURCE_BYTE_LIMIT + 1))
+    selected_root.joinpath("package.yaml").write_text(
+        "package: {name: demo}\n"
+        "workflows:\n"
+        "  - workflow_uuid: 11111111-1111-4111-8111-111111111111\n"
+        "    source: demo/workflows/demo.py\n"
+        "    exact_graph: demo/workflows/demo.exact.json\n",
+        encoding="utf-8",
+    )
+
+    plan = discover_editable_sources((selected_root,))
+
+    assert len(plan.registrations) == 1
+    exact_graph.write_bytes(b"x" * (EXACT_GRAPH_BYTE_LIMIT + 1))
+    with pytest.raises(SourceDeclarationError) as caught:
+        discover_editable_sources((selected_root,))
+    assert caught.value.code == "invalid_workflow_source"
 
 
 @pytest.mark.parametrize(

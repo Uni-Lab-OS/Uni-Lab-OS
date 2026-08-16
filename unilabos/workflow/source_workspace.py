@@ -72,6 +72,7 @@ from unilabos.workflow.source_workspace_errors import (
 
 MANIFEST_BYTE_LIMIT = 1024 * 1024
 WORKFLOW_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
+EXACT_GRAPH_BYTE_LIMIT = 32 * 1024 * 1024
 _DIRECTORY_FD_PATHS_SUPPORTED = all(
     operation in os.supports_dir_fd
     for operation in (os.open, os.stat, os.mkdir, os.unlink)
@@ -306,7 +307,7 @@ def read_declared_exact_graph(
     """安全读取 manifest 声明的 ``workflows/*.json`` 精确图 sidecar。
 
     参数：包目录、发现时固定的目录身份和包内 JSON 相对路径。
-    返回：受 8 MiB 预算约束的稳定文件字节。
+    返回：受 32 MiB 精确图预算约束的稳定文件字节。
     异常：路径、根身份、普通文件或读取稳定性不符合合同时抛
     ``SourceWorkspaceError``。
     """
@@ -329,7 +330,7 @@ def read_declared_exact_graph(
                 root,
                 relative,
                 expected_root_identity=package_root_identity,
-                byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+                byte_limit=EXACT_GRAPH_BYTE_LIMIT,
             )
         except StableFileAccessError:
             raise SourceWorkspaceError("invalid_input") from None
@@ -350,7 +351,7 @@ def read_declared_exact_graph(
             descriptor = os.open(filename, _file_flags(), dir_fd=parent_descriptor)
             return read_stable_descriptor(
                 descriptor,
-                byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+                byte_limit=EXACT_GRAPH_BYTE_LIMIT,
             ).content
         except (OSError, StableFileAccessError):
             raise SourceWorkspaceError("invalid_input") from None
@@ -548,13 +549,15 @@ def validate_declared_sources(
     root_snapshot: PackageRootSnapshot,
     *,
     package_id: str,
-    relative_paths: Iterable[str],
+    source_relative_paths: Iterable[str],
+    exact_graph_relative_paths: Iterable[str] = (),
 ) -> PackageSourceSnapshot:
     """校验 manifest 指向的实际 Python 包目录和已有源码。
 
     参数：``root_snapshot`` 是 manifest 读取时固定的授权目录身份；
-    ``package_id`` 是已验证的包目录名；``relative_paths`` 是规范
-    ``workflows/*.py`` 路径集合。
+    ``package_id`` 是已验证的包目录名；``source_relative_paths`` 是规范
+    ``workflows/*.py`` 路径集合；``exact_graph_relative_paths`` 是规范
+    ``workflows/*.json`` 精确图集合。
     返回：实际 Python 包目录路径及其设备/索引节点身份。
     异常：目录身份变化、符号链接、非普通文件、超限或非 UTF-8 时抛出
     ``SourceWorkspaceError``；缺失源码保持合法且不会被创建。
@@ -566,8 +569,16 @@ def validate_declared_sources(
                 root_snapshot.selected_root,
                 expected_selected_identity=root_snapshot.identity,
                 package_id=package_id,
-                relative_paths=relative_paths,
-                source_byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+                relative_path_limits=(
+                    *(
+                        (path, WORKFLOW_SOURCE_BYTE_LIMIT)
+                        for path in tuple(source_relative_paths)
+                    ),
+                    *(
+                        (path, EXACT_GRAPH_BYTE_LIMIT)
+                        for path in tuple(exact_graph_relative_paths)
+                    ),
+                ),
             )
         except StableFileAccessError as error:
             code = (
@@ -608,13 +619,23 @@ def validate_declared_sources(
             missing_ok=True,
         )
         if workflows_descriptor is not None:
-            for relative_path in tuple(relative_paths):
+            relative_path_limits = (
+                *(
+                    (path, WORKFLOW_SOURCE_BYTE_LIMIT)
+                    for path in tuple(source_relative_paths)
+                ),
+                *(
+                    (path, EXACT_GRAPH_BYTE_LIMIT)
+                    for path in tuple(exact_graph_relative_paths)
+                ),
+            )
+            for relative_path, byte_limit in relative_path_limits:
                 # 路径结构已由 manifest 模块验证；这里只用最终文件名做 dir_fd 读取。
                 filename = PurePosixPath(relative_path).name
                 source_bytes = _read_optional_regular_at(
                     workflows_descriptor,
                     filename,
-                    byte_limit=WORKFLOW_SOURCE_BYTE_LIMIT,
+                    byte_limit=byte_limit,
                     error_code="invalid_workflow_source",
                 )
                 if source_bytes is not None:
@@ -747,6 +768,7 @@ def _mtime_rfc3339(value: float) -> str:
 
 
 __all__ = [
+    "EXACT_GRAPH_BYTE_LIMIT",
     "MANIFEST_BYTE_LIMIT",
     "NO_EXPECTED_HASH",
     "WORKFLOW_SOURCE_BYTE_LIMIT",

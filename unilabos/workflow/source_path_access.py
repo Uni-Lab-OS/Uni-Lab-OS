@@ -152,15 +152,14 @@ def validate_declared_sources(
     *,
     expected_selected_identity: tuple[int, int],
     package_id: str,
-    relative_paths: Iterable[str],
-    source_byte_limit: int,
+    relative_path_limits: Iterable[tuple[str, int]],
 ) -> tuple[Path, tuple[int, int]]:
     """验证 manifest 声明的包目录与允许缺失的 Python 源码。
 
     参数：选择目录及身份固定授权根；``package_id`` 是直接子包；相对路径已经由
-    manifest 语法层验证；``source_byte_limit`` 是源码上限。返回：实际包路径和
-    身份。异常：目录竞态、符号链接、非法文件、超限或非 UTF-8 抛出
-    ``StableFileAccessError``。
+    manifest 语法层验证；``relative_path_limits`` 为每个 Python 源码或精确图
+    sidecar 分别携带字节上限。返回：实际包路径和身份。异常：目录竞态、符号
+    链接、非法文件、超限或非 UTF-8 抛出 ``StableFileAccessError``。
     """
 
     assert_directory_identity(selected_root, expected_selected_identity)
@@ -174,11 +173,11 @@ def validate_declared_sources(
             raise
         workflows_identity = None
     if workflows_identity is not None:
-        for relative_path in tuple(relative_paths):
+        for relative_path, byte_limit in tuple(relative_path_limits):
             filename = PurePosixPath(relative_path).name
             snapshot = read_regular_path(
                 workflows_root / filename,
-                byte_limit=source_byte_limit,
+                byte_limit=byte_limit,
                 missing_ok=True,
             )
             if snapshot is not None:
