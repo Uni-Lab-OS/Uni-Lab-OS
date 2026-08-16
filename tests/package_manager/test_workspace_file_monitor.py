@@ -123,6 +123,8 @@ def test_monitor_excludes_runtime_build_and_environment_outputs_but_keeps_assets
         workspace_root / "venv" / "installed.py",
         workspace_root / "build" / "package.whl",
         workspace_root / "dist" / "package.whl",
+        workspace_root / "e2e-artifacts" / "acceptance.png",
+        workspace_root / "migration" / "historical-source.yaml",
         workspace_root / "node_modules" / "index.js",
     )
     for ignored_file in ignored_files:

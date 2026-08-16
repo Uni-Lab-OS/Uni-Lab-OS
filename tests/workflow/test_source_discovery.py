@@ -38,7 +38,7 @@ def _write_editable_package(
     if create_sources:
         for _declared_workflow_uuid, declared_source in declared_entries:
             source_parts = Path(declared_source).parts
-            if len(source_parts) == 3 and source_parts[0] == package_id:
+            if len(source_parts) >= 3 and source_parts[0] == package_id:
                 source_path = selected_root.joinpath(*source_parts)
                 source_path.parent.mkdir(parents=True, exist_ok=True)
                 source_path.write_text(
@@ -117,17 +117,19 @@ def test_discovery_returns_only_sources_from_explicit_authorized_roots(
         "../demo_package/workflows/demo.py",
         "demo_package/../workflows/demo.py",
         r"demo_package\workflows\demo.py",
+        "demo_package/workflows//demo.py",
+        "demo_package/workflows/./demo.py",
+        "demo_package/workflows/operations/../demo.py",
         "other_package/workflows/demo.py",
-        "demo_package/workflows/nested/demo.py",
         "demo_package/demo.py",
         "demo_package/workflows/demo.txt",
     ),
 )
-def test_discovery_rejects_paths_outside_exact_package_workflow_shape(
+def test_discovery_rejects_paths_outside_package_workflow_tree(
     tmp_path: Path,
     declared_source: str,
 ) -> None:
-    """证明源码路径只能是当前包下的一层 ``workflows/*.py``。
+    """证明源码路径只能位于当前包的 ``workflows/**/*.py`` 树内。
 
     参数：``tmp_path`` 是隔离授权目录；``declared_source`` 是待拒绝路径。
     返回：无；测试断言路径错误稳定归类为工作流源码声明错误。
@@ -144,6 +146,27 @@ def test_discovery_rejects_paths_outside_exact_package_workflow_shape(
         discover_editable_sources((selected_root,))
 
     assert caught.value.code == "invalid_workflow_source"
+
+
+def test_discovery_accepts_nested_process_category_source(tmp_path: Path) -> None:
+    """证明工作流源码（Workflow Source）可保留多级工艺分类目录。"""
+
+    selected_root = tmp_path / "selected"
+    declared_source = "demo_package/workflows/operations/sampling/demo.py"
+    _write_editable_package(
+        selected_root,
+        entries=((WORKFLOW_UUID, declared_source),),
+    )
+
+    plan = discover_editable_sources((selected_root,))
+
+    assert len(plan.registrations) == 1
+    registration = plan.registrations[0]
+    assert registration.relative_path == "workflows/operations/sampling/demo.py"
+    assert registration.source_uri == (
+        "package://demo_package/workflows/operations/sampling/demo.py"
+    )
+    assert selected_root.joinpath(declared_source).is_file()
 
 
 @pytest.mark.parametrize(

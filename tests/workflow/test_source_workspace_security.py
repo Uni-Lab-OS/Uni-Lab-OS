@@ -264,6 +264,7 @@ def test_service_rejects_external_source_larger_than_eight_mib_without_event(
         relative_path="workflows/demo.py",
     )
     record_before = store.get_authoring_record(WORKFLOW_UUID)
+    events_before = service.list_events(after_id=0)["items"]
     source_path.parent.mkdir()
     source_path.write_bytes(b"x" * (SOURCE_BYTE_LIMIT + 1))
 
@@ -277,7 +278,7 @@ def test_service_rejects_external_source_larger_than_eight_mib_without_event(
 
     assert caught.value.code == "invalid_input"
     assert record_after == record_before
-    assert events_after == []
+    assert events_after == events_before
 
 
 def test_save_draft_rejects_oversized_source_before_replacing_file(
@@ -418,6 +419,7 @@ def test_service_rejects_a_source_that_changes_during_same_descriptor_read(
         relative_path="workflows/demo.py",
     )
     record_before = store.get_authoring_record(WORKFLOW_UUID)
+    events_before = service.list_events(after_id=0)["items"]
     original_read = os.read
     target_identity = (source_path.stat().st_dev, source_path.stat().st_ino)
     source_changed = False
@@ -453,4 +455,4 @@ def test_service_rejects_a_source_that_changes_during_same_descriptor_read(
     assert source_changed
     assert caught.value.code == "invalid_input"
     assert record_after == record_before
-    assert events_after == []
+    assert events_after == events_before

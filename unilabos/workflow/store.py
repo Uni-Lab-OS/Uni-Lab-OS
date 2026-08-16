@@ -2888,8 +2888,7 @@ class WorkflowStore:
             event="workflow.definition.changed",
             data={
                 "workflow_uuid": workflow_uuid,
-                "revision": revision,
-                "action": action,
+                "workflow_revision": revision,
             },
             now=now,
         )

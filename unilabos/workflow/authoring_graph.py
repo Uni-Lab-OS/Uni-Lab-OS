@@ -438,8 +438,10 @@ def build_candidate_graph(
     # disabled 的保存会被已应用图悄悄还原。
     for projected_node in projection.nodes:
         projected_uuid = str(projected_node.get("uuid"))
-        if projected_uuid in source_order:
-            projected_node["disabled"] = projected_uuid in disabled_node_uuids
+        if projected_uuid in disabled_node_uuids:
+            projected_node["disabled"] = True
+        elif projected_uuid in source_order and "disabled" in projected_node:
+            projected_node["disabled"] = False
 
     graph = {
         "workflow": workflow,

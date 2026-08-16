@@ -267,10 +267,10 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     ]
 
 
-def test_backend_launch_keeps_local_domain_store_across_process_generations(
+def test_backend_launch_rebuilds_local_domain_store_across_process_generations(
     workspace: Path,
 ) -> None:
-    """Backend crash recovery must not create a fresh Local Domain database."""
+    """微后端（Micro Backend）重启必须创建新的本地域运行态数据库。"""
 
     paths = WorkspacePaths.resolve(workspace)
     ensure_local_token(paths)
@@ -291,17 +291,17 @@ def test_backend_launch_keeps_local_domain_store_across_process_generations(
     expected_state = str(paths.runtime / "backend" / "local-domain")
     assert _argument_value(first.command, "--working_dir") == expected_state
     assert _argument_value(second.command, "--working_dir") == expected_state
-    assert "--preserve_runtime_databases" in first.command
-    assert "--preserve_runtime_databases" in second.command
+    assert "--preserve_runtime_databases" not in first.command
+    assert "--preserve_runtime_databases" not in second.command
     assert first.metadata["stateDirectory"] == expected_state
     assert second.metadata["stateDirectory"] == expected_state
     assert first.metadata["runtimeDirectory"] != second.metadata["runtimeDirectory"]
 
 
-def test_backend_launch_migrates_the_last_generation_into_stable_local_domain(
+def test_backend_launch_does_not_migrate_last_generation_databases(
     workspace: Path,
 ) -> None:
-    """The first split-runtime upgrade preserves the previous Backend facts."""
+    """微后端（Micro Backend）不继承上一运行代际的本地域数据库。"""
 
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()
@@ -336,14 +336,8 @@ def test_backend_launch_migrates_the_last_generation_into_stable_local_domain(
     )
 
     migrated = paths.runtime / "backend" / "local-domain" / "workflow_history.db"
-    connection = sqlite3.connect(migrated)
-    try:
-        assert connection.execute("SELECT value FROM acceptance").fetchone() == (
-            "preserved",
-        )
-    finally:
-        connection.close()
-    assert plan.metadata["legacyStateMigratedFrom"] == str(legacy)
+    assert not migrated.exists()
+    assert "legacyStateMigratedFrom" not in plan.metadata
 
 
 def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
@@ -379,7 +373,7 @@ def test_backend_authority_keeps_authoring_backend_and_routes_edge_remotely(
     # authority gate makes that local graph inaccessible until Local is chosen
     # again, so switching never requires replacing this process.
     assert _argument_value(backend.command, "--control_plane") == "local"
-    assert "--preserve_runtime_databases" in backend.command
+    assert "--preserve_runtime_databases" not in backend.command
     assert backend.metadata["stateDirectory"] == str(
         paths.runtime / "backend" / "local-domain"
     )

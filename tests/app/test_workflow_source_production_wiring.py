@@ -128,15 +128,15 @@ def test_main_rejects_a_non_tuple_config_allowlist() -> None:
         app_main.configure_workflow_editable_package_roots({})
 
 
-def test_real_web_server_passes_configured_roots_into_runtime(
+def test_real_web_server_fails_closed_without_template_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """真实 FastAPI 产品组合必须只激活 BasicConfig 显式授权来源。
+    """真实 FastAPI 产品组合缺少模板目录时不得发布可编辑源码权威。
 
     参数：``tmp_path`` 隔离产品数据库与包；``monkeypatch`` 固定配置和关闭本地
-    调度器适配器。返回：无；验证生产入口而非直接调用底层组合函数。
-    异常：产品入口未传递授权根或服务装配失败时测试失败。
+    调度器适配器。返回：无；验证源码已授权但没有模板编译器时关闭失败。
+    异常：产品入口错误发布不可编译的工作流权威时测试失败。
     """
 
     working_dir = tmp_path / "runtime"
@@ -177,10 +177,7 @@ def test_real_web_server_passes_configured_roots_into_runtime(
     _reload_server().setup_server()
     service = composition.get_workflow_service()
 
-    assert service is not None
-    assert [row["workflow_uuid"] for row in service.list_registered_sources()] == [
-        WORKFLOW_UUID
-    ]
+    assert service is None
 
 
 def test_real_web_server_rejects_invalid_root_shape_without_mounting_authority(
@@ -256,6 +253,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
         inventory_store: object,
         registry: object,
         scheduler: object,
+        material_shapes_by_template: object,
         editable_package_roots: tuple[str, ...],
         start_source_monitor: bool,
     ) -> tuple[object, object]:
@@ -271,6 +269,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
             inventory_store=inventory_store,
             registry=registry,
             scheduler=scheduler,
+            material_shapes_by_template=material_shapes_by_template,
             editable_package_roots=editable_package_roots,
             start_source_monitor=start_source_monitor,
         )
@@ -332,6 +331,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     assert captured["working_dir"] == runtime_directory
     assert captured["inventory_store"] is inventory_service.store
     assert captured["scheduler"] is edge_scheduler
+    assert captured["material_shapes_by_template"] == {}
     assert captured["editable_package_roots"] == configured_roots
     assert captured["start_source_monitor"] is True
 

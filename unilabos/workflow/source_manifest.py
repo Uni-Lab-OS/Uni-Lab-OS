@@ -193,7 +193,7 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     """校验一项工作流源码（Workflow Source）声明。
 
     参数：``raw`` 是单项 YAML 值；``package_id`` 是已验证的稳定包身份。
-    返回：规范 UUID 和 ``workflows/*.py`` 相对路径。
+    返回：规范 UUID 和 ``workflows/**/*.py`` 相对路径。
     异常：字段、UUID 或路径不符合合同时抛出 ``SourceManifestError``。
     """
 
@@ -213,7 +213,8 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     source_path = PurePosixPath(raw_source)
     if (
         source_path.is_absolute()
-        or len(source_path.parts) != 3
+        or raw_source != source_path.as_posix()
+        or len(source_path.parts) < 3
         or any(part in {"", ".", ".."} for part in source_path.parts)
         or source_path.parts[0] != package_id
         or source_path.parts[1] != "workflows"

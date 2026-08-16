@@ -45,11 +45,12 @@ def source_parent_descriptor(
     expected_root_identity: tuple[int, int],
     create: bool,
 ) -> Iterator[tuple[int, str] | None]:
-    """固定注册源码的直接父目录描述符。
+    """逐级固定注册源码的直接父目录描述符。
 
-    参数：根目录、规范相对路径和预期身份固定来源；``create`` 决定是否创建
-    ``workflows``。返回：父目录描述符与文件名或允许缺失；异常映射为稳定工作区
-    错误，退出总会关闭描述符。
+    参数：根目录、规范相对路径和预期身份固定来源；``create`` 决定是否逐级创建
+    ``workflows`` 及工艺分类目录。返回：父目录描述符与文件名或允许缺失；异常
+    映射为稳定工作区错误，退出总会关闭已打开的描述符。
+    安全：每一级目录均以 ``O_NOFOLLOW`` 相对前一级描述符打开，禁止链接逃逸。
     """
 
     root_descriptor = open_directory_chain(root, flags=directory_flags())
@@ -58,24 +59,30 @@ def source_parent_descriptor(
         metadata = os.fstat(root_descriptor)
         if (metadata.st_dev, metadata.st_ino) != expected_root_identity:
             raise SourceWorkspaceError("invalid_input")
-        try:
-            parent_descriptor = os.open(
-                relative.parts[0],
-                directory_flags(),
-                dir_fd=root_descriptor,
-            )
-        except FileNotFoundError:
-            if not create:
-                yield None
-                return
-            with suppress(FileExistsError):
-                os.mkdir(relative.parts[0], 0o755, dir_fd=root_descriptor)
-            parent_descriptor = os.open(
-                relative.parts[0],
-                directory_flags(),
-                dir_fd=root_descriptor,
-            )
-        yield parent_descriptor, relative.parts[1]
+        current_descriptor = root_descriptor
+        for directory_name in relative.parts[:-1]:
+            try:
+                next_descriptor = os.open(
+                    directory_name,
+                    directory_flags(),
+                    dir_fd=current_descriptor,
+                )
+            except FileNotFoundError:
+                if not create:
+                    yield None
+                    return
+                with suppress(FileExistsError):
+                    os.mkdir(directory_name, 0o755, dir_fd=current_descriptor)
+                next_descriptor = os.open(
+                    directory_name,
+                    directory_flags(),
+                    dir_fd=current_descriptor,
+                )
+            if parent_descriptor >= 0:
+                os.close(parent_descriptor)
+            parent_descriptor = next_descriptor
+            current_descriptor = parent_descriptor
+        yield parent_descriptor, relative.parts[-1]
     except SourceWorkspaceError:
         raise
     except OSError:

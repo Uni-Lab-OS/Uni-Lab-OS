@@ -79,6 +79,7 @@ from unilabos.workflow.store import (
     WorkflowStore,
     utc_now,
 )
+from unilabos.workflow.workspace_activation import WorkspaceActivationCoordinator
 from unilabos.workflow.task_input import (
     PreparedTaskInput,
     TaskInputError,
@@ -372,6 +373,9 @@ class WorkflowService:
         # ``_catalog_generation_tracker`` 隐藏本进程目录编译基线、变化判定和源码
         # 观测签名组合；工作流服务只在编译事务接缝提交已验证指纹。
         self._catalog_generation_tracker = CatalogAuthoringGenerationTracker()
+        # 普通交互应用保持依赖扇出刷新；启动固定点批次会只在单次调用期间关闭，
+        # 改由批次逐项按最新目录代际重编译，避免冷启动 O(n²) 放大。
+        self._refresh_catalog_dependents = True
 
     # 工作流（Workflow）与图（Graph） -------------------------------------
 
@@ -1455,37 +1459,50 @@ class WorkflowService:
         仍继续推进；未知基础设施异常原样传播，禁止静默发布损坏的工作区。
         """
 
-        self.recover_registered_sources(preserve_author_source=True)
-        registrations = self.list_registered_sources()
-        while True:
-            applied_in_pass = False
-            for registration in registrations:
-                workflow_uuid = str(registration["workflow_uuid"])
-                record = self._store.get_authoring_record(workflow_uuid)
-                candidate = record.get("candidate")
-                if not isinstance(candidate, dict):
-                    continue
-                candidate_hash = candidate.get("candidate_hash")
-                if not isinstance(candidate_hash, str) or not candidate_hash:
-                    raise WorkflowError("candidate_invalid")
-                try:
-                    result = self.apply_authoring(
-                        workflow_uuid,
-                        candidate_hash=candidate_hash,
-                        preserve_author_source=True,
-                    )
-                    self._require_workspace_activation_apply_complete(result)
-                except WorkflowError as error:
-                    if error.code not in _ISOLATED_WORKSPACE_ACTIVATION_ERRORS:
-                        raise
-                    self._record_workspace_activation_failure(
-                        workflow_uuid,
-                        error=error,
-                    )
-                    continue
-                applied_in_pass = True
-            if not applied_in_pass:
-                return
+        coordinator = WorkspaceActivationCoordinator(
+            recover_sources=partial(
+                self.recover_registered_sources,
+                preserve_author_source=True,
+            ),
+            list_registrations=self.list_registered_sources,
+            reconcile_source=partial(
+                self.reconcile_registered_source,
+                force_compile=True,
+                preserve_author_source=True,
+            ),
+            load_authoring_record=self._store.get_authoring_record,
+            apply_candidate=self._apply_workspace_activation_candidate,
+            require_apply_complete=self._require_workspace_activation_apply_complete,
+            record_isolated_failure=lambda workflow_uuid, error: (
+                self._record_workspace_activation_failure(
+                    workflow_uuid,
+                    error=error,
+                )
+            ),
+            public_error_type=WorkflowError,
+            public_error_code=lambda error: error.code,
+            isolated_error_codes=_ISOLATED_WORKSPACE_ACTIVATION_ERRORS,
+            error_factory=WorkflowError,
+        )
+        coordinator.activate_to_fixed_point()
+
+    def _apply_workspace_activation_candidate(
+        self,
+        workflow_uuid: str,
+        candidate_hash: str,
+    ) -> Mapping[str, Any]:
+        """应用单个启动候选，同时抑制逐项依赖扇出刷新。"""
+
+        previous_refresh_mode = self._refresh_catalog_dependents
+        self._refresh_catalog_dependents = False
+        try:
+            return self.apply_authoring(
+                workflow_uuid,
+                candidate_hash=candidate_hash,
+                preserve_author_source=True,
+            )
+        finally:
+            self._refresh_catalog_dependents = previous_refresh_mode
 
     def _require_workspace_activation_apply_complete(
         self,
@@ -1873,6 +1890,17 @@ class WorkflowService:
                     applied_graph=applied_graph,
                     draft_python_source=source["python_source"],
                 )
+                if (
+                    candidate is not None
+                    and candidate["changeset"]["kind"] == "source_only"
+                    and applied_source is not None
+                    and applied_source["workflow_revision"] == workflow["revision"]
+                    and applied_source["source_hash"] == source["draft_hash"]
+                ):
+                    # 目录换代后的强制编译若证明作者字节和应用图都未变化，
+                    # 该来源已经处于 applied；不要在固定点下一轮重新签发同一
+                    # source_only 候选并造成无穷发布循环。
+                    candidate = None
             if force_compile and actual_hash == record["observed_draft_hash"]:
                 # 同一源码代际只在进程内已知目录指纹变化时标记为目录变化；
                 # 冷启动没有旧代际证据，只能记录为恢复编译。
@@ -2277,17 +2305,18 @@ class WorkflowService:
                 },
                 "authoring": authoring,
             }
-        refresh_catalog_dependent_authoring(
-            registrations=self.list_registered_sources(),
-            load_authoring_record=self._store.get_authoring_record,
-            reconcile_source=partial(
-                self.reconcile_registered_source,
-                force_compile=True,
-                preserve_author_source=preserve_author_source,
-            ),
-            mutated_workflow_uuid=workflow_uuid,
-            warnings=warnings,
-        )
+        if self._refresh_catalog_dependents:
+            refresh_catalog_dependent_authoring(
+                registrations=self.list_registered_sources(),
+                load_authoring_record=self._store.get_authoring_record,
+                reconcile_source=partial(
+                    self.reconcile_registered_source,
+                    force_compile=True,
+                    preserve_author_source=preserve_author_source,
+                ),
+                mutated_workflow_uuid=workflow_uuid,
+                warnings=warnings,
+            )
         return result
 
     def list_events(

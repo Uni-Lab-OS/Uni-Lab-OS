@@ -43,8 +43,16 @@ def validate_registered_source(
     返回值；目录/目标竞态、符号链接或类型错误抛出 ``StableFileAccessError``。
     """
 
+    source_parent = _source_parent_path(
+        package_root,
+        relative_path,
+        expected_root_identity=expected_root_identity,
+        create=False,
+    )
+    if source_parent is None:
+        return
     regular_path_signature(
-        package_root / relative_path.as_posix(),
+        source_parent / relative_path.name,
         missing_ok=True,
     )
     assert_directory_identity(package_root, expected_root_identity)
@@ -64,8 +72,16 @@ def read_registered_source(
     ``StableFileAccessError``。
     """
 
+    source_parent = _source_parent_path(
+        package_root,
+        relative_path,
+        expected_root_identity=expected_root_identity,
+        create=False,
+    )
+    if source_parent is None:
+        return None
     snapshot = read_regular_path(
-        package_root / relative_path.as_posix(),
+        source_parent / relative_path.name,
         byte_limit=byte_limit,
         missing_ok=True,
     )
@@ -85,8 +101,16 @@ def registered_source_signature(
     不安全和身份变化时抛出 ``StableFileAccessError``。
     """
 
+    source_parent = _source_parent_path(
+        package_root,
+        relative_path,
+        expected_root_identity=expected_root_identity,
+        create=False,
+    )
+    if source_parent is None:
+        return ("missing",)
     signature = regular_path_signature(
-        package_root / relative_path.as_posix(),
+        source_parent / relative_path.name,
         missing_ok=True,
     )
     assert_directory_identity(package_root, expected_root_identity)
@@ -109,14 +133,16 @@ def publish_registered_source(
     和基础设施错误沿用下层分类。
     """
 
-    source_parent = ensure_child_directory(
+    source_parent = _source_parent_path(
         package_root,
+        relative_path,
         expected_root_identity=expected_root_identity,
-        child_name=relative_path.parts[0],
+        create=True,
     )
+    assert source_parent is not None
     atomic_publish_source(
         parent_path=source_parent,
-        target_name=relative_path.parts[1],
+        target_name=relative_path.name,
         content=content,
         byte_limit=byte_limit,
         expected_hash=expected_hash,
@@ -175,12 +201,16 @@ def validate_declared_sources(
         workflows_identity = None
     if workflows_identity is not None:
         for relative_path in tuple(relative_paths):
-            filename = PurePosixPath(relative_path).name
-            snapshot = read_regular_path(
-                workflows_root / filename,
-                byte_limit=source_byte_limit,
-                missing_ok=True,
-            )
+            normalized_relative = PurePosixPath(relative_path)
+            try:
+                snapshot = read_registered_source(
+                    package_root,
+                    normalized_relative,
+                    expected_root_identity=package_identity,
+                    byte_limit=source_byte_limit,
+                )
+            except StableFileAccessError:
+                raise StableFileAccessError("invalid_workflow_source") from None
             if snapshot is not None:
                 try:
                     snapshot.content.decode("utf-8")
@@ -190,6 +220,51 @@ def validate_declared_sources(
     assert_directory_identity(package_root, package_identity)
     assert_directory_identity(selected_root, expected_selected_identity)
     return package_root, package_identity
+
+
+def _source_parent_path(
+    package_root: Path,
+    relative_path: PurePosixPath,
+    *,
+    expected_root_identity: tuple[int, int],
+    create: bool,
+) -> Path | None:
+    """在无 ``dir_fd`` 平台逐级验证或创建源码父目录。
+
+    参数：``package_root`` 与其身份限定授权根；``relative_path`` 是已规范化源码
+    路径；``create`` 决定是否创建缺失的 ``workflows`` 与工艺分类目录。
+    返回：安全的直接父目录，允许缺失时返回 ``None``。
+    安全：每一级都复核目录身份且拒绝符号链接与 Windows 重解析点。
+    """
+
+    assert_directory_identity(package_root, expected_root_identity)
+    current = package_root
+    current_identity = expected_root_identity
+    for directory_name in relative_path.parts[:-1]:
+        if create:
+            child = ensure_child_directory(
+                current,
+                expected_root_identity=current_identity,
+                child_name=directory_name,
+            )
+        else:
+            child = current / directory_name
+            try:
+                child_identity = directory_identity(child)
+            except StableFileAccessError:
+                if child.exists() or child.is_symlink():
+                    raise
+                assert_directory_identity(current, current_identity)
+                assert_directory_identity(package_root, expected_root_identity)
+                return None
+            assert_directory_identity(current, current_identity)
+            current = child
+            current_identity = child_identity
+            continue
+        current = child
+        current_identity = directory_identity(current)
+    assert_directory_identity(package_root, expected_root_identity)
+    return current
 
 
 __all__ = [

@@ -162,6 +162,29 @@ def test_legacy_workflow_change_log_returns_explicit_current_snapshot(tmp_path):
     store.close()
 
 
+def test_workflow_definition_sse_invalidation_matches_backend_contract(tmp_path):
+    """定义变更通知只携带工作流身份与正式 Backend revision 字段。"""
+
+    client, store = _client(tmp_path)
+    created = client.post(
+        "/api/v1/workflows",
+        json={"name": "event contract", "tags": [], "meta_data": {}},
+    )
+    assert created.status_code == 201
+    workflow = created.json()["data"]
+
+    events = [
+        event
+        for event in store.list_events(after_sequence=0, limit=20)
+        if event["event"] == "workflow.definition.changed"
+    ]
+    assert events[-1]["data"] == {
+        "workflow_uuid": workflow["uuid"],
+        "workflow_revision": workflow["revision"],
+    }
+    store.close()
+
+
 def test_workflow_invalid_uuid_uses_backend_business_error(tmp_path):
     client, store = _client(tmp_path)
     response = client.get("/api/v1/workflows/not-a-uuid")

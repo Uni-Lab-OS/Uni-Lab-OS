@@ -29,6 +29,8 @@ _IGNORED_DIRECTORIES = frozenset(
         "__pycache__",
         "build",
         "dist",
+        "e2e-artifacts",
+        "migration",
         "node_modules",
         "unilabos_data",
         "venv",
