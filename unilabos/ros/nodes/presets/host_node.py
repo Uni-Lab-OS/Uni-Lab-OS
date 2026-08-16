@@ -152,12 +152,10 @@ class TransferManualReturn(TypedDict):
     site: str
 
 
-def _dump_resource_slot(resource: Any) -> List[List[ResourceDictType]]:
-    """序列化 PLR 物料或设备型父资源原始映射。"""
+def _dump_resource_slot(resource: Any) -> Dict[str, str]:
+    """把已水合物料序列化为规范 ResourceSlot 单对象引用。"""
 
-    if isinstance(resource, dict):
-        return [[dict(resource)]]
-    return ResourceTreeSet.from_plr_resources([resource]).dump()
+    return {"uuid": _stable_resource_uuid(resource)}
 
 
 class TestLatencyReturn(TypedDict):
@@ -2672,8 +2670,9 @@ class HostNode(BaseROS2DeviceNode):
             site: 目标父物料中的库位（Site）名称；空串表示使用默认排布。
 
         Returns:
-            保留旧调用兼容的四键字典；物料和目标父物料仍用原扁平树形态返回，
-            ``site`` 回传库位名，``result`` 是底层转移结果的稳定字符串。
+            保留四键字典；物料和目标父物料均用规范 ``{"uuid": ...}``
+            ResourceSlot 单对象引用返回，``site`` 回传库位名，``result`` 是底层
+            转移结果的稳定字符串。
 
         Raises:
             ValueError: 待转移物料或目标父物料缺失，或底层转移拒绝时抛出。
@@ -2738,8 +2737,9 @@ class HostNode(BaseROS2DeviceNode):
                 _ordering 换算成 spot）；不传则由父级默认排布。
 
         Returns:
-            原有四键运行结果字典；静态类型化动作（Typed Action）合同把两个物料
-            字段发布为物料占位符（ResourceSlot），供下游工作流节点继续连接。
+            四键运行结果字典；两个物料字段按规范单对象引用返回。静态类型化动作
+            （Typed Action）合同把它们发布为物料占位符（ResourceSlot），供下游
+            工作流节点继续连接。
 
         Raises:
             ValueError: 必需物料缺失或转移执行失败时由既有执行核心抛出。

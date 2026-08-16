@@ -390,6 +390,58 @@ def test_production_projection_resolves_exact_local_runtime_resource(
     assert node._convert_resources_sync(backend_uuid) == [local_resource]
 
 
+def test_async_production_projection_resolves_exact_local_runtime_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """异步动作也必须把 Backend UUID 映射回唯一的本地运行时实例。"""
+
+    local_uuid = "50000000-0000-4000-8000-000000000133"
+    backend_uuid = "50000000-0000-4000-8000-000000000134"
+    projected = SimpleNamespace(
+        unilabos_uuid=backend_uuid,
+        unilabos_extra={PRODUCTION_SOURCE_RUNTIME_UUID_EXTRA: local_uuid},
+        children=[],
+    )
+    local_resource = SimpleNamespace(unilabos_uuid=local_uuid, children=[])
+    tree_set = SimpleNamespace(
+        trees=[SimpleNamespace(root_node=SimpleNamespace(res_content=projected))],
+        to_plr_resources=lambda: [projected],
+    )
+
+    monkeypatch.setattr(base_device_node.BasicConfig, "control_plane", "backend")
+    monkeypatch.setattr(base_device_node.BasicConfig, "process_role", "edge_runtime")
+    monkeypatch.setattr(
+        base_device_node,
+        "query_production_resource_nodes_sync",
+        lambda _uuids: [{"uuid": backend_uuid, "parent_uuid": None}],
+    )
+    monkeypatch.setattr(
+        base_device_node.ResourceTreeSet,
+        "from_raw_dict_list",
+        lambda _rows: tree_set,
+    )
+
+    class _RuntimeTracker:
+        resources = [local_resource]
+
+        def figure_resource(self, _resource: object, try_mode: bool) -> list[object]:
+            assert try_mode is True
+            return []
+
+        def loop_find_with_uuid(self, root: object, wanted: str) -> object | None:
+            if root is local_resource and wanted == local_uuid:
+                return local_resource
+            return None
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node.resource_tracker = _RuntimeTracker()
+    node.lab_logger = lambda: _Logger()
+
+    assert asyncio.run(node._convert_resource_async({"uuid": backend_uuid})) is (
+        local_resource
+    )
+
+
 def test_managed_local_edge_uses_backend_material_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

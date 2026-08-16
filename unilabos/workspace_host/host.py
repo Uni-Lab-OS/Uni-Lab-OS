@@ -1182,10 +1182,23 @@ class WorkspaceHost:
             from .release_publish import create_existing_backend_publisher
 
             staged_authority: dict[str, object] | None = None
+            managed_edge_staged_before_reset = False
 
             def stage_device_authority() -> None:
-                nonlocal staged_authority
+                nonlocal staged_authority, managed_edge_staged_before_reset
                 if staged_authority is not None:
+                    # ``resetTarget`` deletes and recreates every Backend
+                    # Material after the activation preflight.  A managed Edge
+                    # that stays connected keeps capabilities bound to the
+                    # deleted device UUIDs, so Backend rejects the recreated
+                    # workflow nodes as undeclared actions.  Reconnect after
+                    # material import and before workflow import to resolve the
+                    # new stable-barcode identities and register capabilities
+                    # against the current devices.
+                    if managed_edge_staged_before_reset:
+                        self._stop_component("edge")
+                        self._start_edge()
+                        managed_edge_staged_before_reset = False
                     return
                 staged_authority = self._switch_authority(
                     {
@@ -1225,6 +1238,7 @@ class WorkspaceHost:
                     prepared_release = publisher.build()
                     if activate:
                         stage_device_authority()
+                        managed_edge_staged_before_reset = edge_ready
                     from .release_publish import ExistingBackendDeploymentTarget
 
                     ExistingBackendDeploymentTarget(
