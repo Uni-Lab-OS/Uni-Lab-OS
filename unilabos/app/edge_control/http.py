@@ -123,6 +123,50 @@ class EdgeDataPlane:
             },
         )
 
+    def commit_device_properties(
+        self,
+        material_uuid: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """向正式后端（Backend）形状的数据面提交设备属性批次。
+
+        参数：``material_uuid`` 是设备物料身份，``payload`` 是严格属性快照批次。
+        返回：包含 ``through_sequence`` 与 ``accepted_ref`` 的提交回执。异常：HTTP
+        或业务拒绝统一抛出 ``EdgeProtocolHTTPError``。
+        """
+
+        return self._request(
+            "POST",
+            f"{self.backend_api}/edge/devices/{material_uuid}/telemetry/properties",
+            span_name="edge.http.device.telemetry.properties.commit",
+            http_route=(
+                "/api/v1/edge/devices/:material_uuid/telemetry/properties"
+            ),
+            json=payload,
+        )
+
+    def commit_joint_states(
+        self,
+        material_uuid: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """向正式后端（Backend）形状的数据面提交关节状态批次。
+
+        参数：``material_uuid`` 是设备物料身份，``payload`` 是严格关节状态批次。
+        返回：包含 ``through_sequence`` 与 ``accepted_ref`` 的提交回执。异常：HTTP
+        或业务拒绝统一抛出 ``EdgeProtocolHTTPError``。
+        """
+
+        return self._request(
+            "POST",
+            f"{self.backend_api}/edge/devices/{material_uuid}/telemetry/joint-states",
+            span_name="edge.http.device.telemetry.joint_states.commit",
+            http_route=(
+                "/api/v1/edge/devices/:material_uuid/telemetry/joint-states"
+            ),
+            json=payload,
+        )
+
     def commit_outcome(
         self,
         job: StoredJob,

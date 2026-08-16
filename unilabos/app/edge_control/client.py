@@ -29,6 +29,7 @@ from unilabos.app.edge_control.http import (
     websocket_url,
 )
 from unilabos.app.edge_control.store import EdgeControlStore, StoredEvent, StoredJob
+from unilabos.app.edge_control.telemetry_publisher import DeviceTelemetryPublisher
 from unilabos.config.config import BasicConfig, EdgeControlConfig, HTTPConfig
 from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 from unilabos.utils.log import get_comm_logger
@@ -126,6 +127,7 @@ class EdgeControlSettings:
     reconnect_interval: float
     request_timeout: float
     event_retry_interval: float
+    device_telemetry_enabled: bool = False
 
     @classmethod
     def from_config(cls) -> "EdgeControlSettings":
@@ -155,6 +157,9 @@ class EdgeControlSettings:
             reconnect_interval=float(EdgeControlConfig.reconnect_interval),
             request_timeout=float(EdgeControlConfig.request_timeout),
             event_retry_interval=float(EdgeControlConfig.event_retry_interval),
+            # 新设备遥测合同先只由本地后端（Local Backend）实现；正式后端
+            # 接入同一合同前关闭发送，避免未知 HTTP 路由或 WS 事件断开会话。
+            device_telemetry_enabled=BasicConfig.control_plane == "local",
         )
 
 
@@ -218,6 +223,13 @@ class EdgeControlClient(BaseCommunicationClient):
         self._active_jobs_lock = threading.RLock()
         self._terminal_jobs: Set[str] = set()
         self._tasks: Set[asyncio.Task[Any]] = set()
+        self._registered_devices: List[Dict[str, Any]] = []
+        self._telemetry_publisher = DeviceTelemetryPublisher(
+            self.store,
+            self.data_plane,
+            enabled=self.settings.device_telemetry_enabled,
+            retry_interval=self.settings.event_retry_interval,
+        )
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -298,8 +310,66 @@ class EdgeControlClient(BaseCommunicationClient):
     def publish_device_status(
         self, device_status: dict, device_id: str, property_name: str
     ) -> None:
-        # 设备属性属于事实数据，不通过生产 WebSocket 控制面传播。
-        return
+        """把 HostNode 的通用属性 latest 提交到设备遥测数据面。
+
+        参数：完整状态表、发生变化的设备与属性名。返回：无。异常：非法设备值被
+        记录但不打断 ROS 回调线程；正式后端门禁关闭时为空操作。
+        """
+
+        del property_name
+        try:
+            host_node = self._host_node_provider()
+            timestamps = getattr(host_node, "device_status_timestamps", {})
+            properties = device_status.get(device_id, {})
+            property_times = (
+                timestamps.get(device_id, {})
+                if isinstance(timestamps, Mapping)
+                else {}
+            )
+            if self._telemetry_publisher.submit_properties(
+                device_id,
+                properties if isinstance(properties, Mapping) else {},
+                property_times if isinstance(property_times, Mapping) else {},
+            ):
+                self._schedule(self._telemetry_publisher.drain())
+        except Exception as error:  # noqa: BLE001 - 设备回调线程不能被遥测拖垮
+            logger.warning(
+                f"[EdgeControl] 收集设备属性失败 {device_id}: {error}"
+            )
+
+    def publish_joint_state(
+        self,
+        device_id: str,
+        joint_states: Mapping[str, Any],
+        *,
+        boot_id: str,
+        sequence: int,
+        observed_epoch_s: float,
+        topology_digest: str,
+        stale_after_s: float = 2.0,
+    ) -> None:
+        """接收关节状态投影器（JointStateProjector）的完整设备帧。
+
+        参数：设备身份、关节位置、运行代际、帧序列、观测时间、拓扑摘要和
+        TTL。返回：无。异常：非法帧被记录，不影响关节状态投影器
+        （JointStateProjector）的其他消费者。
+        """
+
+        try:
+            if self._telemetry_publisher.submit_joint_states(
+                device_id,
+                joint_states,
+                boot_id=boot_id,
+                sequence=sequence,
+                observed_epoch_s=observed_epoch_s,
+                topology_digest=topology_digest,
+                stale_after_s=stale_after_s,
+            ):
+                self._schedule(self._telemetry_publisher.drain())
+        except Exception as error:  # noqa: BLE001 - 投影失败不得打断 ROS 回调
+            logger.warning(
+                f"[EdgeControl] 收集机械臂关节状态失败 {device_id}: {error}"
+            )
 
     def send_ping(self, ping_id: str, timestamp: float) -> None:
         # 生产控制面的 ping 由后端发起，Edge 只回复 pong。
@@ -335,6 +405,9 @@ class EdgeControlClient(BaseCommunicationClient):
                         "[EdgeControl] Backend Authority 身份已变化，"
                         "已清理上一 Authority 的命令、任务与事件恢复状态"
                     )
+                self._telemetry_publisher.bind_devices(self._registered_devices)
+                self._seed_device_properties()
+                await self._telemetry_publisher.drain()
                 self._edge_uuid = registered_edge_uuid
                 self._session_uuid = str(registration["session_uuid"])
                 await self._connect_once()
@@ -362,6 +435,7 @@ class EdgeControlClient(BaseCommunicationClient):
         )
         if not registration.get("edge_uuid") or not registration.get("session_uuid"):
             raise ValueError("Edge registration response is missing identity")
+        self._registered_devices = copy.deepcopy(devices)
         logger.info(
             f"[EdgeControl] 已注册生产控制面，Edge={str(registration['edge_uuid'])[:8]}，"
             f"设备数={len(devices)}"
@@ -502,6 +576,7 @@ class EdgeControlClient(BaseCommunicationClient):
 
     async def _event_sender(self, websocket: Any) -> None:
         while not self._stopping.is_set():
+            await self._telemetry_publisher.drain()
             retry_before = time.time() - max(self.settings.event_retry_interval, 0.1)
             events = self.store.pending_events(retry_before)
             for event in events:
@@ -526,6 +601,38 @@ class EdgeControlClient(BaseCommunicationClient):
                     )
                     self.store.mark_event_sent(event.event_uuid)
             await asyncio.sleep(0.2)
+
+    def _seed_device_properties(self) -> None:
+        """注册或重连后主动重发 HostNode 当前属性，恢复稳定但不再变化的值。
+
+        参数：无。返回：无。异常：单个设备错误被隔离并记录。
+        """
+
+        if not self._telemetry_publisher.enabled:
+            return
+        host_node = self._host_node_provider()
+        status = getattr(host_node, "device_status", {})
+        timestamps = getattr(host_node, "device_status_timestamps", {})
+        if not isinstance(status, Mapping):
+            return
+        for device_id, properties in status.items():
+            if not isinstance(properties, Mapping) or not properties:
+                continue
+            property_times = (
+                timestamps.get(device_id, {})
+                if isinstance(timestamps, Mapping)
+                else {}
+            )
+            try:
+                self._telemetry_publisher.submit_properties(
+                    str(device_id),
+                    properties,
+                    property_times if isinstance(property_times, Mapping) else {},
+                )
+            except Exception as error:  # noqa: BLE001 - 其他设备仍应恢复
+                logger.warning(
+                    f"[EdgeControl] 恢复设备属性失败 {device_id}: {error}"
+                )
 
     async def _handle_envelope(self, envelope: Dict[str, Any]) -> None:
         message_type = str(envelope.get("type") or "")

@@ -49,6 +49,7 @@ from unilabos.app.scheduler.dispatch import (
 )
 from unilabos.app.scheduler.estimation import DurationEstimator
 from unilabos.app.scheduler.inventory.domain import InsufficientStock, InventoryError
+from unilabos.app.scheduler.manual_exclusive import ManualExclusiveGate
 from unilabos.app.scheduler.models import (
     DispatchedJob,
     ReadyTask,
@@ -151,6 +152,11 @@ class EdgeScheduler:
         )
         # 实时锁视图提供者（微后端 busy_device_action_keys），可选
         self._busy_key_provider = busy_key_provider
+        self._manual_exclusive_gate = ManualExclusiveGate(
+            lock=self._lock,
+            runtime_busy_keys=self._runtime_busy_keys,
+            reschedule_locked=self._reschedule_locked,
+        )
         # 工作流终态通知（success/failed/canceled 各通知一次；锁外触发）
         self._workflow_state_listener = workflow_state_listener
         self._notified_workflows: Set[str] = set()
@@ -192,6 +198,16 @@ class EdgeScheduler:
         """
 
         return self._inventory
+
+    @property
+    def manual_exclusive_gate(self) -> ManualExclusiveGate:
+        """返回当前运行 epoch 唯一的手动独占（Exclusive）准入门禁。
+
+        参数：无。返回：与本调度器共享重排锁的同一门禁实例。异常：无；调用方
+        不得替换实例或把状态持久化为作业执行占用（JobExecutionClaim）。
+        """
+
+        return self._manual_exclusive_gate
 
     def _emit_monitor(
         self, channel: str, event_type: str, data: Dict[str, Any]
@@ -1174,6 +1190,15 @@ class EdgeScheduler:
         return keys
 
     def _busy_keys(self) -> Set[str]:
+        """合并作业占用与手动独占（Exclusive）的设备忙碌键。
+
+        参数：无。返回：供一次准入重排使用的完整忙碌键副本。异常：底层作业
+        占用查询沿用 ``_runtime_busy_keys`` 的安全降级；手动独占读取不抛错。
+        """
+
+        return self._runtime_busy_keys() | self._manual_exclusive_gate.busy_keys()
+
+    def _runtime_busy_keys(self) -> Set[str]:
         """合并外部与本地在途作业的动作级、设备级内存忙碌键。
 
         参数：无；外部键来自构造注入集合和可选实时提供者。

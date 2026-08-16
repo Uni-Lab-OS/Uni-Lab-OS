@@ -34,6 +34,7 @@ resource_contract_routes_mounted = False
 workspace_material_asset_routes_mounted = False
 workspace_authoring_routes_mounted = False
 local_edge_control_routes_mounted = False
+kinematic_model_routes_mounted = False
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -98,6 +99,7 @@ def setup_server() -> FastAPI:
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
     global workspace_material_asset_routes_mounted
     global local_edge_control_routes_mounted, workspace_authoring_routes_mounted
+    global kinematic_model_routes_mounted
     from unilabos.app.control_plane import (
         should_mount_embedded_scheduler_routes,
         should_mount_workspace_authoring_routes,
@@ -118,6 +120,14 @@ def setup_server() -> FastAPI:
 
     # 设置API路由
     setup_api_routes(app)
+
+    if not kinematic_model_routes_mounted:
+        from unilabos.app.web.kinematic_model_api import (
+            create_kinematic_model_router,
+        )
+
+        app.include_router(create_kinematic_model_router())
+        kinematic_model_routes_mounted = True
 
     if (
         workspace_authoring_enabled
@@ -287,12 +297,31 @@ def setup_server() -> FastAPI:
                     LocalEdgeControlAuthority,
                     create_local_edge_control_router,
                 )
+                from unilabos.app.edge_control.device_telemetry_api import (
+                    create_device_telemetry_router,
+                )
+                from unilabos.app.edge_control.manual_exclusive_api import (
+                    create_manual_exclusive_router,
+                )
 
-                if isinstance(edge_backend, LocalEdgeControlAuthority):
+                edge_scheduler = get_edge_scheduler()
+                if (
+                    isinstance(edge_backend, LocalEdgeControlAuthority)
+                    and edge_scheduler is not None
+                ):
                     app.include_router(
                         create_local_edge_control_router(edge_backend)
                     )
-                    local_edge_control_routes_mounted = True
+                    app.include_router(
+                        create_device_telemetry_router(edge_backend)
+                    )
+                    app.include_router(
+                        create_manual_exclusive_router(
+                            edge_scheduler.manual_exclusive_gate,
+                            edge_backend.store.has_local_device,
+                        )
+                    )
+                local_edge_control_routes_mounted = True
         except Exception as e:  # noqa: BLE001 - 调度器路由失败不影响设备诊断
             error(f"[Web] 挂载本地调试 Scheduler 路由失败: {str(e)}")
 

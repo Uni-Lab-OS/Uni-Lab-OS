@@ -126,10 +126,11 @@ def test_http_websocket_round_trip_projects_one_terminal_outcome(
         with client.websocket_connect(
             "/api/v1/edge/ws", headers=authorization
         ) as websocket:
+            hello_uuid = str(uuid.uuid4())
             websocket.send_json(
                 {
                     "protocol_version": 1,
-                    "message_uuid": str(uuid.uuid4()),
+                    "message_uuid": hello_uuid,
                     "sequence": 0,
                     "type": "hello",
                     "sent_at": "2026-08-13T00:00:00.000000Z",
@@ -141,6 +142,9 @@ def test_http_websocket_round_trip_projects_one_terminal_outcome(
                     },
                 }
             )
+            assert websocket.receive_json()["payload"] == {
+                "event_uuid": hello_uuid
+            }
             command = websocket.receive_json()
             assert command["type"] == "job.start"
             command_payload = command["payload"]

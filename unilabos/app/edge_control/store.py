@@ -49,6 +49,18 @@ class StoredOutcome:
     unknown_command_ids: List[str]
 
 
+@dataclass(frozen=True)
+class StoredTelemetry:
+    """等待 HTTP 提交的合并设备遥测事实。"""
+
+    material_uuid: str
+    local_device_id: str
+    telemetry_type: str
+    boot_id: str
+    sequence: int
+    payload: Dict[str, Any]
+
+
 class EdgeControlStore:
     """线程安全的 SQLite Command/Outbox 存储。"""
 
@@ -115,6 +127,16 @@ class EdgeControlStore:
                     error_info_json TEXT NOT NULL,
                     unknown_command_ids_json TEXT NOT NULL DEFAULT '[]',
                     updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS edge_telemetry_pending (
+                    local_device_id TEXT NOT NULL,
+                    telemetry_type TEXT NOT NULL,
+                    material_uuid TEXT NOT NULL,
+                    boot_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(local_device_id, telemetry_type)
                 );
                 """
             )
@@ -215,6 +237,7 @@ class EdgeControlStore:
                 raise
 
     def _clear_transient_state_locked(self) -> None:
+        self._connection.execute("DELETE FROM edge_telemetry_pending")
         self._connection.execute("DELETE FROM edge_job_outcome_pending")
         self._connection.execute("DELETE FROM edge_job_runtime")
         self._connection.execute("DELETE FROM edge_event_outbox")
@@ -374,6 +397,129 @@ class EdgeControlStore:
             )
             self._connection.commit()
         return event_uuid
+
+    def save_telemetry(
+        self,
+        *,
+        material_uuid: str,
+        local_device_id: str,
+        telemetry_type: str,
+        boot_id: str,
+        sequence: int,
+        payload: Dict[str, Any],
+    ) -> None:
+        """持久合并一个尚未完成 HTTP→短通知交接的遥测快照。
+
+        参数：设备绑定（EdgeDeviceBinding）、类型、运行代际、序列与完整 HTTP
+        请求体。返回：无。异常：数据库错误原样传播；同设备同类型只保留 latest。
+        """
+
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO edge_telemetry_pending(
+                    local_device_id,telemetry_type,material_uuid,boot_id,
+                    sequence,payload_json,updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(local_device_id,telemetry_type) DO UPDATE SET
+                    material_uuid=excluded.material_uuid,
+                    boot_id=excluded.boot_id,
+                    sequence=excluded.sequence,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    local_device_id,
+                    telemetry_type,
+                    str(uuid.UUID(material_uuid)),
+                    boot_id,
+                    int(sequence),
+                    encoded,
+                    time.time(),
+                ),
+            )
+            self._connection.commit()
+
+    def pending_telemetry(self, limit: int = 100) -> List[StoredTelemetry]:
+        """读取等待提交的合并设备遥测。
+
+        参数：``limit`` 是单轮上限。返回：按更新时间排序的脱离对象。异常：损坏
+        JSON 或数据库错误原样传播。
+        """
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT material_uuid,local_device_id,telemetry_type,boot_id,
+                       sequence,payload_json
+                FROM edge_telemetry_pending ORDER BY updated_at LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [
+            StoredTelemetry(
+                material_uuid=str(row["material_uuid"]),
+                local_device_id=str(row["local_device_id"]),
+                telemetry_type=str(row["telemetry_type"]),
+                boot_id=str(row["boot_id"]),
+                sequence=int(row["sequence"]),
+                payload=json.loads(str(row["payload_json"])),
+            )
+            for row in rows
+        ]
+
+    def complete_telemetry(
+        self,
+        telemetry: StoredTelemetry,
+        notification: Dict[str, Any],
+    ) -> str:
+        """原子写入持久事件 outbox 并移除仍匹配的 HTTP 待提交项。
+
+        参数：本次已提交事实和服务端回执派生的最小通知。返回：新事件 UUID。
+        异常：数据库错误回滚；并发到达的新 latest 不会被旧完成操作删除。
+        """
+
+        event_uuid = str(uuid.uuid4())
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute(
+                    """
+                    INSERT INTO edge_event_outbox(
+                        event_uuid,type,payload_json,created_at,
+                        traceparent,tracestate
+                    ) VALUES (?, 'device.telemetry_committed', ?, ?, '', '')
+                    """,
+                    (
+                        event_uuid,
+                        json.dumps(
+                            notification,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        _utc_now(),
+                    ),
+                )
+                self._connection.execute(
+                    """
+                    DELETE FROM edge_telemetry_pending
+                    WHERE local_device_id=? AND telemetry_type=?
+                      AND material_uuid=? AND boot_id=? AND sequence=?
+                    """,
+                    (
+                        telemetry.local_device_id,
+                        telemetry.telemetry_type,
+                        telemetry.material_uuid,
+                        telemetry.boot_id,
+                        telemetry.sequence,
+                    ),
+                )
+                self._connection.commit()
+                return event_uuid
+            except BaseException:
+                self._connection.rollback()
+                raise
 
     def pending_events(self, retry_before: float, limit: int = 100) -> List[StoredEvent]:
         with self._lock:

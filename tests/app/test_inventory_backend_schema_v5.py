@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from unilabos.app.scheduler.inventory import store as store_module
-from unilabos.app.scheduler.inventory.store import InventoryStore
+from unilabos.app.scheduler.inventory.store import SCHEMA_VERSION, InventoryStore
 
 
 def _create_v4_database(path: str) -> None:
@@ -72,7 +72,7 @@ def test_v4_migrates_to_backend_tables_without_losing_edge_inventory(tmp_path):
     _create_v4_database(str(database))
 
     store = InventoryStore(str(database))
-    assert store.query_one("PRAGMA user_version")["user_version"] == 5
+    assert store.query_one("PRAGMA user_version")["user_version"] == SCHEMA_VERSION
 
     table_names = {
         row["name"]

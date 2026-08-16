@@ -46,8 +46,6 @@ from unilabos.utils.type_check import NoAliasDumper
 api = APIRouter()
 admin = APIRouter()
 
-# 存储所有活动的WebSocket连接
-active_connections: set[WebSocket] = set()
 # 存储注册表编辑器的WebSocket连接
 registry_editor_connections: set[WebSocket] = set()
 # 存储状态页面的WebSocket连接
@@ -91,34 +89,6 @@ def compute_host_node_diff(current: dict, previous: dict) -> dict:
         diff["device_status_timestamps"] = current.get("device_status_timestamps", {})
 
     return diff
-
-
-async def broadcast_device_status():
-    """广播设备状态到所有连接的客户端"""
-    while True:
-        try:
-            # 获取最新的设备状态
-            host_info = get_host_node_info()
-            if host_info["available"]:
-                # 准备要发送的数据
-                status_data = {
-                    "type": "device_status",
-                    "data": {
-                        "device_status": host_info["device_status"],
-                        "device_status_timestamps": host_info["device_status_timestamps"],
-                    },
-                }
-                # 发送到所有连接的客户端
-                for connection in active_connections:
-                    try:
-                        await connection.send_json(status_data)
-                    except Exception as e:
-                        print(f"Error sending to client: {e}")
-                        active_connections.remove(connection)
-            await asyncio.sleep(1)  # 每秒更新一次
-        except Exception as e:
-            print(f"Error in broadcast: {e}")
-            await asyncio.sleep(1)
 
 
 async def broadcast_status_page_data():
@@ -250,38 +220,6 @@ async def broadcast_status_page_data():
         except Exception as e:
             print(f"Error in status page broadcast: {e}")
             await asyncio.sleep(1)
-
-
-@api.websocket("/ws/device_status")
-async def websocket_device_status(websocket: WebSocket):
-    """WebSocket端点，用于实时获取设备状态"""
-    from unilabos.utils.tracing import extract_trace_context, span
-
-    carrier = {
-        key: value
-        for key in ("traceparent", "tracestate")
-        if (value := websocket.query_params.get(key))
-    }
-    with span(
-        "WS CONNECT /api/v1/ws/device_status",
-        attributes={
-            "http.route": "/api/v1/ws/device_status",
-            "network.protocol.name": "websocket",
-        },
-        kind="server",
-        parent_context=extract_trace_context(carrier),
-    ):
-        await websocket.accept()
-    active_connections.add(websocket)
-    try:
-        while True:
-            # 保持连接活跃
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        active_connections.remove(websocket)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        active_connections.remove(websocket)
 
 
 @api.websocket("/ws/registry_editor")
@@ -1454,5 +1392,4 @@ def setup_api_routes(app):
     # 启动广播任务
     @app.on_event("startup")
     async def startup_event():
-        asyncio.create_task(broadcast_device_status(), name="web-api-startup-device")
         asyncio.create_task(broadcast_status_page_data(), name="web-api-startup-status")

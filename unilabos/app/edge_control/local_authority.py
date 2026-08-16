@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -677,6 +678,44 @@ class LocalEdgeAuthorityStore:
             "devices": devices,
         }
 
+    def has_device_binding(self, local_device_id: str, material_uuid: str) -> bool:
+        """校验最近 Edge 会话声明的设备绑定（EdgeDeviceBinding）。
+
+        参数：``local_device_id`` 是 Edge 本地设备身份，``material_uuid`` 是
+        正式设备物料 UUID。返回：两者是否出现在同一最近注册设备声明中。异常：
+        UUID 非法时返回 ``False``，数据库错误原样传播。
+        """
+
+        local_identity = str(local_device_id or "").strip()
+        try:
+            material_identity = str(uuid.UUID(str(material_uuid)))
+        except (TypeError, ValueError, AttributeError):
+            return False
+        registration = self.latest_registration()
+        if registration is None:
+            return False
+        return any(
+            str(device.get("local_id") or "").strip() == local_identity
+            and str(device.get("material_uuid") or "").strip() == material_identity
+            for device in registration["devices"]
+        )
+
+    def has_local_device(self, local_device_id: str) -> bool:
+        """校验本地设备身份存在于当前 Edge 注册快照。
+
+        参数：``local_device_id`` 是候选 Edge 本地设备身份。返回：规范身份是否
+        出现在最近注册设备声明中。异常：数据库错误原样传播；空身份返回假。
+        """
+
+        identity = str(local_device_id or "").strip()
+        if not identity:
+            return False
+        registration = self.latest_registration()
+        return registration is not None and any(
+            str(device.get("local_id") or "").strip() == identity
+            for device in registration["devices"]
+        )
+
     def _authorized_job(
         self, job_uuid: str, command_uuid: str, job_token: str
     ) -> sqlite3.Row:
@@ -708,6 +747,11 @@ class LocalEdgeControlAuthority:
             raise ValueError("Local Edge authority requires an API key")
         self.store = store
         self.api_key = api_key
+        from unilabos.app.edge_control.device_telemetry import DeviceTelemetryHub
+
+        self.telemetry = DeviceTelemetryHub(store.has_device_binding)
+        self._telemetry_event_lock = threading.RLock()
+        self._telemetry_events: OrderedDict[str, str] = OrderedDict()
         self.device_state = None
         self._listeners: list[Callable[[str, bool, Any, str], None]] = []
 
@@ -716,6 +760,39 @@ class LocalEdgeControlAuthority:
 
     def stop(self) -> None:
         self.store.close()
+
+    def accept_telemetry_event(
+        self,
+        event_uuid: str,
+        sent_at: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        """在当前微后端进程内幂等消费设备遥测短通知。
+
+        参数：事件 UUID、发送时间与严格短通知载荷。返回：是否发布新的 SSE
+        latest。异常：同一事件 UUID 改写身份时拒绝；不写 SQLite、不负责重启恢复。
+        """
+
+        normalized_uuid = str(uuid.UUID(event_uuid))
+        normalized_sent_at = _required_text({"sent_at": sent_at}, "sent_at")
+        identity = json.dumps(
+            {"sent_at": normalized_sent_at, "payload": payload},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._telemetry_event_lock:
+            existing = self._telemetry_events.get(normalized_uuid)
+            if existing is not None:
+                if existing != identity:
+                    raise ValueError("duplicate Edge event identity changed")
+                self._telemetry_events.move_to_end(normalized_uuid)
+                return False
+            changed = self.telemetry.notify(payload)
+            self._telemetry_events[normalized_uuid] = identity
+            if len(self._telemetry_events) > 4096:
+                self._telemetry_events.popitem(last=False)
+            return changed
 
     def dispatch(self, payload: DispatchPayload) -> None:
         self.store.dispatch(payload)
@@ -891,6 +968,10 @@ def create_local_edge_control_router(
             session_uuid = _required_text(hello["payload"], "session_uuid")
             authority.store.reconcile_hello(hello["payload"])
             authority.store.set_session_connected(session_uuid, True)
+            await _write_event_ack(
+                websocket,
+                str(uuid.UUID(_required_text(hello, "message_uuid"))),
+            )
             while True:
                 for command in authority.store.pending_commands():
                     await websocket.send_text(json.dumps(command, ensure_ascii=False))
@@ -921,8 +1002,11 @@ async def _handle_edge_event(
     websocket: WebSocket,
     event: dict[str, Any],
 ) -> None:
+    if event.get("protocol_version") != _PROTOCOL_VERSION:
+        raise ValueError("unsupported Edge protocol version")
     event_uuid = str(uuid.UUID(_required_text(event, "message_uuid")))
     event_type = _required_text(event, "type")
+    sent_at = _required_text(event, "sent_at")
     payload = event.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("event payload must be an object")
@@ -932,11 +1016,27 @@ async def _handle_edge_event(
         authority.store.mark_job_started(_required_text(payload, "job_uuid"))
     elif event_type == "job.unknown_resolution_committed":
         authority.resolve_unknown_committed(_required_text(payload, "job_uuid"))
+    elif event_type == "device.telemetry_committed":
+        authority.accept_telemetry_event(
+            event_uuid,
+            sent_at,
+            payload,
+        )
     elif event_type not in {
         "job.feedback_committed",
         "job.outcome_committed",
     }:
         raise ValueError(f"unsupported Edge event {event_type!r}")
+    await _write_event_ack(websocket, event_uuid)
+
+
+async def _write_event_ack(websocket: WebSocket, event_uuid: str) -> None:
+    """发送正式 Edge 信封形状的 ``event.ack``。
+
+    参数：当前 WebSocket 和已处理事件 UUID。返回：无。异常：序列化或连接
+    写入错误原样传播，使连接关闭并由 Edge outbox 重放。
+    """
+
     await websocket.send_text(
         json.dumps(
             {

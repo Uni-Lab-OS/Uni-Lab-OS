@@ -16,6 +16,7 @@ def start_backend(
     is_slave: bool = False,
     visual: str = "None",
     resources_mesh_config: dict = {},
+    joint_state_owners=(),
     **kwargs,
 ) -> threading.Thread:
     if backend == "ros":
@@ -42,6 +43,7 @@ def start_backend(
             bridges,
             visual,
             resources_mesh_config,
+            joint_state_owners,
         ),
         name="backend_thread",
         daemon=True,
