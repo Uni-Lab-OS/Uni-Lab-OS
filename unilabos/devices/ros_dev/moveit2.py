@@ -41,6 +41,19 @@ from shape_msgs.msg import Mesh, MeshTriangle, SolidPrimitive
 from std_msgs.msg import Header, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from unilabos.devices.ros_dev.joint_trajectory_validation import (
+    sanitize_joint_trajectory,
+)
+from unilabos.devices.ros_dev.moveit_cartesian_compat import CartesianPathFields
+from unilabos.devices.ros_dev.moveit_plan_retry import (
+    MoveActionStateUpdate,
+    MoveGroupActionRetry,
+    run_plan_attempts,
+)
+from unilabos.devices.ros_dev.moveit_planning_scene import (
+    read_planning_scene_joint_positions,
+)
+
 
 class MoveIt2State(Enum):
     """
@@ -188,6 +201,9 @@ class MoveIt2:
             callback_group=callback_group,
         )
         self.__cartesian_path_request = GetCartesianPath.Request()
+        self.__cartesian_path_fields = CartesianPathFields(
+            self.__cartesian_path_request
+        )
 
         # Create action client for trajectory execution
         self._execute_trajectory_action_client = ActionClient(
@@ -298,6 +314,12 @@ class MoveIt2:
         self.__last_error_code = None
         self.__wait_until_executed_rate = self._node.create_rate(1000.0)
         self.__execution_mutex = threading.Lock()
+        self.__move_action_retry = MoveGroupActionRetry(
+            node=self._node,
+            action_client=self.__move_action_client,
+            current_joint_state=lambda: self.joint_state,
+            publish_state=self._publish_move_action_state,
+        )
 
         # Event that enables waiting until async future is done
         self.__future_done_event = threading.Event()
@@ -415,7 +437,7 @@ class MoveIt2:
                     self.joint_state
                 )
             # Send to goal to the server (async) - both planning and execution
-            self._send_goal_async_move_action()
+            self._begin_move_action_with_plan_retry()
             # Clear all previous goal constrains
             self.clear_goal_constraints()
             self.clear_path_constraints()
@@ -473,7 +495,7 @@ class MoveIt2:
                     self.joint_state
                 )
             # Send to goal to the server (async) - both planning and execution
-            self._send_goal_async_move_action()
+            self._begin_move_action_with_plan_retry()
             # Clear all previous goal constrains
             self.clear_goal_constraints()
             self.clear_path_constraints()
@@ -513,29 +535,28 @@ class MoveIt2:
         cartesian_fraction_threshold: float = 0.0,
     ) -> Optional[JointTrajectory]:
         """
-        Call plan_async and wait on future
+        调用异步规划并等待结果；只对规划失败使用全局内部重试预算。
+
+        参数：位姿、关节目标、约束、起始关节、笛卡尔选项和路径阈值。返回：
+        首个成功的关节轨迹，预算耗尽返回 ``None``。异常：底层 ROS 客户端异常
+        原样上抛。安全：此处不重放控制失败，也不属于工作流（Workflow）重试。
         """
-        future = self.plan_async(
-            **{
-                key: value
-                for key, value in locals().items()
-                if key not in ["self", "cartesian_fraction_threshold"]
-            }
-        )
-
-        if future is None:
-            return None
-
-        # 100ms sleep
+        plan_kwargs = {
+            key: value
+            for key, value in locals().items()
+            if key not in ["self", "cartesian_fraction_threshold"]
+        }
         rate = self._node.create_rate(10)
-        while not future.done():
-            rate.sleep()
-
-        return self.get_trajectory(
-            future,
-            cartesian=cartesian,
-            cartesian_fraction_threshold=cartesian_fraction_threshold,
-        )
+        return run_plan_attempts(
+            plan_once=lambda: self.plan_async(**plan_kwargs),
+            resolve_trajectory=lambda future: self.get_trajectory(
+                future,  # type: ignore[arg-type]
+                cartesian=cartesian,
+                cartesian_fraction_threshold=cartesian_fraction_threshold,
+            ),
+            sleep_while_pending=rate.sleep,
+            logger=self._node.get_logger(),
+        )  # type: ignore[return-value]
 
     def plan_async(
         self,
@@ -697,7 +718,9 @@ class MoveIt2:
         if cartesian:
             if MoveItErrorCodes.SUCCESS == res.error_code.val:
                 if res.fraction >= cartesian_fraction_threshold:
-                    return res.solution.joint_trajectory
+                    trajectory = res.solution.joint_trajectory
+                    self._sanitize_joint_trajectory(trajectory)
+                    return trajectory
                 else:
                     self._node.get_logger().warn(
                         f"Planning failed! Cartesian planner completed {res.fraction} "
@@ -721,8 +744,10 @@ class MoveIt2:
             return None
 
     def execute(self, joint_trajectory: JointTrajectory):
-        """
-        Execute joint_trajectory by communicating directly with the controller.
+        """校验并通过控制器执行关节轨迹。
+
+        参数：MoveIt 生成的 ``JointTrajectory``。返回：无。异常：危险跳变或缺少
+        当前观测时抛 ``ValueError``。安全：派发前再次做最短角展开和跳变门禁。
         """
 
         if self.__ignore_new_calls_while_executing and (
@@ -732,6 +757,9 @@ class MoveIt2:
                 "Controller is already following a trajectory. Skipping motion."
             )
             return
+
+        if joint_trajectory is not None:
+            self._sanitize_joint_trajectory(joint_trajectory)
 
         execute_trajectory_goal = init_execute_trajectory_goal(
             joint_trajectory=joint_trajectory
@@ -744,6 +772,21 @@ class MoveIt2:
             return
 
         self._send_goal_async_execute_trajectory(goal=execute_trajectory_goal)
+
+    def _sanitize_joint_trajectory(self, joint_trajectory: JointTrajectory) -> None:
+        """展开回转轴最短角并拒绝超阈值跳变。
+
+        参数：待派发的关节轨迹。返回：无，原地更新轨迹点。异常：缺观测、形状
+        错误或危险跳变时抛 ``ValueError``。安全：只把本 MoveIt 组关节作为回转轴；
+        外部直线导轨保持线性量纲。
+        """
+
+        sanitize_joint_trajectory(
+            joint_trajectory,
+            current_joint_state=self.joint_state,
+            revolute_joint_names=tuple(self.__joint_names),
+            jump_threshold_rad=self.cartesian_revolute_jump_threshold,
+        )
 
     def wait_until_executed(self) -> bool:
         """
@@ -1423,6 +1466,19 @@ class MoveIt2:
         self.__is_executing = False
         self.__execution_mutex.release()
 
+    def apply_tool_context(self, tool_context: Any) -> dict[str, Any]:
+        """把工具上下文（ToolContext）应用到 MoveIt 并返回结构化确认。"""
+
+        from unilabos.devices.ros_dev.moveit_tool_context import (
+            apply_tool_context,
+        )
+
+        return apply_tool_context(
+            self,
+            tool_context,
+            end_effector_name=self.__end_effector_name,
+        )
+
     def add_collision_primitive(
         self,
         id: str,
@@ -2066,64 +2122,20 @@ class MoveIt2:
             self.__cartesian_path_request
         )
 
-    def _send_goal_async_move_action(self):
-        self.__execution_mutex.acquire()
-        stamp = self._node.get_clock().now().to_msg()
-        self.__move_action_goal.request.workspace_parameters.header.stamp = stamp
-        if not self.__move_action_client.server_is_ready():
-            self._node.get_logger().warn(
-                f"Action server '{self.__move_action_client._action_name}' is not yet available. Better luck next time!"
-            )
-            return
+    def _begin_move_action_with_plan_retry(self) -> None:
+        """把当前目标交给有界 MoveGroup 规划执行器。"""
 
-        self.__last_error_code = None
-        self.__is_motion_requested = True
-        self.__send_goal_future_move_action = self.__move_action_client.send_goal_async(
-            goal=self.__move_action_goal,
-            feedback_callback=None,
-        )
+        self.__move_action_retry.start(self.__move_action_goal)
 
-        self.__send_goal_future_move_action.add_done_callback(
-            self.__response_callback_move_action
-        )
+    def _publish_move_action_state(self, update: MoveActionStateUpdate) -> None:
+        """把深模块生命周期投影回既有 MoveIt2 查询接口。"""
 
-        self.__execution_mutex.release()
-
-    def __response_callback_move_action(self, response):
-        self.__execution_mutex.acquire()
-        goal_handle = response.result()
-        if not goal_handle.accepted:
-            self._node.get_logger().warn(
-                f"Action '{self.__move_action_client._action_name}' was rejected."
-            )
-            self.__is_motion_requested = False
-            return
-
-        self.__execution_goal_handle = goal_handle
-        self.__is_executing = True
-        self.__is_motion_requested = False
-
-        self.__get_result_future_move_action = goal_handle.get_result_async()
-        self.__get_result_future_move_action.add_done_callback(
-            self.__result_callback_move_action
-        )
-        self.__execution_mutex.release()
-
-    def __result_callback_move_action(self, res):
-        self.__execution_mutex.acquire()
-        if res.result().status != GoalStatus.STATUS_SUCCEEDED:
-            self._node.get_logger().warn(
-                f"Action '{self.__move_action_client._action_name}' was unsuccessful: {res.result().status}."
-            )
-            self.motion_suceeded = False
-        else:
-            self.motion_suceeded = True
-
-        self.__last_error_code = res.result().result.error_code
-
-        self.__execution_goal_handle = None
-        self.__is_executing = False
-        self.__execution_mutex.release()
+        with self.__execution_mutex:
+            self.__is_motion_requested = update.requested
+            self.__is_executing = update.executing
+            self.motion_suceeded = update.succeeded
+            self.__execution_goal_handle = update.goal_handle
+            self.__last_error_code = update.error_code
 
     def _send_goal_async_execute_trajectory(
         self,
@@ -2281,6 +2293,19 @@ class MoveIt2:
     def planning_scene(self) -> Optional[PlanningScene]:
         return self.__planning_scene
 
+    def planning_scene_joint_positions(self) -> dict[str, float]:
+        """返回 PlanningScene 当前完整关节名到 SI 位置的只读映射。
+
+        参数：无。返回：刷新成功且名称与位置长度一致、名称唯一、数值有限时的
+        映射；服务未就绪或畸形读回返回空。安全：每次都向 MoveIt 刷新场景，
+        不从缓存或本地 ``/joint_states`` 猜测 MoveIt 是否已经接纳外部导轨状态。
+        """
+
+        return read_planning_scene_joint_positions(
+            refresh=self.update_planning_scene,
+            scene=lambda: self.__planning_scene,
+        )
+
     @property
     def follow_joint_trajectory_action_client(self) -> str:
         return self.__follow_joint_trajectory_action_client
@@ -2342,35 +2367,37 @@ class MoveIt2:
 
     @property
     def cartesian_avoid_collisions(self) -> bool:
-        return self.__cartesian_path_request.request.avoid_collisions
+        return bool(self.__cartesian_path_fields.get("avoid_collisions", True))
 
     @cartesian_avoid_collisions.setter
     def cartesian_avoid_collisions(self, value: bool):
-        self.__cartesian_path_request.avoid_collisions = value
+        self.__cartesian_path_fields.set("avoid_collisions", value)
 
     @property
     def cartesian_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.jump_threshold
+        return float(self.__cartesian_path_fields.get("jump_threshold", 0.0))
 
     @cartesian_jump_threshold.setter
     def cartesian_jump_threshold(self, value: float):
-        self.__cartesian_path_request.jump_threshold = value
+        self.__cartesian_path_fields.set("jump_threshold", value)
 
     @property
     def cartesian_prismatic_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.prismatic_jump_threshold
+        return float(
+            self.__cartesian_path_fields.get("prismatic_jump_threshold", 0.0)
+        )
 
     @cartesian_prismatic_jump_threshold.setter
     def cartesian_prismatic_jump_threshold(self, value: float):
-        self.__cartesian_path_request.prismatic_jump_threshold = value
+        self.__cartesian_path_fields.set("prismatic_jump_threshold", value)
 
     @property
     def cartesian_revolute_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.revolute_jump_threshold
+        return self.__cartesian_path_fields.revolute_jump_threshold()
 
     @cartesian_revolute_jump_threshold.setter
     def cartesian_revolute_jump_threshold(self, value: float):
-        self.__cartesian_path_request.revolute_jump_threshold = value
+        self.__cartesian_path_fields.set_revolute_jump_threshold(value)
 
     @property
     def pipeline_id(self) -> int:

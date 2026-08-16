@@ -60,6 +60,7 @@ def main(
     bridges: List[Any] = [],
     visual: str = "disable",
     resources_mesh_config: dict = {},
+    joint_state_owners=(),
     rclpy_init_args: List[str] = ["--log-level", "debug"],
     discovery_interval: float = 15.0,
 ) -> None:
@@ -84,7 +85,8 @@ def main(
         graph,
         controllers_config,
         bridges,
-        discovery_interval,
+        joint_state_owners=joint_state_owners,
+        discovery_interval=discovery_interval,
     )
 
     # HostLink 由 Edge 微后端在 HostNode 之前启动；ROS 层只挂接
@@ -191,9 +193,11 @@ def slave(
     bridges: List[Any] = [],
     visual: str = "disable",
     resources_mesh_config: dict = {},
+    joint_state_owners=(),
     rclpy_init_args: List[str] = ["--log-level", "debug"],
 ) -> None:
     """从节点函数"""
+    del joint_state_owners
     # 0. Slave 网络连接与 ROS 配置由微后端统一管理；此处只在
     # rclpy.init 前取回已套用的 domain id。直接调用本函数时，
     # setup_slave_network_client 也会完成微后端兜底装配。
@@ -315,7 +319,7 @@ def slave(
 
     # 4. 初始化所有设备实例（此时 resources_config 的 UUID 已更新）
     devices_instances = {}
-    for device_config in devices_config.root_nodes:
+    for device_config in devices_config.device_nodes:
         device_id = device_config.res_content.id
         if device_config.res_content.type == "device":
             d = initialize_device_from_dict(device_id, device_config)

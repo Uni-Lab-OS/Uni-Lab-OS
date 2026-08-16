@@ -159,6 +159,28 @@ class TestRootFieldContract:
 
 
 class TestGraphWhitelist:
+    def test_canonicalize_preserves_legacy_nested_pose_rotation(self):
+        """旧图嵌套位姿的尺寸和旋转必须完整迁入规范 pose。"""
+
+        from unilabos.resources.graphio import canonicalize_nodes_data
+
+        node = make_content(
+            position={
+                "position": {"x": 0, "y": 0, "z": 150},
+                "size": {"width": 900, "height": 800, "depth": 700},
+                "rotation": {"x": 0, "y": 0, "z": 180},
+            }
+        )
+        res = canonicalize_nodes_data([node]).trees[0].root_node.res_content
+
+        assert res.pose.position.model_dump() == {"x": 0.0, "y": 0.0, "z": 150.0}
+        assert res.pose.size.model_dump() == {
+            "depth": 700.0,
+            "width": 900.0,
+            "height": 800.0,
+        }
+        assert res.pose.rotation.model_dump() == {"x": 0.0, "y": 0.0, "z": 180.0}
+
     def test_canonicalize_keeps_tracker_roots(self):
         # graphio 标准化白名单：根级液体三键不得被搬进 config（与 barcode 同为白名单成员）
         from unilabos.resources.graphio import canonicalize_nodes_data

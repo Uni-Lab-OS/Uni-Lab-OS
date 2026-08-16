@@ -264,6 +264,7 @@ class HostNode(BaseROS2DeviceNode):
         physical_setup_graph: Optional[Dict[str, Any]] = None,
         controllers_config: Optional[Dict[str, Any]] = None,
         bridges: Optional[List[Any]] = None,
+        joint_state_owners: Optional[Iterable[Any]] = None,
         discovery_interval: float = 180.0,  # 设备发现间隔，单位为秒
     ):
         """
@@ -430,6 +431,14 @@ class HostNode(BaseROS2DeviceNode):
         # 创建物料增删改查服务（非客户端）
         self._init_host_service()
 
+        from unilabos.device_mesh.host_joint_state_projection import (
+            install_host_joint_state_projection,
+        )
+
+        self._joint_state_projection = install_host_joint_state_projection(
+            self, joint_state_owners or (), self.bridges
+        )
+
         self.device_status = {}  # 用来存储设备状态
         self.device_status_timestamps = {}  # 用来存储设备状态最后更新时间
         time.sleep(1)  # 等待通信连接稳定
@@ -440,7 +449,7 @@ class HostNode(BaseROS2DeviceNode):
         # 独立 Edge Runtime 初始化。combined 继续保持历史单进程行为。
         if BasicConfig.process_role != "workspace_backend":
             local_machine = BasicConfig.machine_name
-            for device_config in devices_config.root_nodes:
+            for device_config in devices_config.device_nodes:
                 device_id = device_config.res_content.id
                 if device_config.res_content.type != "device":
                     continue

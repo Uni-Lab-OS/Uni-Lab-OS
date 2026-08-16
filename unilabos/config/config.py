@@ -160,6 +160,15 @@ class ROSConfig:
     ]
 
 
+class MoveItConfig:
+    """MoveGroup 单次动作派发前的规划预算，不是工作流执行重试。"""
+
+    allowed_planning_time = 3.0
+    num_planning_attempts = 3
+    # 首次规划失败后的重新规划次数；控制失败或抢占不重放动作。
+    plan_retry_attempts = 10
+
+
 def _update_config_from_module(module):
     for name, obj in globals().items():
         if isinstance(obj, type) and name.endswith("Config"):

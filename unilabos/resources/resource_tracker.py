@@ -324,13 +324,21 @@ class ResourceDictInstance(object):
                 content[state_key] = state_val
         if "position" in content:
             pose = content.get("pose", {})
+            legacy_pose = content["position"]
+            for pose_key in (
+                "position",
+                "position3d",
+                "size",
+                "scale",
+                "layout",
+                "rotation",
+                "cross_section_type",
+                "extra",
+            ):
+                if pose_key not in pose and pose_key in legacy_pose:
+                    pose[pose_key] = legacy_pose[pose_key]
             if "position" not in pose:
-                # noinspection PyTypedDict
-                if "position" in content["position"]:
-                    # noinspection PyTypedDict
-                    pose["position"] = content["position"]["position"]
-                else:
-                    pose["position"] = ResourceDictPositionObjectType(x=0, y=0, z=0)
+                pose["position"] = ResourceDictPositionObjectType(x=0, y=0, z=0)
             if "size" not in pose:
                 pose["size"] = ResourceDictPositionSizeType(
                     width= content["config"].get("size_x", 0),
@@ -930,6 +938,20 @@ class ResourceTreeSet(object):
             所有节点的资源实例列表
         """
         return [node for tree in self.trees for node in tree.get_all_nodes()]
+
+    @property
+    def device_nodes(self) -> List[ResourceDictInstance]:
+        """返回全部设备节点，包括挂载在其他设备下的子设备。
+
+        仅遍历根节点会漏掉地轨上的机械臂。类型为 ``device`` 的
+        子节点仍拥有自己的 ROS2 节点，不是普通子物料。
+        """
+
+        return [
+            node
+            for node in self.all_nodes
+            if node.res_content.type == "device"
+        ]
 
     def merge_disjoint_trees_by_id(
         self,

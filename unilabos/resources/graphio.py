@@ -62,7 +62,9 @@ def canonicalize_nodes_data(
         if node.get("name", None) is None:
             node["name"] = node.get("id")
             print_status(f"Warning: Node {node.get('id', 'unknown')} missing 'name', defaulting to {node['name']}", "warning")
-        if not isinstance(node.get("position"), dict):
+        if not isinstance(node.get("position"), dict) and not isinstance(
+            node.get("pose"), dict
+        ):
             node["pose"] = {"position": {}}
             x = node.pop("x", None)
             if x is not None:

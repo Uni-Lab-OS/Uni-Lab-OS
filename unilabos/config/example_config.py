@@ -21,6 +21,15 @@ class HTTPConfig:
     material_query_timeout = 10
 
 
+# MoveIt 单次动作内部的规划预算，不是工作流（Workflow）重试。
+class MoveItConfig:
+    allowed_planning_time = 3.0
+    num_planning_attempts = 3
+    # 规划失败后的重试次数。0 = 不重试，1 = 再试 1 次。
+    # 环境变量：UNILABOS_MOVEITCONFIG_PLAN_RETRY_ATTEMPTS
+    plan_retry_attempts = 10
+
+
 # HostLink 由 Edge 微后端拥有：Host 监听所有 Slave、下发 ROS 网络策略并代理物料查询。
 class HostLinkConfig:
     enable = True

@@ -12,6 +12,8 @@ from unilabos.app.scheduler import integration
 from unilabos.app.scheduler.inventory.backend_contract import BackendResourceService
 from unilabos.app.scheduler.inventory.resource_graph_bootstrap import (
     ResourceGraphBootstrapError,
+    _direct_parent_runtime_uuid,
+    _parent_runtime_uuid,
     bootstrap_local_resource_graph,
 )
 from unilabos.app.scheduler.inventory.resource_reference import (
@@ -22,6 +24,45 @@ from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 
 MOUNT_MATERIAL_UUID = "97539b08-24de-5003-8b2e-9eb6e983c68a"
 FIRST_SITE_UUID = "1962ab7c-b006-5e44-a1bd-9b1fde81d529"
+
+
+def test_graph_parent_ids_resolve_to_runtime_uuids_without_crossing_sites() -> None:
+    """产品图 ``parent`` 设备 ID 必须与 ``parent_uuid`` 得到相同库存关系。
+
+    参数：无。返回：无。异常：无。安全：直接父解析停在库位（Site），只有物料
+    父关系投影才跨过库位找到其拥有者物料（Material）。
+    """
+
+    owner = {"id": "mount", "uuid": "runtime-owner"}
+    site = {
+        "id": "slot-a",
+        "uuid": "runtime-site",
+        "parent": "mount",
+    }
+    child = {
+        "id": "child",
+        "uuid": "runtime-child",
+        "parent": "slot-a",
+    }
+    node_by_id = {node["id"]: node for node in (owner, site, child)}
+    node_by_runtime_uuid = {
+        node["uuid"]: node for node in (owner, site, child)
+    }
+
+    assert _direct_parent_runtime_uuid(
+        site,
+        node_by_id=node_by_id,
+    ) == "runtime-owner"
+    assert _direct_parent_runtime_uuid(
+        child,
+        node_by_id=node_by_id,
+    ) == "runtime-site"
+    assert _parent_runtime_uuid(
+        child,
+        node_by_id=node_by_id,
+        node_by_runtime_uuid=node_by_runtime_uuid,
+        site_runtime_ids={"runtime-site"},
+    ) == "runtime-owner"
 
 
 class _Registry:

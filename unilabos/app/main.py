@@ -1292,7 +1292,6 @@ def main():
     from unilabos.resources.graphio import (
         read_node_link_json,
         read_graphml,
-        dict_from_graph,
         modify_to_backend_format,
     )
     from unilabos.app.backend import start_backend
@@ -1425,6 +1424,16 @@ def main():
             "info",
         )
 
+    from unilabos.device_mesh.runtime import prepare_device_mesh_runtime
+
+    device_mesh_runtime = prepare_device_mesh_runtime(
+        physical_setup_graph=graph_res.physical_setup_graph,
+        registry_devices=lab_registry.device_type_registry,
+        resource_tree_set=resource_tree_set,
+        visual=args_dict["visual"],
+        process_role=runtime_process_plan.role.value,
+    )
+
     # 第二次设备包依赖检查：云端物料同步后，community 包可能引入新的 requirements
     # TODO: 当 community device package 功能上线后，在这里调用
     #   install_requirements_txt(community_pkg_path / "requirements.txt", label="community.xxx")
@@ -1433,6 +1442,7 @@ def main():
     args_dict["resources_config"] = resource_tree_set
     args_dict["devices_config"] = resource_tree_set
     args_dict["graph"] = graph_res.physical_setup_graph
+    args_dict["joint_state_owners"] = device_mesh_runtime.joint_state_owners
 
     slave_device_ids: List[str] = []
     if not BasicConfig.is_host_mode:
@@ -1536,14 +1546,18 @@ def main():
 
         setup_slave_network_client(device_ids=slave_device_ids)
 
-    args_dict["resources_mesh_config"] = {}
+    args_dict["resources_mesh_config"] = device_mesh_runtime.resource_model
     args_dict["resources_edge_config"] = resource_edge_info
+
     if not runtime_process_plan.starts_web_server:
         print_status(
             "Edge Runtime 已与 Workspace Backend 分离；当前进程不启动 HTTP/Authoring 服务",
             "info",
         )
         edge_backend_thread = start_backend(**args_dict)
+        if device_mesh_runtime.launches_ros:
+            device_mesh_runtime.start()
+            raise RuntimeError("Edge Runtime ROS Launch terminated unexpectedly")
         edge_backend_thread.join()
         raise RuntimeError("Edge Runtime backend thread terminated unexpectedly")
 
@@ -1562,71 +1576,28 @@ def main():
             os._exit(RESTART_EXIT_CODE)
         return
 
-    # web visiualize 2D
-    if args_dict["visual"] != "disable":
-        enable_rviz = args_dict["visual"] == "rviz"
-        devices_and_resources = dict_from_graph(graph_res.physical_setup_graph)
-        if devices_and_resources is not None:
-            from unilabos.device_mesh.resource_visalization import (
-                ResourceVisualization,
-            )  # 此处开启后，logger会变更为INFO，有需要请调整
-
-            resource_visualization = ResourceVisualization(
-                devices_and_resources,
-                [n.res_content for n in args_dict["resources_config"].all_nodes],  # type: ignore  # FIXME
-                enable_rviz=enable_rviz,
-            )
-            args_dict["resources_mesh_config"] = resource_visualization.resource_model
-            start_backend(**args_dict)
-            server_thread = threading.Thread(
-                target=start_server,
-                kwargs=dict(
-                    open_browser=not BasicConfig.disable_browser,
-                    port=BasicConfig.port,
-                ),
-            )
-            server_thread.start()
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            try:
-                resource_visualization.start()
-            except OSError as e:
-                if "AMENT_PREFIX_PATH" in str(e):
-                    print_status(
-                        f"ROS 2环境未正确设置，跳过3D可视化启动。错误详情: {e}",
-                        "warning",
-                    )
-                    print_status(
-                        "建议解决方案：\n"
-                        "1. 激活Conda环境: conda activate unilab\n"
-                        "2. 或使用 --visual disable 参数禁用可视化",
-                        "info",
-                    )
-                else:
-                    raise
-            while True:
-                time.sleep(1)
-        else:
-            start_backend(**args_dict)
-            restart_requested = start_server(
-                open_browser=not BasicConfig.disable_browser,
-                port=BasicConfig.port,
-            )
-            if restart_requested:
-                print_status("[Main] Restart requested, cleaning up...", "info")
-                cleanup_for_restart()
-                return
-    else:
-        start_backend(**args_dict)
-
-        # 启动服务器（默认支持WebSocket触发重启）
-        restart_requested = start_server(
-            open_browser=not BasicConfig.disable_browser,
-            port=BasicConfig.port,
+    start_backend(**args_dict)
+    if device_mesh_runtime.launches_ros:
+        server_thread = threading.Thread(
+            target=start_server,
+            kwargs={
+                "open_browser": not BasicConfig.disable_browser,
+                "port": BasicConfig.port,
+            },
         )
-        if restart_requested:
-            print_status("[Main] Restart requested, cleaning up...", "info")
-            cleanup_for_restart()
-            os._exit(RESTART_EXIT_CODE)
+        server_thread.start()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        device_mesh_runtime.start()
+        raise RuntimeError("ROS Launch terminated unexpectedly")
+
+    restart_requested = start_server(
+        open_browser=not BasicConfig.disable_browser,
+        port=BasicConfig.port,
+    )
+    if restart_requested:
+        print_status("[Main] Restart requested, cleaning up...", "info")
+        cleanup_for_restart()
+        os._exit(RESTART_EXIT_CODE)
 
 
 if __name__ == "__main__":

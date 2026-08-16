@@ -101,3 +101,40 @@ def test_merge_disjoint_trees_by_id_keeps_authoritative_runtime_identity() -> No
         "device-b",
     ]
     assert authoritative.all_nodes[0].res_content.name == "Authoring Device A"
+
+
+def test_device_nodes_include_nested_devices_and_exclude_materials() -> None:
+    """设备节点视图必须包含挂载在地轨下的机械臂。"""
+
+    tree_set = ResourceTreeSet.from_raw_dict_list(
+        [
+            {
+                "id": "rail",
+                "uuid": "30000000-0000-4000-8000-000000000001",
+                "name": "Rail",
+                "type": "device",
+                "class": "community.rail",
+            },
+            {
+                "id": "robot",
+                "uuid": "30000000-0000-4000-8000-000000000002",
+                "parent_uuid": "30000000-0000-4000-8000-000000000001",
+                "name": "Robot",
+                "type": "device",
+                "class": "community.robot",
+            },
+            {
+                "id": "tool",
+                "uuid": "30000000-0000-4000-8000-000000000003",
+                "parent_uuid": "30000000-0000-4000-8000-000000000002",
+                "name": "Tool",
+                "type": "tool",
+                "class": "community.tool",
+            },
+        ]
+    )
+
+    assert [node.res_content.id for node in tree_set.device_nodes] == [
+        "rail",
+        "robot",
+    ]

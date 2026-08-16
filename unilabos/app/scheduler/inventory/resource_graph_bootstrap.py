@@ -232,6 +232,51 @@ def _template_aliases(snapshot: RegistryTemplateSnapshot) -> dict[str, str]:
     return aliases
 
 
+def _direct_parent_runtime_uuid(
+    node: Mapping[str, Any],
+    *,
+    node_by_id: Mapping[str, Mapping[str, Any]],
+) -> str | None:
+    """读取节点的直接父运行时 UUID，不跨越库位（Site）。
+
+    参数：当前节点及按产品图 ``id`` 索引的同代快照。返回：显式
+    ``parent_uuid``，或 ``parent`` 设备 ID 对应节点的运行时 UUID；根节点为
+    ``None``。异常：无。安全：占用检测必须停在库位本身。
+    """
+
+    parent_runtime = _optional_text(node.get("parent_uuid"))
+    if parent_runtime is not None:
+        return parent_runtime
+    parent_node = node_by_id.get(_optional_text(node.get("parent")) or "")
+    if parent_node is None:
+        return None
+    return _optional_text(parent_node.get("uuid"))
+
+
+def _parent_runtime_uuid(
+    node: Mapping[str, Any],
+    *,
+    node_by_id: Mapping[str, Mapping[str, Any]],
+    node_by_runtime_uuid: Mapping[str, Mapping[str, Any]],
+    site_runtime_ids: set[str],
+) -> str | None:
+    """解析库存投影所需的父物料运行时 UUID。
+
+    参数：当前节点、按产品图 ID/运行时 UUID 索引的快照及库位运行时身份。
+    返回：父物料运行时 UUID，根节点为 ``None``。异常：无。安全：直接父若是
+    库位（Site），只再跨一层取库位拥有者，不进行无界祖先搜索。
+    """
+
+    parent_runtime = _direct_parent_runtime_uuid(node, node_by_id=node_by_id)
+    if parent_runtime in site_runtime_ids:
+        site_parent = node_by_runtime_uuid[parent_runtime]
+        parent_runtime = _direct_parent_runtime_uuid(
+            site_parent,
+            node_by_id=node_by_id,
+        )
+    return parent_runtime
+
+
 def _compile_projection(
     raw_trees: object,
     source_name: str,
@@ -296,10 +341,12 @@ def _compile_projection(
             raise ResourceGraphBootstrapError(
                 f"Material {node_id} 资源模板身份未进入注册表: {graph_class}"
             )
-        parent_runtime = _optional_text(node.get("parent_uuid"))
-        if parent_runtime in site_runtime_ids:
-            site_parent = node_by_runtime_uuid[parent_runtime]
-            parent_runtime = _optional_text(site_parent.get("parent_uuid"))
+        parent_runtime = _parent_runtime_uuid(
+            node,
+            node_by_id=node_by_id,
+            node_by_runtime_uuid=node_by_runtime_uuid,
+            site_runtime_ids=site_runtime_ids,
+        )
         if parent_runtime is not None and parent_runtime not in material_runtime_ids:
             raise ResourceGraphBootstrapError(f"Material {node_id} 父关系悬空")
         material_uuid = material_uuid_by_runtime[runtime_uuid]
@@ -349,14 +396,20 @@ def _compile_projection(
             continue
         node_id = _required_text(node.get("id"), "site.id")
         runtime_uuid = _required_text(node.get("uuid"), "site.uuid")
-        owner_runtime = _optional_text(node.get("parent_uuid"))
+        owner_runtime = _parent_runtime_uuid(
+            node,
+            node_by_id=node_by_id,
+            node_by_runtime_uuid=node_by_runtime_uuid,
+            site_runtime_ids=site_runtime_ids,
+        )
         owner_uuid = material_uuid_by_runtime.get(owner_runtime or "")
         if owner_uuid is None:
             raise ResourceGraphBootstrapError(f"库位（Site）{node_id} 父物料悬空")
         occupant_runtime = [
             candidate_runtime
             for candidate_runtime, candidate in node_by_runtime_uuid.items()
-            if _optional_text(candidate.get("parent_uuid")) == runtime_uuid
+            if _direct_parent_runtime_uuid(candidate, node_by_id=node_by_id)
+            == runtime_uuid
             and candidate_runtime in material_runtime_ids
         ]
         if len(occupant_runtime) > 1:
@@ -417,7 +470,11 @@ def _compile_projection(
             occupant_uuid = material_uuid_by_runtime.get(occupant_runtime or "")
             if occupant_node is not None and (
                 occupant_uuid is None
-                or _optional_text(occupant_node.get("parent_uuid")) != owner_runtime
+                or _direct_parent_runtime_uuid(
+                    occupant_node,
+                    node_by_id=node_by_id,
+                )
+                != owner_runtime
             ):
                 raise ResourceGraphBootstrapError(
                     f"库位（Site）{site_name} 占用物料必须是父物料的直接子物料"
