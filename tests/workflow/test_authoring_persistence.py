@@ -147,6 +147,22 @@ def test_authoring_http_keeps_backend_response_envelope(
     assert payload["data"]["candidate"]["candidate_hash"].startswith("sha256:")
 
 
+def test_authoring_aggregate_declares_python_source_topology_authority(
+    authoring_service: tuple[WorkflowService, Path],
+) -> None:
+    """本地工作区源码必须显式声明图与 Python 的双向创作能力。"""
+
+    service, _source_path = authoring_service
+
+    observed = service.get_authoring(WORKFLOW_UUID)
+
+    assert observed["topology_authoring"] == {
+        "authority": "python_source",
+        "graph_mode": "read_write",
+        "graph_to_python": "supported",
+    }
+
+
 def test_same_content_cas_compiles_external_draft_without_rewriting_source(
     authoring_service: tuple[WorkflowService, Path],
     monkeypatch: pytest.MonkeyPatch,

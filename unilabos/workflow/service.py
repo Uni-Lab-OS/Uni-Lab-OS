@@ -3225,6 +3225,11 @@ class WorkflowService:
             "draft": draft,
             "candidate": candidate,
             "applied_source": applied_source,
+            "topology_authoring": {
+                "authority": "python_source",
+                "graph_mode": "read_write",
+                "graph_to_python": "supported",
+            },
         }
 
     def _authoring_lock(self, workflow_uuid: str) -> threading.RLock:
