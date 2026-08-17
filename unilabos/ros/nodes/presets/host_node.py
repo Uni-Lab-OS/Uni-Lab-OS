@@ -2744,8 +2744,9 @@ class HostNode(BaseROS2DeviceNode):
                 _ordering 换算成 spot）；不传则由父级默认排布。
 
         Returns:
-            原有四键运行结果字典；静态类型化动作（Typed Action）合同把两个物料
-            字段发布为物料占位符（ResourceSlot），供下游工作流节点继续连接。
+            四键运行结果字典；两个物料字段按规范单对象引用返回。静态类型化动作
+            （Typed Action）合同把它们发布为物料占位符（ResourceSlot），供下游
+            工作流节点继续连接。
 
         Raises:
             ValueError: 必需物料缺失或转移执行失败时由既有执行核心抛出。

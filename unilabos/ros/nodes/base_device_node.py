@@ -3495,8 +3495,17 @@ class BaseROS2DeviceNode(Node, Generic[T]):
         # 通过资源跟踪器获取本地实例
         res = self.resource_tracker.figure_resource(plr_resource, try_mode=True)
         if len(res) == 0:
-            self.lab_logger().warning(f"资源转换未能索引到实例: {resource_data.get('id', '?')}，返回新建实例")
-            resolved_resource = plr_resource
+            runtime_resource = _resolve_production_runtime_resource(
+                self.resource_tracker, plr_resource
+            )
+            if runtime_resource is None:
+                resource_identity = _stable_resource_uuid(resource_data) or "?"
+                self.lab_logger().warning(
+                    f"资源转换未能索引到实例: {resource_identity}，返回新建实例"
+                )
+                resolved_resource = plr_resource
+            else:
+                resolved_resource = runtime_resource
         elif len(res) == 1:
             resolved_resource = res[0]
         else:

@@ -118,7 +118,7 @@ def test_builtin_host_transfer_is_projected_with_material_lock_contract(
 
 
 class _TransferRuntime:
-    """模拟保留旧执行核心的宿主节点（HostNode）直接调用接缝。"""
+    """模拟保留执行核心的宿主节点（HostNode）直接调用接缝。"""
 
     def __init__(self) -> None:
         """初始化尚未收到调用的直接运行记录。
@@ -135,18 +135,18 @@ class _TransferRuntime:
         mount_resource: Any,
         site: str,
     ) -> dict[str, Any]:
-        """记录转运参数并返回旧前端可读取的四键结果字典。
+        """记录转运参数并返回规范 ResourceSlot 四键结果字典。
 
         参数：``resource`` 与 ``mount_resource`` 是待转移物料和目标父物料；
         ``target_device`` 是目标设备身份；``site`` 是目标库位（Site）名。返回：
-        保留 ``resource/mount_resource/site/result`` 的旧字典形状。异常：无；
+        保留 ``resource/mount_resource/site/result`` 的四键形状。异常：无；
         本替身不触发物理动作或物料权威写入。
         """
 
         self.call = (resource, target_device, mount_resource, site)
         return {
-            "resource": [[{"uuid": "resource-uuid"}]],
-            "mount_resource": [[{"uuid": "mount-uuid"}]],
+            "resource": {"uuid": "resource-uuid"},
+            "mount_resource": {"uuid": "mount-uuid"},
             "site": site,
             "result": "转运完成",
         }
@@ -201,10 +201,10 @@ class _InventoryTransferRecorder:
 
 @pytest.mark.asyncio
 async def test_typed_host_transfer_preserves_direct_runtime_call_shape() -> None:
-    """类型化动作（Typed Action）必须保留旧调用参数和四键结果字典。
+    """类型化动作（Typed Action）必须保留调用参数和规范四键结果字典。
 
     参数：无。返回：无；断言装饰器包装后的公开方法仍把四个参数原样交给既有
-    执行核心，并把旧前端读取的结果对象原样返回。异常：本测试不执行实际设备
+    执行核心，并把规范 ResourceSlot 结果对象原样返回。异常：本测试不执行实际设备
     动作；若包装层改写参数或结果则断言失败。
     """
 
@@ -224,8 +224,8 @@ async def test_typed_host_transfer_preserves_direct_runtime_call_shape() -> None
 
     assert runtime.call == (resource, "target-device", mount_resource, "L1B1")
     assert result == {
-        "resource": [[{"uuid": "resource-uuid"}]],
-        "mount_resource": [[{"uuid": "mount-uuid"}]],
+        "resource": {"uuid": "resource-uuid"},
+        "mount_resource": {"uuid": "mount-uuid"},
         "site": "L1B1",
         "result": "转运完成",
     }
@@ -275,7 +275,7 @@ async def test_host_transfer_commits_edge_inventory_after_resource_tree_transfer
 
 
 def test_transfer_result_projects_device_root_to_resource_slot_reference() -> None:
-    """设备型父资源也必须输出与合同一致的单 ResourceSlot UUID 对象。"""
+    """设备型库位父资源也必须输出与合同一致的单 ResourceSlot UUID 对象。"""
 
     mount = {
         "uuid": "50000000-0000-4000-8000-000000000009",
