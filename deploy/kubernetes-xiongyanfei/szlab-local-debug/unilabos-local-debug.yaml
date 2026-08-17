@@ -80,6 +80,7 @@ spec:
           args: [/config/prepare_runtime_graph.py]
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           volumeMounts:
@@ -88,6 +89,8 @@ spec:
               readOnly: true
             - name: runtime-graphs
               mountPath: /runtime-graphs
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: workspace-backend
           image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
@@ -135,6 +138,10 @@ spec:
               value: "78"
             - name: ROS_LOCALHOST_ONLY
               value: "0"
+            - name: HOME
+              value: /runtime/backend/home
+            - name: ROS_LOG_DIR
+              value: /runtime/backend/ros-logs
           ports:
             - name: http
               containerPort: 18003
@@ -165,6 +172,7 @@ spec:
               memory: 4Gi
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           volumeMounts:
@@ -173,6 +181,8 @@ spec:
             - name: runtime-graphs
               mountPath: /opt/runtime-src/szlab/deployment/graphs
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: runtime
           emptyDir: {}
@@ -181,6 +191,8 @@ spec:
             name: unilabos-szlab-runtime-graph
             defaultMode: 0444
         - name: runtime-graphs
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
 ---
 apiVersion: apps/v1
@@ -224,6 +236,7 @@ spec:
           args: [/config/prepare_runtime_graph.py]
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           volumeMounts:
@@ -232,6 +245,8 @@ spec:
               readOnly: true
             - name: runtime-graphs
               mountPath: /runtime-graphs
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: edge-runtime
           image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
@@ -284,6 +299,10 @@ spec:
               value: "78"
             - name: ROS_LOCALHOST_ONLY
               value: "0"
+            - name: HOME
+              value: /runtime/edge/home
+            - name: ROS_LOG_DIR
+              value: /runtime/edge/ros-logs
           startupProbe:
             exec:
               command: [/bin/sh, -ec, test -f /runtime/edge/ready.json]
@@ -308,6 +327,7 @@ spec:
               memory: 4Gi
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           volumeMounts:
@@ -316,6 +336,8 @@ spec:
             - name: runtime-graphs
               mountPath: /opt/runtime-src/szlab/deployment/graphs
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: runtime
           emptyDir: {}
@@ -324,6 +346,8 @@ spec:
             name: unilabos-szlab-runtime-graph
             defaultMode: 0444
         - name: runtime-graphs
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
 ---
 apiVersion: v1
