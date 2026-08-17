@@ -740,6 +740,9 @@ class ResourceTreeSet(object):
             # （PLR Barcode dict {data, symbology, position_on_resource}），与
             # get_resource_instance_from_dict 从 config 读取的逻辑对称；position 未保留，默认兜底。
             config = dict(res.config)
+            # ``rendering`` 是 OS/前端的公开显示投影，不属于任何 PLR 资源
+            # 构造合同；必须在递归反序列化每个节点前剥离。
+            config.pop("rendering", None)
             # 只有公开支持库位（Site）反查的离散载架接收 ``sites[]``；普通 PLR
             # 资源仍剥离部署声明，避免把库存元数据泄漏给不认识该参数的构造器。
             target_type = str(config.get("type") or plr_type)

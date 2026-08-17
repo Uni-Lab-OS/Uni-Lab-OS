@@ -164,10 +164,13 @@ def _edge_runtime_blockers(path: Path) -> list[LocalResetBlocker]:
                     )
                 )
         if _table_exists(connection, "edge_event_outbox"):
+            # 设备遥测已由 HTTP 数据面先提交；这里的 WebSocket 记录只是可丢弃
+            # 短通知。若把持续产生的通知当成重建阻塞项，运行中的 Edge Runtime
+            # 将使正常/Dry-run 模式永远无法切换。作业终态等控制事实仍严格阻塞。
             rows = connection.execute(
                 """
                 SELECT event_uuid, type FROM edge_event_outbox
-                WHERE acked_at IS NULL
+                WHERE acked_at IS NULL AND type != 'device.telemetry_committed'
                 ORDER BY created_at, event_uuid
                 """
             ).fetchall()

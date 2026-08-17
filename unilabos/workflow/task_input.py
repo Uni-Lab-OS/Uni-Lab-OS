@@ -186,7 +186,7 @@ def _resolve_resource_slot_values(
         material_uuid = validate_uuid(value["uuid"])
         try:
             material = resource_resolver(material_uuid)
-        except Exception as exc:  # noqa: BLE001 - 解析器错误统一关闭为任务输入失败
+        except Exception as exc:
             raise TaskInputError("工作流任务物料解析失败") from exc
         if not isinstance(material, Mapping):
             raise TaskInputError("工作流任务引用的物料不存在")
@@ -255,7 +255,22 @@ def _bind_active_plan(
         if node is None or job is None:
             raise TaskInputError("计划连接点未归属唯一活动作业")
         template_handle_uuid = str(handle.get("template_handle_uuid") or "")
-        binding = input_bindings.get(node_uuid, {}).get(template_handle_uuid)
+        graph_binding = input_bindings.get(node_uuid, {}).get(template_handle_uuid)
+        planned_bindings = node.get("input_bindings")
+        if planned_bindings is not None and not isinstance(planned_bindings, Mapping):
+            raise TaskInputError("计划节点输入绑定不是对象")
+        planned_binding = (
+            planned_bindings.get(template_handle_uuid)
+            if isinstance(planned_bindings, Mapping)
+            else None
+        )
+        if (
+            graph_binding is not None
+            and planned_binding is not None
+            and graph_binding != planned_binding
+        ):
+            raise TaskInputError("计划节点输入绑定发生冲突")
+        binding = planned_binding or graph_binding
         input_projection = next(
             (
                 item

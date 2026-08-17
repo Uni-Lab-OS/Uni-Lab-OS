@@ -33,26 +33,31 @@ class ExecutionPlanGraphNormalizer:
         nodes: Mapping[str, Mapping[str, Any]],
         edges: Sequence[Mapping[str, Any]],
         handles: Mapping[str, Mapping[str, Any]],
-    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        dict[str, dict[str, Any]],
+        dict[str, dict[str, dict[str, str]]],
+    ]:
         """把组合工作流调用（CompositeWorkflowInvocation）边界改写为平面边。
 
         参数：``nodes``/``edges``/``handles`` 来自同一已应用冻结图。返回：不再
-        经过组合调用虚拟节点的业务值边与必须投影到实际动作的静态参数。异常：
-        边界映射引用缺失节点、连接点或入参提供者不唯一时抛
+        经过组合调用虚拟节点的业务值边、必须投影到实际动作的静态参数，以及
+        顶层工作流输入到叶动作的绑定。异常：边界映射引用缺失节点、连接点或
+        入参提供者不唯一时抛
         ``ExecutionPlanBuildError``；禁止在运行时猜测组合边界。
         """
 
         flattened = [dict(edge) for edge in edges]
         param_overrides: dict[str, dict[str, Any]] = defaultdict(dict)
+        binding_overrides: dict[str, dict[str, dict[str, str]]] = defaultdict(dict)
         invocations = [
             (node_uuid, node)
             for node_uuid, node in nodes.items()
             if executor_kind(str(node.get("type") or "")) == "workflow"
         ]
-        # 最深的调用先收敛，使外层映射若指向嵌套调用时仍能在后续轮次继续改写。
-        invocations.sort(
-            key=lambda item: self._composite_depth(item[0], nodes), reverse=True
-        )
+        # 父调用先收敛，使投向嵌套调用的边、静态值和工作流输入绑定能在后续
+        # 轮次继续穿透；同层调用仍保持冻结节点顺序。
+        invocations.sort(key=lambda item: self._composite_depth(item[0], nodes))
         for invocation_uuid, invocation in invocations:
             flattened = self._flatten_invocation(
                 invocation_uuid=invocation_uuid,
@@ -61,8 +66,9 @@ class ExecutionPlanGraphNormalizer:
                 nodes=nodes,
                 handles=handles,
                 param_overrides=param_overrides,
+                binding_overrides=binding_overrides,
             )
-        return flattened, dict(param_overrides)
+        return flattened, dict(param_overrides), dict(binding_overrides)
 
     def _flatten_invocation(
         self,
@@ -73,13 +79,14 @@ class ExecutionPlanGraphNormalizer:
         nodes: Mapping[str, Mapping[str, Any]],
         handles: Mapping[str, Mapping[str, Any]],
         param_overrides: dict[str, dict[str, Any]],
+        binding_overrides: dict[str, dict[str, dict[str, str]]],
     ) -> list[dict[str, Any]]:
         """收敛一个组合工作流调用（CompositeWorkflowInvocation）的全部边界。
 
         参数：调用身份、调用节点、当前边集、节点与连接点索引均来自同一平面
-        快照；``param_overrides`` 收集静态透传值。返回：删除调用边界边并补齐
-        内部值流、入口依赖和完成依赖后的边集。异常：组合元数据不闭合或映射
-        引用快照外事实时失败关闭。
+        快照；``param_overrides`` 收集静态透传值，``binding_overrides`` 收集
+        顶层输入绑定。返回：删除调用边界边并补齐内部值流、入口依赖和完成依赖
+        后的边集。异常：组合元数据不闭合或映射引用快照外事实时失败关闭。
         """
 
         unilab = invocation.get("meta_data")
@@ -130,9 +137,22 @@ class ExecutionPlanGraphNormalizer:
             handle_uuid: name for name, handle_uuid in input_handles_by_name.items()
         }
         raw_invocation_param = invocation.get("param")
-        invocation_param = (
+        invocation_param = dict(
             raw_invocation_param if isinstance(raw_invocation_param, Mapping) else {}
         )
+        invocation_param.update(param_overrides.pop(invocation_uuid, {}))
+        raw_input_bindings = unilab.get("input_bindings")
+        invocation_bindings = dict(
+            raw_input_bindings if isinstance(raw_input_bindings, Mapping) else {}
+        )
+        for handle_uuid, binding in binding_overrides.pop(invocation_uuid, {}).items():
+            existing = invocation_bindings.get(handle_uuid)
+            if existing is not None and existing != binding:
+                raise ExecutionPlanBuildError(
+                    "composite_boundary_mapping_invalid",
+                    "嵌套组合工作流输入绑定发生冲突",
+                )
+            invocation_bindings[handle_uuid] = binding
         for boundary_handle_uuid, mapped_targets in target_mappings.items():
             providers = incoming_by_handle.get(boundary_handle_uuid, [])
             value_providers = self._value_provider_edges(
@@ -164,6 +184,17 @@ class ExecutionPlanGraphNormalizer:
                         )
                     )
             parameter = input_names_by_handle.get(boundary_handle_uuid, "")
+            binding = invocation_bindings.get(boundary_handle_uuid)
+            provider_count = (
+                len(value_providers)
+                + int(parameter in invocation_param)
+                + int(binding is not None)
+            )
+            if provider_count > 1:
+                raise ExecutionPlanBuildError(
+                    "composite_boundary_mapping_invalid",
+                    "组合工作流输入边界存在多个提供者",
+                )
             if not value_providers and parameter in invocation_param:
                 for target in targets:
                     self._project_static_parameter(
@@ -176,6 +207,18 @@ class ExecutionPlanGraphNormalizer:
                         ),
                         handles=handles,
                         value=invocation_param[parameter],
+                    )
+            elif not value_providers and isinstance(binding, Mapping):
+                for target in targets:
+                    self._project_input_binding(
+                        binding_overrides=binding_overrides,
+                        node_uuid=self._mapped_identity(
+                            target, "workflow_node_uuid", nodes
+                        ),
+                        handle_uuid=self._mapped_handle(
+                            target, "target_handle_uuid", handles
+                        ),
+                        binding=binding,
                     )
 
         entry_targets = self._mapping_items(
@@ -255,6 +298,15 @@ class ExecutionPlanGraphNormalizer:
                         handles=handles,
                         value=invocation_param[parameter],
                     )
+                elif not providers and isinstance(
+                    invocation_bindings.get(input_handle_uuid), Mapping
+                ):
+                    self._project_input_binding(
+                        binding_overrides=binding_overrides,
+                        node_uuid=str(edge.get("target_node_uuid") or ""),
+                        handle_uuid=str(edge.get("target_handle_uuid") or ""),
+                        binding=invocation_bindings[input_handle_uuid],
+                    )
                 elif len(providers) != 1:
                     raise ExecutionPlanBuildError(
                         "composite_boundary_mapping_invalid",
@@ -306,6 +358,31 @@ class ExecutionPlanGraphNormalizer:
                     )
                 )
         return self._deduplicate_edges([*retained, *generated])
+
+    @staticmethod
+    def _project_input_binding(
+        *,
+        binding_overrides: dict[str, dict[str, dict[str, str]]],
+        node_uuid: str,
+        handle_uuid: str,
+        binding: Mapping[str, Any],
+    ) -> None:
+        """把一个顶层工作流输入绑定投影到下一层边界或叶动作。"""
+
+        parameter = str(binding.get("parameter") or "")
+        if not parameter:
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流输入绑定缺少参数名",
+            )
+        projected = {"parameter": parameter}
+        existing = binding_overrides[node_uuid].get(handle_uuid)
+        if existing is not None and existing != projected:
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流叶动作输入绑定发生冲突",
+            )
+        binding_overrides[node_uuid][handle_uuid] = projected
 
     @staticmethod
     def _value_provider_edges(

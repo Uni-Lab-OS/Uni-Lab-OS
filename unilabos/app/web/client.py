@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from unilabos.config.config import BasicConfig, HTTPConfig
+from unilabos.config.config import BasicConfig, EdgeControlConfig, HTTPConfig
 from unilabos.resources.resource_tracker import ResourceTreeSet
 from unilabos.utils import logger
 from unilabos.utils.log import info
@@ -93,10 +93,14 @@ class HTTPClient:
     def _local_material_base(self) -> str:
         """返回当前 OS 主机内嵌物料（Material）接口的规范 API 根地址。
 
-        参数：无。返回：由当前 OS HTTP 端口确定的 ``/api/v1`` 地址。异常：无；
-        OS 不接受外部微后端地址，也不代理正式后端（Backend）数据源。
+        参数：无。返回：托管拆分运行时优先使用工作区后端（Backend）的权威地址；
+        合并进程回退到当前 OS HTTP 端口。异常：无；该选择只消费宿主进程注入的
+        ``EdgeControlConfig.backend_addr``，不回退到外部正式后端数据源。
         """
 
+        managed_backend = str(EdgeControlConfig.backend_addr or "").strip()
+        if managed_backend:
+            return self._api_base(managed_backend)
         return self._api_base(f"http://127.0.0.1:{BasicConfig.port}")
 
     @staticmethod
@@ -217,6 +221,54 @@ class HTTPClient:
             return []
         logger.trace(f"OS 本地物料查询到 {len(nodes)} 个节点")
         return nodes
+
+    def material_move(
+        self,
+        *,
+        edge_uuid: str,
+        parent_uuid: str,
+        slot_id: str,
+        command_id: str,
+        actor: str,
+    ) -> Dict[str, Any]:
+        """向本地后端库存权威提交物料移动命令。
+
+        参数分别为具体物料 UUID、目标父物料 UUID、目标库位（Site）、幂等命令
+        身份和审计调用方。返回：``/api/v1/inventory/commands`` 的完成回执。
+        异常：HTTP、响应形状或业务拒绝均原样失败关闭，禁止设备动作成功后继续
+        把未落账的转移报告为成功。
+        """
+
+        url = f"{self._local_material_base()}/inventory/commands"
+        body = {
+            "command_id": str(command_id),
+            "type": "material.move",
+            "payload": {
+                "edge_uuid": str(edge_uuid),
+                "parent_uuid": str(parent_uuid),
+                "slot_id": str(slot_id),
+            },
+            "actor": str(actor),
+        }
+        response = self._session.post(
+            url,
+            json=body,
+            timeout=int(HTTPConfig.material_query_timeout),
+        )
+        if response.status_code != 200:
+            raise requests.HTTPError(
+                f"material move returned HTTP {response.status_code}: {response.text}",
+                response=response,
+            )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("material move response must be an object")
+        if payload.get("status") != "completed":
+            raise ValueError(
+                "material move rejected: "
+                f"{payload.get('error_code') or payload.get('error') or payload!r}"
+            )
+        return payload
 
     def resource_edge_add(self, resources: List[Dict[str, Any]]) -> requests.Response:
         """

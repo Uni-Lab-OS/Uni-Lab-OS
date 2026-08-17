@@ -35,10 +35,6 @@ from unilabos.app.web.device_catalog import (
     project_device_catalog,
 )
 from unilabos.config.config import BasicConfig
-from unilabos.app.scheduler.integration import get_inventory_service
-from unilabos.app.scheduler.inventory.resource_reference import (
-    build_inventory_resource_reference_resolver,
-)
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
 
@@ -1230,6 +1226,11 @@ def get_authoring_device_catalog():
         if online_ok and isinstance(online_data, dict)
         else {}
     )
+    from unilabos.app.scheduler.integration import get_inventory_service
+    from unilabos.app.scheduler.inventory.resource_reference import (
+        build_inventory_resource_reference_resolver,
+    )
+
     # ``inventory_service`` 是本地库存权威（Inventory Authority）组合根；解析器
     # 只按实际物料 UUID 或资源图部署 ID 返回唯一身份，不使用名称或设备别名回退。
     inventory_service = get_inventory_service()

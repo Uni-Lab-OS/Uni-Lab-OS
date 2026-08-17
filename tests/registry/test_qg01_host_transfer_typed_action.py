@@ -274,8 +274,58 @@ async def test_host_transfer_commits_edge_inventory_after_resource_tree_transfer
     assert result["result"] == "转运完成"
 
 
+@pytest.mark.asyncio
+async def test_split_host_transfer_commits_backend_inventory_over_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """拆分 Edge Runtime 必须向后端（Backend）提交同一库存移动事实。
+
+    参数：``monkeypatch`` 关闭进程内库存并记录正式 HTTP 命令调用。返回：无；
+    断言宿主节点（HostNode）不会把“物理树已更新”误报成“权威库存已落账”。
+    异常：HTTP 提交失败必须原样上抛，使动作失败闭合。
+    """
+
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "unilabos.app.scheduler.integration.get_inventory_service",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "unilabos.app.web.client.http_client.material_move",
+        lambda **kwargs: calls.append(("http_inventory", kwargs))
+        or {"status": "applied"},
+        raising=False,
+    )
+    runtime = _TransferExecutionRuntime(calls)
+    resource = {"uuid": "10000000-0000-4000-8000-000000000001"}
+    mount = {"uuid": "20000000-0000-4000-8000-000000000002"}
+
+    result = await HostNode._do_transfer_resource(
+        runtime,
+        resource,
+        "host_node",
+        mount,
+        "L1B1",
+    )
+
+    assert calls[0] == (
+        "resource_tree",
+        [resource],
+        "host_node",
+        [mount],
+        ["L1B1"],
+    )
+    assert calls[1][0] == "http_inventory"
+    assert calls[1][1]["edge_uuid"] == resource["uuid"]
+    assert calls[1][1]["parent_uuid"] == mount["uuid"]
+    assert calls[1][1]["slot_id"] == "L1B1"
+    assert calls[1][1]["actor"] == "host_node.transfer_resource"
+    assert calls[1][1]["command_id"].startswith("host-node-transfer:")
+    assert result["result"] == "转运完成"
+
+
 def test_transfer_result_projects_device_root_to_resource_slot_reference() -> None:
-    """设备型库位父资源必须投影为规范 ResourceSlot 单对象引用。"""
+    """设备型库位父资源必须投影为规范物料占位符（ResourceSlot）单对象引用。"""
 
     mount = {
         "uuid": "50000000-0000-4000-8000-000000000009",

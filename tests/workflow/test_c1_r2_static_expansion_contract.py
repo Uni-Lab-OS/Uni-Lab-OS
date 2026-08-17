@@ -477,9 +477,7 @@ def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
             "workflow_node_template_uuid": LEAF_TEMPLATE_UUID,
             "name": "measure_leaf",
             "type": "workflow",
-            "param": {
-                "value": {"kind": "workflow_input", "parameter": "value"}
-            },
+            "param": {},
             "meta_data": {
                 "unilab": {
                     "input_bindings": {
@@ -503,6 +501,12 @@ def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
         leaf_template,
         leaf_handles,
     )
+    persisted_leaf = deepcopy(leaf_snapshot["nodes"][0])
+    persisted_leaf["uuid"] = expanded_node_uuid(CHILD_NODE_UUID, LEAF_NODE_UUID)
+    persisted_leaf["workflow_uuid"] = CHILD_WORKFLOW_UUID
+    persisted_leaf["parent_uuid"] = CHILD_NODE_UUID
+    persisted_leaf["meta_data"]["unilab"]["input_bindings"] = {}
+    child_snapshot["nodes"].append(persisted_leaf)
     child_snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"][
         "result"
     ] = {
@@ -510,8 +514,14 @@ def _nested_world() -> tuple[CompositeAuthoring, MemorySnapshotProvider]:
         "workflow_node_uuid": CHILD_NODE_UUID,
         "source_handle_uuid": LEAF_VALUE_SOURCE_UUID,
     }
-    child_snapshot["node_templates"] = [leaf_template]
-    child_snapshot["handle_templates"] = leaf_handles
+    child_snapshot["node_templates"] = [
+        leaf_template,
+        *leaf_snapshot["node_templates"],
+    ]
+    child_snapshot["handle_templates"] = [
+        *leaf_handles,
+        *leaf_snapshot["handle_templates"],
+    ]
     templates = [action.detached_template() for action in catalog.actions]
     handles = [
         handle
@@ -731,6 +741,8 @@ def test_nested_published_workflow_expands_into_one_hierarchical_parent_graph() 
     assert expansion.nodes[0]["meta_data"]["unilab"]["composite"][
         "child_workflow_uuid"
     ] == LEAF_WORKFLOW_UUID
+    assert expansion.nodes[0]["param"] == {"value": 2}
+    assert expansion.nodes[0]["meta_data"]["unilab"]["input_bindings"] == {}
     assert provider.read_count == 2
 
 

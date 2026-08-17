@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 import pytest
 
 from unilabos.app.web.client import HTTPClient
-from unilabos.config.config import BasicConfig
+from unilabos.config.config import BasicConfig, EdgeControlConfig
 
 
 class _Response:
@@ -44,6 +44,7 @@ def _local_os_authority(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(BasicConfig, "is_host_mode", True)
     monkeypatch.setattr(BasicConfig, "port", 8092)
+    monkeypatch.setattr(EdgeControlConfig, "backend_addr", "")
 
 
 def _client(responses: List[_Response]) -> tuple[HTTPClient, _Session]:
@@ -77,6 +78,79 @@ def test_microbackend_uses_local_legacy_compat_endpoint() -> None:
             "method": "POST",
             "url": "http://127.0.0.1:8092/api/v1/edge/material/query",
             "json": {"uuids": ["edge-a"], "with_children": False},
+            "timeout": 10,
+        }
+    ]
+
+
+def test_split_edge_uses_managed_backend_inventory_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """拆分 Edge Runtime 必须读取工作区后端（Backend）的库存权威。
+
+    参数：``monkeypatch`` 注入工作区宿主进程下发的后端地址。返回：无；断言物料
+    查询不再错误连接 Edge Runtime 自己未监听的 ``BasicConfig.port``。异常：无。
+    """
+
+    monkeypatch.setattr(
+        EdgeControlConfig,
+        "backend_addr",
+        "http://127.0.0.1:44255",
+    )
+    client, session = _client(
+        [_Response({"code": 0, "data": {"nodes": [{"uuid": "edge-a"}]}})],
+    )
+
+    assert client.material_query(uuids=["edge-a"]) == [{"uuid": "edge-a"}]
+    assert session.calls[0]["url"] == (
+        "http://127.0.0.1:44255/api/v1/edge/material/query"
+    )
+
+
+def test_material_move_uses_inventory_command_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """物料转移（Material Transfer）必须走正式库存命令 HTTP 合同。
+
+    参数：``monkeypatch`` 注入托管工作区后端地址。返回：无；断言请求使用稳定
+    ``material.move`` 命令形状和调用方提供的幂等身份。异常：无。
+    """
+
+    monkeypatch.setattr(
+        EdgeControlConfig,
+        "backend_addr",
+        "http://127.0.0.1:44255/api/v1",
+    )
+    client, session = _client(
+        [_Response({"command_id": "job-1:material.move", "status": "completed"})],
+    )
+
+    result = client.material_move(
+        edge_uuid="material-1",
+        parent_uuid="rack-2",
+        slot_id="L1B1",
+        command_id="job-1:material.move",
+        actor="host_node.transfer_resource",
+    )
+
+    assert result == {
+        "command_id": "job-1:material.move",
+        "status": "completed",
+    }
+    assert session.calls == [
+        {
+            "method": "POST",
+            "url": "http://127.0.0.1:44255/api/v1/inventory/commands",
+            "json": {
+                "command_id": "job-1:material.move",
+                "type": "material.move",
+                "payload": {
+                    "edge_uuid": "material-1",
+                    "parent_uuid": "rack-2",
+                    "slot_id": "L1B1",
+                },
+                "actor": "host_node.transfer_resource",
+            },
             "timeout": 10,
         }
     ]

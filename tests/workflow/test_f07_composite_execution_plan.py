@@ -286,10 +286,12 @@ def test_composite_passthrough_flattens_value_and_completion_edges() -> None:
         ),
     ]
 
-    flattened, params = ExecutionPlanGraphNormalizer().flatten_composite_edges(
-        nodes=nodes,
-        edges=edges,
-        handles=handles,
+    flattened, params, bindings = (
+        ExecutionPlanGraphNormalizer().flatten_composite_edges(
+            nodes=nodes,
+            edges=edges,
+            handles=handles,
+        )
     )
 
     endpoints = {
@@ -307,6 +309,7 @@ def test_composite_passthrough_flattens_value_and_completion_edges() -> None:
         (INTERNAL_UUID, INTERNAL_READY, CONSUMER_UUID, CONSUMER_TARGET),
     }
     assert params == {}
+    assert bindings == {}
 
 
 def test_chained_composite_passthrough_counts_only_value_provider() -> None:
@@ -327,32 +330,34 @@ def test_chained_composite_passthrough_counts_only_value_provider() -> None:
         )
     }
     handles = {handle["uuid"]: handle for handle in _handles()}
-    flattened, params = ExecutionPlanGraphNormalizer().flatten_composite_edges(
-        nodes=nodes,
-        edges=[
-            _edge(
-                "74000000-0000-4000-8000-000000000005",
-                PRODUCER_UUID,
-                PRODUCER_SOURCE,
-                INVOCATION_UUID,
-                INVOCATION_TARGET,
-            ),
-            _edge(
-                "74000000-0000-4000-8000-000000000006",
-                INVOCATION_UUID,
-                INVOCATION_SOURCE,
-                SECOND_INVOCATION_UUID,
-                INVOCATION_TARGET,
-            ),
-            _edge(
-                "74000000-0000-4000-8000-000000000007",
-                SECOND_INVOCATION_UUID,
-                INVOCATION_SOURCE,
-                CONSUMER_UUID,
-                CONSUMER_TARGET,
-            ),
-        ],
-        handles=handles,
+    flattened, params, bindings = (
+        ExecutionPlanGraphNormalizer().flatten_composite_edges(
+            nodes=nodes,
+            edges=[
+                _edge(
+                    "74000000-0000-4000-8000-000000000005",
+                    PRODUCER_UUID,
+                    PRODUCER_SOURCE,
+                    INVOCATION_UUID,
+                    INVOCATION_TARGET,
+                ),
+                _edge(
+                    "74000000-0000-4000-8000-000000000006",
+                    INVOCATION_UUID,
+                    INVOCATION_SOURCE,
+                    SECOND_INVOCATION_UUID,
+                    INVOCATION_TARGET,
+                ),
+                _edge(
+                    "74000000-0000-4000-8000-000000000007",
+                    SECOND_INVOCATION_UUID,
+                    INVOCATION_SOURCE,
+                    CONSUMER_UUID,
+                    CONSUMER_TARGET,
+                ),
+            ],
+            handles=handles,
+        )
     )
 
     endpoints = {
@@ -372,6 +377,7 @@ def test_chained_composite_passthrough_counts_only_value_provider() -> None:
         (SECOND_INTERNAL_UUID, INTERNAL_READY, CONSUMER_UUID, CONSUMER_TARGET),
     }
     assert params == {}
+    assert bindings == {}
 
 
 def test_composite_static_passthrough_projects_actual_action_params() -> None:
@@ -386,24 +392,135 @@ def test_composite_static_passthrough_projects_actual_action_params() -> None:
         )
     }
     handles = {handle["uuid"]: handle for handle in _handles()}
-    flattened, params = ExecutionPlanGraphNormalizer().flatten_composite_edges(
-        nodes=nodes,
-        edges=[
-            _edge(
-                "74000000-0000-4000-8000-000000000004",
-                INVOCATION_UUID,
-                INVOCATION_SOURCE,
-                CONSUMER_UUID,
-                CONSUMER_TARGET,
-            )
-        ],
-        handles=handles,
+    flattened, params, bindings = (
+        ExecutionPlanGraphNormalizer().flatten_composite_edges(
+            nodes=nodes,
+            edges=[
+                _edge(
+                    "74000000-0000-4000-8000-000000000004",
+                    INVOCATION_UUID,
+                    INVOCATION_SOURCE,
+                    CONSUMER_UUID,
+                    CONSUMER_TARGET,
+                )
+            ],
+            handles=handles,
+        )
     )
 
     assert params == {
         INTERNAL_UUID: {"value": 7},
         CONSUMER_UUID: {"value": 7},
     }
+    assert bindings == {}
     assert [
         (edge["source_node_uuid"], edge["target_node_uuid"]) for edge in flattened
     ] == [(INTERNAL_UUID, CONSUMER_UUID)]
+
+
+def test_nested_composite_static_input_reaches_leaf_action() -> None:
+    """外层静态参数须逐层穿透嵌套调用并冻结到叶动作（Action）。"""
+
+    outer = _composite_node(static_value=7)
+    outer_composite = outer["meta_data"]["unilab"]["composite"]
+    outer_composite["target_mappings"][INVOCATION_TARGET] = [
+        {
+            "workflow_node_uuid": SECOND_INVOCATION_UUID,
+            "target_handle_uuid": INVOCATION_TARGET,
+        }
+    ]
+    inner = _composite_node(
+        invocation_uuid=SECOND_INVOCATION_UUID,
+        internal_uuid=SECOND_INTERNAL_UUID,
+    )
+    inner["parent_uuid"] = INVOCATION_UUID
+    leaf = _node(SECOND_INTERNAL_UUID, INTERNAL_TEMPLATE)
+    leaf["parent_uuid"] = SECOND_INVOCATION_UUID
+    nodes = {node["uuid"]: node for node in (outer, inner, leaf)}
+
+    _edges, params, bindings = ExecutionPlanGraphNormalizer().flatten_composite_edges(
+        nodes=nodes,
+        edges=[],
+        handles={handle["uuid"]: handle for handle in _handles()},
+    )
+
+    assert params == {SECOND_INTERNAL_UUID: {"value": 7}}
+    assert bindings == {}
+
+
+def test_nested_composite_workflow_input_binds_leaf_job() -> None:
+    """顶层工作流输入须逐层投影到嵌套叶动作的冻结作业参数。"""
+
+    outer = _composite_node()
+    outer["meta_data"]["unilab"]["input_bindings"] = {
+        INVOCATION_TARGET: {"parameter": "value"}
+    }
+    outer_composite = outer["meta_data"]["unilab"]["composite"]
+    outer_composite["target_mappings"][INVOCATION_TARGET] = [
+        {
+            "workflow_node_uuid": SECOND_INVOCATION_UUID,
+            "target_handle_uuid": INVOCATION_TARGET,
+        }
+    ]
+    inner = _composite_node(
+        invocation_uuid=SECOND_INVOCATION_UUID,
+        internal_uuid=SECOND_INTERNAL_UUID,
+    )
+    inner["parent_uuid"] = INVOCATION_UUID
+    leaf = _node(SECOND_INTERNAL_UUID, INTERNAL_TEMPLATE)
+    leaf["parent_uuid"] = SECOND_INVOCATION_UUID
+    graph = {
+        "workflow": {
+            "uuid": WORKFLOW_UUID,
+            "revision": 1,
+            "name": "nested input",
+            "tags": [],
+            "meta_data": {
+                "unilab": {
+                    "input_contract": {
+                        "version": 1,
+                        "parameters": [
+                            {
+                                "name": "value",
+                                "schema": {"type": "integer"},
+                                "required": False,
+                                "default": 9,
+                            }
+                        ],
+                    },
+                    "output_contract": {"version": 1, "outputs": []},
+                    "output_bindings": {},
+                }
+            },
+        },
+        "nodes": [outer, inner, leaf],
+        "edges": [],
+        "node_templates": [
+            {"uuid": INVOCATION_TEMPLATE, "node_type": "workflow", "type": "workflow"},
+            {"uuid": INTERNAL_TEMPLATE, "node_type": "compute", "type": "compute"},
+        ],
+        "handle_templates": [
+            handle
+            for handle in _handles()
+            if handle["uuid"]
+            in {
+                INVOCATION_TARGET,
+                INVOCATION_SOURCE,
+                INTERNAL_TARGET,
+                INTERNAL_READY,
+            }
+        ],
+    }
+
+    plan, jobs = ExecutionPlanBuilder().build(
+        graph, run_mode="normal", target_node_uuid=None
+    )
+    prepared = prepare_task_input(
+        graph=graph,
+        raw_input={},
+        execution_plan=plan,
+        jobs=jobs,
+    )
+
+    assert prepared.resolved_input == {"value": 9}
+    assert prepared.jobs[0]["param"] == {"value": 9}

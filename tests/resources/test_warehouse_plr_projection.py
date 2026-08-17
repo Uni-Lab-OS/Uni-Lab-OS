@@ -55,8 +55,14 @@ def _deployment_deck_node() -> ResourceDictInstance:
             "position": {
                 "size": {"width": 100, "height": 100, "depth": 10},
             },
-            # setup 只控制部署类构造，不属于 PLR Deck 的序列化合同。
-            "config": {"setup": False},
+            # setup 和 rendering 只控制部署/前端，不属于 PLR Deck 合同。
+            "config": {
+                "setup": False,
+                "rendering": {
+                    "kind": "deck",
+                    "dimensionsMm": [100, 100, 10],
+                },
+            },
             "data": {},
         }
     )
@@ -96,7 +102,7 @@ def test_deployment_site_declaration_does_not_reach_plr_constructor() -> None:
 
 
 def test_deployment_only_deck_setup_does_not_reach_plr_constructor() -> None:
-    """证明部署期工作台初始化开关不会泄漏给 PLR 构造器。"""
+    """证明部署期工作台初始化及渲染元数据不会泄漏给 PLR 构造器。"""
     deck_node = _deployment_deck_node()
 
     projected_resources = ResourceTreeSet(

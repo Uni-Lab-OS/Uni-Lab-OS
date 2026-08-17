@@ -2829,6 +2829,19 @@ class HostNode(BaseROS2DeviceNode):
                 slot_id=site,
                 actor="host_node.transfer_resource",
             )
+        else:
+            # 托管工作区中宿主节点（HostNode）运行在 Edge Runtime，而库存权威
+            # 位于独立本地后端（Local Backend）。沿用正式库存 command HTTP
+            # 合同写入；失败必须上抛，不能把仅 Edge 资源树成功误报为系统转移。
+            from unilabos.app.web.client import http_client
+
+            http_client.material_move(
+                edge_uuid=_stable_resource_uuid(resource),
+                parent_uuid=_stable_resource_uuid(mount_resource),
+                slot_id=site,
+                command_id=f"host-node-transfer:{uuid.uuid4()}",
+                actor="host_node.transfer_resource",
+            )
         return {
             "resource": _dump_resource_slot(resource),
             "mount_resource": _dump_resource_slot(mount_resource),

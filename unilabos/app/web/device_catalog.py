@@ -67,7 +67,6 @@ def project_device_catalog(
         # ``material_uuid`` 是库存权威证明的实际设备物料身份；资源树中的 ``uuid``
         # 仅属于本次运行快照，不能授权设备动作（Action）执行。
         material_identity = material_resolver(device_id) if material_resolver else None
-        material_uuid = _device_material_uuid(material_resolver, device_id)
         material_uuid = (
             str(material_identity.get("uuid") or "")
             if isinstance(material_identity, Mapping)
@@ -176,25 +175,6 @@ def project_backend_device_overviews(
             }
         )
     return sorted(result, key=lambda item: item["material"]["uuid"])
-
-
-def _device_material_uuid(
-    resolver: DeviceMaterialResolver | None,
-    device_id: str,
-) -> str:
-    """从库存只读端口提取设备物料（Material）稳定身份。
-
-    参数：``resolver`` 是可选库存身份解析器，``device_id`` 是资源图部署 ID。
-    返回：解析成功时为库存物料 UUID，否则为空字符串。异常：解析器读取库存失败
-    或发现身份歧义时原样传播，调用方不得回退到其他身份命名空间。
-    """
-
-    if resolver is None:
-        return ""
-    identity = resolver(device_id)
-    if not isinstance(identity, Mapping):
-        return ""
-    return str(identity.get("uuid") or "").strip()
 
 
 def _resource_nodes(resources: Any) -> list[dict[str, Any]]:

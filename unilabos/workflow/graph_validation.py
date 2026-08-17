@@ -198,6 +198,7 @@ def validate_graph(
 
     _project_composite_boundary_inputs(
         nodes=enabled,
+        parent_by_uuid={node.uuid: node.parent_uuid for node in nodes},
         handles=handles,
         effective_params=effective_params,
         node_meta_data=node_meta_data,
@@ -256,6 +257,7 @@ def validate_graph(
 def _project_composite_boundary_inputs(
     *,
     nodes: Mapping[str, WorkflowNodeWrite],
+    parent_by_uuid: Mapping[str, str | None],
     handles: Mapping[str, Dict[str, Any]],
     effective_params: Mapping[str, Dict[str, Any]],
     node_meta_data: Mapping[str, Dict[str, Any]],
@@ -265,13 +267,17 @@ def _project_composite_boundary_inputs(
 ) -> None:
     """把组合调用边界已提供的值投影到展开内部目标。
 
-    参数：已启用节点、目录连接点（Handle）、实参、元数据、输入绑定
-    和已连线事实。返回：无；原地补充内部目标的可用键。异常：
+        参数：已启用节点、完整父级索引、目录连接点（Handle）、实参、元数据、
+        输入绑定和已连线事实。返回：无；原地补充内部目标的可用键。异常：
     边界映射不闭合、跨调用层级或引用错误连接点时抛出
     ``GraphValidationError``。
     """
 
-    for invocation_uuid, invocation in nodes.items():
+    invocations = sorted(
+        nodes.items(),
+        key=lambda item: _node_depth(item[0], parent_by_uuid=parent_by_uuid),
+    )
+    for invocation_uuid, invocation in invocations:
         metadata = node_meta_data.get(invocation_uuid, {})
         unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
         composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
@@ -324,7 +330,11 @@ def _project_composite_boundary_inputs(
                 if (
                     target_node is None
                     or target_handle is None
-                    or target_node.parent_uuid != invocation_uuid
+                    or not _is_descendant_of(
+                        target_node_uuid,
+                        invocation_uuid,
+                        parent_by_uuid=parent_by_uuid,
+                    )
                     or target_handle.get("workflow_node_template_uuid")
                     != target_node.workflow_node_template_uuid
                     or target_handle.get("io_type") != "target"
@@ -341,6 +351,37 @@ def _project_composite_boundary_inputs(
                     continue
                 connected_inputs[target_input] = f"composite:{invocation_uuid}"
                 available_data_keys[target_node_uuid].append(target_key)
+
+
+def _is_descendant_of(
+    node_uuid: str,
+    ancestor_uuid: str,
+    *,
+    parent_by_uuid: Mapping[str, str | None],
+) -> bool:
+    """判断节点是否位于组合调用的递归子树内。"""
+
+    current = parent_by_uuid.get(node_uuid)
+    while current is not None:
+        if current == ancestor_uuid:
+            return True
+        current = parent_by_uuid.get(current)
+    return False
+
+
+def _node_depth(
+    node_uuid: str,
+    *,
+    parent_by_uuid: Mapping[str, str | None],
+) -> int:
+    """返回已通过无环校验的节点父级深度。"""
+
+    depth = 0
+    current = parent_by_uuid.get(node_uuid)
+    while current is not None:
+        depth += 1
+        current = parent_by_uuid.get(current)
+    return depth
 
 
 def _validate_parent_cycles(nodes: Iterable[WorkflowNodeWrite]) -> None:

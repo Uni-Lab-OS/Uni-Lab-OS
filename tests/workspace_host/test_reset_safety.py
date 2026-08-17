@@ -160,6 +160,36 @@ def test_pending_edge_outcome_and_unacknowledged_event_block_reset(
     ]
 
 
+def test_telemetry_short_notification_does_not_block_local_rebuild(
+    workspace: Path,
+) -> None:
+    """已先经 HTTP 落账的遥测短通知不得饿死显式本地重建。
+
+    参数：``workspace`` 是隔离工作区。返回：无；断言尚未收到 WebSocket ACK 的
+    ``device.telemetry_committed`` 不属于作业执行或结果不明事实。异常：数据库
+    合同损坏仍由读取器失败关闭。
+    """
+
+    paths = WorkspacePaths.resolve(workspace)
+    connection = _database(
+        paths.runtime / "edge" / "edge_control.db",
+        """
+        CREATE TABLE edge_event_outbox(
+            event_uuid TEXT PRIMARY KEY, type TEXT NOT NULL, created_at TEXT NOT NULL,
+            acked_at REAL
+        );
+        """,
+    )
+    connection.execute(
+        "INSERT INTO edge_event_outbox VALUES "
+        "('telemetry-1', 'device.telemetry_committed', 'now', NULL)"
+    )
+    connection.commit()
+    connection.close()
+
+    assert inspect_local_reset_blockers(paths) == []
+
+
 def test_second_check_restores_previously_ready_components_on_race(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,

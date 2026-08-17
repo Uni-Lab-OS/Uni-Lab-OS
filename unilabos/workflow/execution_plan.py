@@ -75,7 +75,11 @@ class ExecutionPlanBuilder:
         # 和来源到首消费动作的直连边成为冻结执行计划（ExecutionPlan）事实。
         planned_graph_nodes = {**material_sources, **active}
         graph_normalizer = ExecutionPlanGraphNormalizer()
-        flattened_edges, composite_params = graph_normalizer.flatten_composite_edges(
+        (
+            flattened_edges,
+            composite_params,
+            composite_input_bindings,
+        ) = graph_normalizer.flatten_composite_edges(
             nodes=nodes,
             edges=edges,
             handles=handles,
@@ -191,9 +195,11 @@ class ExecutionPlanBuilder:
             if requirements.get(node_uuid):
                 planned_node["material_requirements"] = requirements[node_uuid]
             if material_binding_targets.get(node_uuid):
-                planned_node["material_binding_targets"] = (
-                    material_binding_targets[node_uuid]
-                )
+                planned_node["material_binding_targets"] = material_binding_targets[
+                    node_uuid
+                ]
+            if composite_input_bindings.get(node_uuid):
+                planned_node["input_bindings"] = composite_input_bindings[node_uuid]
             planned_nodes.append(planned_node)
             jobs.append(
                 {
