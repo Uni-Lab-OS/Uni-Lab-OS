@@ -18,6 +18,7 @@ def _write_editable_package(
     package_id: str = "demo_package",
     workflow_uuid: str = WORKFLOW_UUID,
     entries: tuple[tuple[str, str], ...] | None = None,
+    tags: tuple[str, ...] = (),
     create_sources: bool = True,
 ) -> Path:
     """创建一个最小可编辑包（Editable Package）。
@@ -27,6 +28,7 @@ def _write_editable_package(
     - ``package_id``：声明中的稳定包身份，同时也是 Python 包目录名。
     - ``workflow_uuid``：已有工作流（Workflow）的稳定身份。
     - ``entries``：可选的工作流 UUID 与完整包相对源码路径集合。
+    - ``tags``：首项工作流声明的目录标签。
     - ``create_sources``：是否创建声明指向的普通 UTF-8 Python 文件。
 
     返回：实际保存 Python 工作流源码（Workflow Source）的文件路径。
@@ -47,12 +49,13 @@ def _write_editable_package(
                 )
     default_source = package_root / "workflows" / "demo.py"
     workflow_lines: list[str] = []
-    for declared_workflow_uuid, declared_source in declared_entries:
+    for index, (declared_workflow_uuid, declared_source) in enumerate(declared_entries):
         # 每项声明同时冻结工作流身份与规范包相对源码身份。
         workflow_lines.extend(
             (
                 f"  - workflow_uuid: {declared_workflow_uuid}",
                 f"    source: {declared_source}",
+                *((f"    tags: [{', '.join(tags)}]",) if index == 0 and tags else ()),
             )
         )
     selected_root.joinpath("package.yaml").write_text(
@@ -156,6 +159,7 @@ def test_discovery_accepts_nested_process_category_source(tmp_path: Path) -> Non
     _write_editable_package(
         selected_root,
         entries=((WORKFLOW_UUID, declared_source),),
+        tags=("取样", "sampling"),
     )
 
     plan = discover_editable_sources((selected_root,))
@@ -166,6 +170,7 @@ def test_discovery_accepts_nested_process_category_source(tmp_path: Path) -> Non
     assert registration.source_uri == (
         "package://demo_package/workflows/operations/sampling/demo.py"
     )
+    assert registration.tags == ("取样", "sampling")
     assert selected_root.joinpath(declared_source).is_file()
 
 

@@ -1337,6 +1337,7 @@ class WorkflowService:
                 "package_root": str(registration.package_root),
                 "relative_path": registration.relative_path,
                 "source_uri": registration.source_uri,
+                "tags": registration.tags,
             }
             for registration in plan.registrations
         )

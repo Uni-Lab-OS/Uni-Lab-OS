@@ -21,11 +21,13 @@ def _registration(
     package_root: str = "/workspace/alpha_lab",
     relative_path: str = "workflows/demo.py",
     source_uri: str | None = None,
-) -> dict[str, str]:
+    tags: tuple[str, ...] = (),
+) -> dict[str, object]:
     """构造一项已通过源码发现（Source Discovery）校验的注册行。
 
     参数：``workflow_uuid`` 是清单声明的工作流（Workflow）身份；包身份、包目录、
-    相对路径与来源 URI 共同形成工作流源码（Workflow Source）身份。
+    相对路径与来源 URI 共同形成工作流源码（Workflow Source）身份；``tags``
+    是首次创建定义时写入的目录标签。
     返回：可交给存储安装接口的独立字典；本函数不读写文件或数据库。
     """
 
@@ -37,6 +39,7 @@ def _registration(
         "package_root": package_root,
         "relative_path": relative_path,
         "source_uri": resolved_source_uri,
+        "tags": tags,
     }
 
 
@@ -87,7 +90,7 @@ def test_missing_definition_is_created_with_stable_manifest_provenance(
     """
 
     # ``registration`` 是显式授权清单产生的唯一可信身份输入。
-    registration = _registration()
+    registration = _registration(tags=("取样", "sampling"))
 
     installed = workflow_store.install_discovered_sources((registration,))
 
@@ -109,7 +112,7 @@ def test_missing_definition_is_created_with_stable_manifest_provenance(
             }
         },
         "name": "alpha_lab.demo",
-        "tags": [],
+        "tags": ["取样", "sampling"],
         "revision": 1,
     }
     # ``authoring_record`` 证明同一事务已经创建空创作事实，但没有编译候选。
@@ -130,7 +133,7 @@ def test_active_definition_is_reused_without_overwriting_user_fields_on_restart(
 
     database_path = tmp_path / "workflow_history.db"
     # ``registration`` 是两次进程生命周期都使用的同一工作流源码（Workflow Source）。
-    registration = _registration()
+    registration = _registration(tags=("清单标签",))
     first = WorkflowStore(database_path)
     first.create_workflow(
         workflow_uuid=WORKFLOW_A_UUID,
@@ -314,6 +317,31 @@ def test_discovered_install_rejects_all_c0_and_del_path_characters_without_write
             with pytest.raises(StoreConflict):
                 workflow_store.install_discovered_sources((registration,))
             _assert_absent(workflow_store, WORKFLOW_A_UUID)
+
+
+@pytest.mark.parametrize(
+    "tags",
+    (
+        ("重复", "重复"),
+        (" 前导空格",),
+        ("",),
+        tuple(f"标签-{index}" for index in range(17)),
+    ),
+)
+def test_discovered_install_rejects_invalid_catalog_tags_without_writes(
+    workflow_store: WorkflowStore,
+    tags: tuple[str, ...],
+) -> None:
+    """畸形目录标签必须在创建工作流定义前关闭式拒绝。
+
+    参数：``workflow_store`` 是隔离工作流权威，``tags`` 是重复、未规范化、
+    空值或超量标签；返回无。状态：失败后定义、来源和创作事实均不存在。
+    """
+
+    with pytest.raises(StoreConflict):
+        workflow_store.install_discovered_sources((_registration(tags=tags),))
+
+    _assert_absent(workflow_store, WORKFLOW_A_UUID)
 
 
 def test_soft_deleted_definition_blocks_whole_batch_without_resurrection(

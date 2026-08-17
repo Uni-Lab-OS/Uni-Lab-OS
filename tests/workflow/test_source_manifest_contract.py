@@ -104,6 +104,42 @@ def test_discovery_limits_workflow_declarations_to_1024(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "tags_yaml",
+    (
+        "取样",
+        "[重复, 重复]",
+        '[" 前导空格"]',
+        "[" + ", ".join(f"标签-{index}" for index in range(17)) + "]",
+    ),
+)
+def test_discovery_rejects_invalid_workflow_catalog_tags(
+    tmp_path: Path,
+    tags_yaml: str,
+) -> None:
+    """目录标签必须是有限、互异且已规范化的字符串序列。
+
+    参数：``tmp_path`` 保存隔离清单；``tags_yaml`` 是类型、重复、空白或数量
+    违反合同的标签 YAML。返回无；错误必须归入工作流源码声明。
+    """
+
+    selected_root = tmp_path / "selected"
+    selected_root.mkdir()
+    selected_root.joinpath("package.yaml").write_text(
+        "package: {name: demo}\n"
+        "workflows:\n"
+        "  - workflow_uuid: 11111111-1111-4111-8111-111111111111\n"
+        "    source: demo/workflows/demo.py\n"
+        f"    tags: {tags_yaml}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SourceDeclarationError) as caught:
+        discover_editable_sources((selected_root,))
+
+    assert caught.value.code == "invalid_workflow_source"
+
+
+@pytest.mark.parametrize(
     ("package_id", "workflow_uuid", "expected_code"),
     (
         ("实验包", "11111111-1111-4111-8111-111111111111", "invalid_package"),

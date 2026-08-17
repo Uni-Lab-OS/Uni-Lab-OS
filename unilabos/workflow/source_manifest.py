@@ -88,10 +88,11 @@ class SourceManifestError(RuntimeError):
 
 @dataclass(frozen=True)
 class WorkflowSourceEntry:
-    """一项工作流（Workflow）到 Python 源码的稳定声明。"""
+    """一项工作流（Workflow）到 Python 源码及目录标签的稳定声明。"""
 
     workflow_uuid: str
     relative_path: str
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -197,11 +198,27 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     异常：字段、UUID 或路径不符合合同时抛出 ``SourceManifestError``。
     """
 
-    if not isinstance(raw, dict) or set(raw) != {"workflow_uuid", "source"}:
+    required_fields = {"workflow_uuid", "source"}
+    if (
+        not isinstance(raw, dict)
+        or not required_fields <= set(raw)
+        or set(raw) - (required_fields | {"tags"})
+    ):
         raise SourceManifestError("invalid_workflow_source")
     raw_uuid = raw["workflow_uuid"]
     raw_source = raw["source"]
+    raw_tags = raw.get("tags", [])
     if not isinstance(raw_uuid, str) or not isinstance(raw_source, str):
+        raise SourceManifestError("invalid_workflow_source")
+    if (
+        not isinstance(raw_tags, list)
+        or len(raw_tags) > 16
+        or any(
+            not isinstance(tag, str) or not tag or tag != tag.strip() or len(tag) > 64
+            for tag in raw_tags
+        )
+        or len(set(raw_tags)) != len(raw_tags)
+    ):
         raise SourceManifestError("invalid_workflow_source")
     try:
         workflow_uuid = validate_uuid(raw_uuid)
@@ -226,6 +243,7 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     return WorkflowSourceEntry(
         workflow_uuid=workflow_uuid,
         relative_path=relative_path,
+        tags=tuple(raw_tags),
     )
 
 

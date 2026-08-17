@@ -107,6 +107,7 @@ def compile_workflow_definitions(
                         for name, schema in program.declared_output_schemas
                     ],
                     "source_uri": (f"package://{import_package}/{entry.relative_path}"),
+                    "tags": entry.tags,
                     "workflow_uuid": workflow_uuid,
                 },
             )

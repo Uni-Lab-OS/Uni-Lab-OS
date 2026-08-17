@@ -533,10 +533,13 @@ def _workflow_source_registration(
         raise ValueError("源码登记只接受工作流目录定义")
     workflow_uuid = definition.details.get("workflow_uuid")
     source_uri = definition.details.get("source_uri")
+    tags = definition.details.get("tags", ())
     if not isinstance(workflow_uuid, str) or not workflow_uuid:
         raise ValueError("工作流目录定义缺少 workflow_uuid")
     if not isinstance(source_uri, str) or not source_uri:
         raise ValueError("工作流目录定义缺少 source_uri")
+    if not isinstance(tags, tuple) or any(not isinstance(tag, str) for tag in tags):
+        raise ValueError("工作流目录定义标签无效")
     declaring_path = PurePosixPath(definition.declaring_file)
     expected_prefix = (catalog.import_package,)
     if (
@@ -553,6 +556,7 @@ def _workflow_source_registration(
         package_root=package_root,
         relative_path=relative_path,
         source_uri=source_uri,
+        tags=tags,
         module=definition.module,
         symbol=definition.symbol,
         definition_content_hash=definition.content_hash,

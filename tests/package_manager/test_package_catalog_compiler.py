@@ -37,7 +37,8 @@ def _write_package(workspace_root: Path, *, broken_source: bool = False) -> None
         "  name: catalog_lab\n"
         "workflows:\n"
         f"  - workflow_uuid: {WORKFLOW_UUID}\n"
-        "    source: catalog_lab/workflows/prepare.py\n",
+        "    source: catalog_lab/workflows/prepare.py\n"
+        "    tags: [测试, catalog]\n",
         encoding="utf-8",
     )
     package_root.joinpath("definitions.py").write_text(
@@ -152,6 +153,7 @@ def test_compile_package_source_discovers_complete_catalog_without_import(
     assert catalog.definitions.workflows[0].details["source_uri"] == (
         "package://catalog_lab/workflows/prepare.py"
     )
+    assert catalog.definitions.workflows[0].details["tags"] == ("测试", "catalog")
     # ``process_schema`` 是注册表（Registry）规范动作合同的 JSON Schema 投影。
     process_schema = catalog.definitions.devices[0].details["registry_entry"]["class"][
         "action_value_mappings"

@@ -38,7 +38,7 @@ def _contains_path_control_character(value: str) -> bool:
 
 def install_discovered_sources(
     conn: sqlite3.Connection,
-    registrations: Iterable[Mapping[str, str]],
+    registrations: Iterable[Mapping[str, Any]],
     *,
     now: str,
     before_commit: Callable[[], None] | None = None,
@@ -87,13 +87,14 @@ def install_discovered_sources(
 
 
 def _normalize_registrations(
-    registrations: Iterable[Mapping[str, str]],
-) -> tuple[dict[str, str], ...]:
+    registrations: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
     """冻结并验证完整来源注册字段。
 
-    参数：``registrations`` 是调用者提供的来源映射集合。返回：只含五个规范字段的
-    独立字典元组。异常：集合不可迭代、字段缺失、值非字符串/为空或来源 URI 与
-    包身份不一致时抛出 ``SourceBootstrapConflict``。
+    参数：``registrations`` 是调用者提供的来源映射集合。返回：只含五个来源身份
+    字段和目录标签的独立字典元组。异常：集合不可迭代、字段缺失、值非字符串/
+    为空、标签未规范化或来源 URI 与包身份不一致时抛出
+    ``SourceBootstrapConflict``。
     """
 
     try:
@@ -102,12 +103,16 @@ def _normalize_registrations(
         raise SourceBootstrapConflict("工作流源码注册字段不完整") from None
     if any(
         not isinstance(registration, Mapping)
-        or set(registration) != set(_REGISTRATION_FIELDS)
+        or not set(_REGISTRATION_FIELDS) <= set(registration)
+        or set(registration) - (set(_REGISTRATION_FIELDS) | {"tags"})
         for registration in incoming_rows
     ):
         raise SourceBootstrapConflict("工作流源码注册字段不完整")
     normalized = tuple(
-        {field: registration[field] for field in _REGISTRATION_FIELDS}
+        {
+            **{field: registration[field] for field in _REGISTRATION_FIELDS},
+            "tags": tuple(registration.get("tags", ())),
+        }
         for registration in incoming_rows
     )
     for registration in normalized:
@@ -116,6 +121,19 @@ def _normalize_registrations(
             for field in _REGISTRATION_FIELDS
         ):
             raise SourceBootstrapConflict("工作流源码注册字段无效")
+        tags = registration["tags"]
+        if (
+            len(tags) > 16
+            or any(
+                not isinstance(tag, str)
+                or not tag
+                or tag != tag.strip()
+                or len(tag) > 64
+                for tag in tags
+            )
+            or len(set(tags)) != len(tags)
+        ):
+            raise SourceBootstrapConflict("工作流目录标签无效")
         try:
             # ``canonical_workflow_uuid`` 是不可由宽松字符串改写得到的规范工作流身份。
             canonical_workflow_uuid = validate_uuid(registration["workflow_uuid"])
@@ -204,7 +222,7 @@ def _validate_relative_source_path(relative_path: str) -> None:
 
 
 def _validate_batch_identities(
-    registrations: tuple[dict[str, str], ...],
+    registrations: tuple[dict[str, Any], ...],
 ) -> None:
     """在写库前验证批内工作流、路径、URI 与包根身份唯一。
 
@@ -238,7 +256,7 @@ def _validate_batch_identities(
 
 
 def _validate_existing_identities(
-    registrations: tuple[dict[str, str], ...],
+    registrations: tuple[dict[str, Any], ...],
     existing_rows: tuple[dict[str, Any], ...],
 ) -> None:
     """验证新批次不会重绑定任何既有工作流源码事实。
@@ -292,8 +310,8 @@ def _validate_existing_identities(
 
 def _classify_workflow_definitions(
     conn: sqlite3.Connection,
-    registrations: tuple[dict[str, str], ...],
-) -> tuple[dict[str, str], ...]:
+    registrations: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
     """把清单身份分类为活动、缺失或软删除（Soft Deletion）工作流定义。
 
     参数：``conn`` 是当前写事务；``registrations`` 是已通过全部身份预检的批次。
@@ -301,7 +319,7 @@ def _classify_workflow_definitions(
     ``SourceBootstrapConflict``，绝不自动复活。
     """
 
-    missing: list[dict[str, str]] = []
+    missing: list[dict[str, Any]] = []
     for registration in registrations:
         # ``workflow_uuid`` 是必须在活动、缺失和软删除历史之间唯一分类的定义身份。
         workflow_uuid = registration["workflow_uuid"]
@@ -320,7 +338,7 @@ def _classify_workflow_definitions(
 def _insert_workflow_skeleton(
     conn: sqlite3.Connection,
     *,
-    registration: Mapping[str, str],
+    registration: Mapping[str, Any],
     now: str,
 ) -> None:
     """为一项缺失清单身份创建最小后端形态（Backend-shaped）工作流骨架。
@@ -349,7 +367,7 @@ def _insert_workflow_skeleton(
         INSERT INTO workflow(
             uuid, create_time, update_time, deleted_at,
             description, meta_data, name, tags, revision
-        ) VALUES (?, ?, ?, NULL, NULL, ?, ?, '[]', 1)
+        ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, 1)
         """,
         (
             registration["workflow_uuid"],
@@ -357,6 +375,7 @@ def _insert_workflow_skeleton(
             now,
             encode_json(manifest_provenance, sort_keys=True).decode("utf-8"),
             workflow_name,
+            encode_json(list(registration["tags"])).decode("utf-8"),
         ),
     )
 
@@ -364,7 +383,7 @@ def _insert_workflow_skeleton(
 def _insert_source_registration(
     conn: sqlite3.Connection,
     *,
-    registration: Mapping[str, str],
+    registration: Mapping[str, Any],
     now: str,
 ) -> None:
     """插入一项首次出现的工作流源码注册。
