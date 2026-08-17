@@ -23,6 +23,8 @@ from unilabos.workflow.composite_compatibility import (
 PARENT_WORKFLOW_UUID = "44444444-4444-4444-8444-444444444444"
 INVOCATION_UUID = "11111111-1111-4111-8111-111111111111"
 OTHER_INVOCATION_UUID = "11111111-1111-4111-8111-111111111112"
+SECOND_CHILD_NODE_UUID = "22222222-2222-4222-8222-222222222223"
+CHAIN_EDGE_UUID = "88888888-8888-4888-8888-888888888888"
 CHILD_WORKFLOW_UUID = "a1000000-0000-4000-8000-000000000001"
 LEAF_WORKFLOW_UUID = "a1000000-0000-4000-8000-000000000002"
 CHILD_NODE_UUID = "22222222-2222-4222-8222-222222222222"
@@ -744,6 +746,77 @@ def test_nested_published_workflow_expands_into_one_hierarchical_parent_graph() 
     assert expansion.nodes[0]["param"] == {"value": 2}
     assert expansion.nodes[0]["meta_data"]["unilab"]["input_bindings"] == {}
     assert provider.read_count == 2
+
+
+def test_nested_node_output_argument_is_recovered_from_persisted_edge() -> None:
+    """嵌套复合调用必须从持久图入边恢复上一步节点输出实参。
+
+    参数：无。返回：无；构造“叶工作流一输出接叶工作流二输入”的两段链，
+    断言再次递归展开不会把第二段必填参数误判为缺失。异常：展开诊断或映射
+    漂移时由 pytest 报告。安全：仅操作内存快照，不创建工作流任务
+    （WorkflowTask）或设备动作（Action）。
+    """
+
+    authoring, provider = _nested_world()
+    snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    first_invocation = next(
+        node for node in snapshot["nodes"] if node["uuid"] == CHILD_NODE_UUID
+    )
+    second_invocation = deepcopy(first_invocation)
+    second_invocation["uuid"] = SECOND_CHILD_NODE_UUID
+    second_invocation["meta_data"]["unilab"]["input_bindings"] = {}
+    snapshot["nodes"].append(second_invocation)
+
+    first_leaf = next(
+        node
+        for node in snapshot["nodes"]
+        if node.get("parent_uuid") == CHILD_NODE_UUID
+    )
+    second_leaf = deepcopy(first_leaf)
+    second_leaf["uuid"] = expanded_node_uuid(
+        SECOND_CHILD_NODE_UUID,
+        LEAF_NODE_UUID,
+    )
+    second_leaf["parent_uuid"] = SECOND_CHILD_NODE_UUID
+    snapshot["nodes"].append(second_leaf)
+    snapshot["edges"].append(
+        {
+            "uuid": CHAIN_EDGE_UUID,
+            "source_node_uuid": CHILD_NODE_UUID,
+            "source_handle_uuid": LEAF_VALUE_SOURCE_UUID,
+            "target_node_uuid": SECOND_CHILD_NODE_UUID,
+            "target_handle_uuid": LEAF_VALUE_TARGET_UUID,
+            "description": None,
+            "meta_data": {},
+            "create_time": "2026-08-02T00:00:00Z",
+            "update_time": "2026-08-02T00:00:00Z",
+        }
+    )
+    snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"][
+        "result"
+    ] = {
+        "kind": "node_output",
+        "workflow_node_uuid": SECOND_CHILD_NODE_UUID,
+        "source_handle_uuid": LEAF_VALUE_SOURCE_UUID,
+    }
+
+    expansion = authoring.compile_invocation(
+        parent_workflow_uuid=PARENT_WORKFLOW_UUID,
+        invocation_uuid=INVOCATION_UUID,
+        module="c1_published_lab.workflows.child",
+        symbol="prepare_sample",
+        keyword_arguments={"value": 2},
+    )
+
+    assert expansion.diagnostics == ()
+    second_expanded = expanded_node_uuid(INVOCATION_UUID, SECOND_CHILD_NODE_UUID)
+    assert any(node["uuid"] == second_expanded for node in expansion.nodes)
+    assert any(
+        edge["source_node_uuid"]
+        == expanded_node_uuid(INVOCATION_UUID, CHILD_NODE_UUID)
+        and edge["target_node_uuid"] == second_expanded
+        for edge in expansion.edges
+    )
 
 
 def test_recursive_or_uncovered_invocation_fails_without_snapshot_write_port() -> None:

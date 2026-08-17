@@ -6,6 +6,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from unilabos.workflow._composite_node_arguments import (
+    recover_node_keyword_arguments as _node_keyword_arguments,
+)
 from unilabos.workflow._composite_values import (
     CompositeFailure as _CompositeFailure,
 )
@@ -477,7 +480,10 @@ class CompositeAuthoring:
                 invocation_uuid=mapped_uuid,
                 invocation_parent_uuid=mapped_parent,
                 source=nested_source,
-                keyword_arguments=_node_keyword_arguments(node),
+                keyword_arguments=_node_keyword_arguments(
+                    node,
+                    edges=graph["edges"],
+                ),
                 snapshot=nested_snapshot,
                 workflow_stack=next_stack,
                 base_node=node,
@@ -641,59 +647,6 @@ def _source_from_template(
     if not isinstance(source, PublishedWorkflowSource):
         raise _CompositeFailure("composite_catalog_mismatch", "/source")
     return source
-
-
-def _node_keyword_arguments(node: Mapping[str, Any]) -> dict[str, object]:
-    """恢复已应用组合节点保存的字面量和工作流输入绑定。
-
-    参数：``node`` 是已应用组合调用节点。返回：字符串键的独立参数字典，
-    工作流输入通过标准来源引用表达。异常：参数或冻结组合合同形状无效时抛出
-    ``_CompositeFailure``。
-    """
-
-    arguments = node.get("param")
-    if not isinstance(arguments, Mapping) or any(
-        not isinstance(key, str) for key in arguments
-    ):
-        raise _CompositeFailure(
-            "composite_boundary_mapping_invalid",
-            "/child/nodes/param",
-        )
-    result = _plain(arguments)
-    meta_data = node.get("meta_data")
-    unilab = meta_data.get("unilab") if isinstance(meta_data, Mapping) else None
-    bindings = unilab.get("input_bindings") if isinstance(unilab, Mapping) else None
-    composite = unilab.get("composite") if isinstance(unilab, Mapping) else None
-    compatibility = (
-        composite.get("contract_compatibility")
-        if isinstance(composite, Mapping)
-        else None
-    )
-    inputs = compatibility.get("inputs") if isinstance(compatibility, Mapping) else None
-    if bindings is None:
-        return result
-    if not isinstance(bindings, Mapping) or not isinstance(inputs, list):
-        raise _CompositeFailure(
-            "composite_boundary_mapping_invalid",
-            "/child/nodes/input_bindings",
-        )
-    names_by_handle = {
-        str(item.get("handle_uuid")): str(item.get("name"))
-        for item in inputs
-        if isinstance(item, Mapping)
-        and isinstance(item.get("handle_uuid"), str)
-        and isinstance(item.get("name"), str)
-    }
-    for handle_uuid, binding in bindings.items():
-        name = names_by_handle.get(str(handle_uuid))
-        parameter = binding.get("parameter") if isinstance(binding, Mapping) else None
-        if name is None or not isinstance(parameter, str):
-            raise _CompositeFailure(
-                "composite_boundary_mapping_invalid",
-                "/child/nodes/input_bindings",
-            )
-        result[name] = {"kind": "workflow_input", "parameter": parameter}
-    return result
 
 
 def _assert_nested_pin(
