@@ -3,9 +3,11 @@
 本目录用于把当前 Uni-Lab-OS 与 Uni-Lab-SZLab 源码组合成一个本地镜像，并在
 Kubernetes `xiongyanfei` 命名空间中以临时调试模式运行。
 
-该模式显式使用 `--control_plane local`，只启用 `fastapi` bridge。它会启动内嵌
-app/scheduler，不连接生产 Backend/Scheduler。`/runtime` 使用 `emptyDir`，Pod
-重建后本地调试数据库和运行状态会丢失。
+该模式显式使用 `--control_plane local`，并按 Workbench 的正式本地拓扑拆成
+两个进程：`workspace_backend` 提供 FastAPI、Inventory、Scheduler 和本地
+Authority，`edge_runtime` 通过 `edge_control` 注册设备并加载 SZLab 驱动。
+它们不会连接生产 Backend/Scheduler。两个 Deployment 的 `/runtime` 均使用
+`emptyDir`，Pod 重建后本地调试数据库和协议恢复状态会丢失。
 
 ## 构建
 
@@ -69,8 +71,15 @@ kubectl rollout status deployment/plc-sim -n xiongyanfei --timeout=5m
 SZLab Handshake Agent。GUI 状态确认两个进程均为 running 后再部署 Uni-Lab-OS：
 
 ```bash
+if ! kubectl get secret unilabos-local-control -n xiongyanfei >/dev/null 2>&1; then
+  kubectl create secret generic unilabos-local-control \
+    -n xiongyanfei \
+    --from-literal=api-key="$(openssl rand -hex 32)"
+fi
+
 kubectl apply -f deploy/kubernetes-xiongyanfei/szlab-local-debug/unilabos-local-debug.yaml
 kubectl rollout status deployment/unilabos-local-debug -n xiongyanfei --timeout=10m
+kubectl rollout status deployment/unilabos-local-edge -n xiongyanfei --timeout=10m
 ```
 
 按当前部署要求，FastAPI 通过 NodePort 直接暴露到公网：
@@ -81,9 +90,19 @@ http://115.190.137.109:30183
 
 该调试接口没有 TLS 和访问认证，只应在明确接受该风险的临时调试环境使用。
 
-源码中的 `szlab-local-debug.json` 仍保留本地调试 URL。Deployment 的一次性
-initContainer 会等待 GUI 管理的 OPC UA Server 在 `plc-sim:4855` 就绪，然后只在
-`emptyDir` 中生成 URL 为 `opc.tcp://plc-sim:4855` 的运行图，并将该临时目录覆盖到
-工作区的 `deployment/graphs`；因此运行图仍位于 Uni-Lab-OS 允许的工作区边界内。
-该过程不会修改源码，也不引入 TCP proxy sidecar。主进程恢复 PLC 自动连接，
-PLC-Sim 未启动 Server 时会停留在初始化阶段而不会错误进入 Ready。
+源码中的 `szlab-local-debug.json` 仍保留本地调试 URL。共享 ConfigMap 中的初始化
+脚本会让两个 Deployment 等待 GUI 管理的 OPC UA Server 在 `plc-sim:4855` 就绪，
+然后分别在 Pod 的 `emptyDir` 中生成 URL 为 `opc.tcp://plc-sim:4855` 的运行图，并将
+该临时目录覆盖到工作区的 `deployment/graphs`；因此运行图仍位于 Uni-Lab-OS 允许
+的工作区边界内。该过程不会修改源码，也不引入 TCP proxy sidecar。
+
+最终链路为：
+
+```text
+kernel-web -> unilabos-local-debug:18003 (workspace_backend)
+           -> edge_control -> unilabos-local-edge (edge_runtime)
+           -> Uni-Lab-SZLab szlab_poly_plc -> plc-sim:4855
+```
+
+`workspace_backend` 不加载实体驱动，只有 `edge_runtime` 会连接 PLC-Sim。PLC-Sim
+未启动 Server 时两个进程会停留在初始化阶段，不会错误进入 Ready。
