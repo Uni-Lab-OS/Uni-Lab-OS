@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+
+import pytest
 
 from unilabos.app.edge_control.client import (
     EdgeControlClient,
@@ -80,6 +83,21 @@ def test_edge_control_settings_derives_split_scheduler_address(
 
     assert settings.backend_address == "http://[::1]:8080"
     assert settings.scheduler_address == "http://[::1]:8081"
+
+
+def test_edge_control_settings_marks_local_authority_keyless(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(EdgeControlConfig, "api_key", "")
+    monkeypatch.setattr(EdgeControlConfig, "state_db", str(tmp_path / "edge.db"))
+    monkeypatch.setattr(BasicConfig, "control_plane", "local")
+
+    settings = EdgeControlSettings.from_config()
+
+    assert settings.api_key == ""
+    assert settings.api_key_required is False
+    assert settings.device_telemetry_enabled is True
 
 
 class FakeHostNode:
@@ -270,6 +288,65 @@ def _settings(path: Path) -> EdgeControlSettings:
         request_timeout=1,
         event_retry_interval=1,
     )
+
+
+def test_local_client_starts_without_api_key(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    settings = replace(
+        _settings(tmp_path / "local-edge.db"),
+        api_key="",
+        api_key_required=False,
+        device_telemetry_enabled=True,
+    )
+    client = EdgeControlClient(
+        settings,
+        data_plane=FakeDataPlane(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(client, "_run", lambda: None)
+
+    client.start()
+    assert client._thread is not None
+    client._thread.join(timeout=1)
+    assert not client._thread.is_alive()
+    client.store.close()
+
+
+def test_production_client_still_requires_api_key(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path / "production-edge.db"), api_key="")
+    client = EdgeControlClient(
+        settings,
+        data_plane=FakeDataPlane(),  # type: ignore[arg-type]
+    )
+    try:
+        with pytest.raises(ValueError, match="production protocol requires api_key"):
+            client.start()
+    finally:
+        client.store.close()
+
+
+def test_http_data_plane_omits_only_an_empty_api_key() -> None:
+    local_plane = EdgeDataPlane(
+        "http://backend:8080",
+        "http://scheduler:8081",
+        "",
+    )
+    production_plane = EdgeDataPlane(
+        "http://backend:8080",
+        "http://scheduler:8081",
+        "edge-secret",
+    )
+
+    try:
+        assert "Authorization" not in local_plane._session.headers
+        assert (
+            production_plane._session.headers["Authorization"]
+            == "Bearer edge-secret"
+        )
+    finally:
+        local_plane._session.close()
+        production_plane._session.close()
 
 
 def test_registration_reports_logical_actions_instead_of_transport_endpoint(

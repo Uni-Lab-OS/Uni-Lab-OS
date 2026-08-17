@@ -28,8 +28,7 @@ def start_embedded_scheduler_runtime(
         setup_edge_scheduler,
         shutdown_edge_services,
     )
-    from unilabos.config.config import HostLinkConfig
-    from unilabos.config.config import BasicConfig, EdgeControlConfig
+    from unilabos.config.config import BasicConfig, HostLinkConfig
     from unilabos.registry.template_snapshot import RegistryTemplateSnapshot
 
     arguments = context.arguments
@@ -73,8 +72,7 @@ def start_embedded_scheduler_runtime(
         execution_backend = LocalEdgeControlAuthority(
             LocalEdgeAuthorityStore(
                 Path(paths.workflow_history_db).with_name("edge_authority.db")
-            ),
-            api_key=str(EdgeControlConfig.api_key or "").strip(),
+            )
         )
 
     _scheduler, execution_backend = setup_edge_scheduler(

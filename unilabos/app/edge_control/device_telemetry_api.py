@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-from fastapi import APIRouter, Body, Header, Request
+from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from unilabos.app.edge_control.device_telemetry import (
@@ -21,7 +20,6 @@ from unilabos.app.edge_control.device_telemetry import (
 class DeviceTelemetryAuthority(Protocol):
     """设备遥测传输适配器依赖的最小本地权威接口。"""
 
-    api_key: str
     telemetry: DeviceTelemetryHub
 
 
@@ -30,8 +28,8 @@ def create_device_telemetry_router(
 ) -> APIRouter:
     """创建正式后端（Backend）形状的 Edge 写入和前端 SSE 路由。
 
-    参数：``authority`` 提供认证密钥和设备遥测深模块。返回：可挂载到本地
-    后端（Local Backend）的路由。异常：组合输入缺失时由属性访问错误关闭启动。
+    参数：``authority`` 提供设备遥测深模块。返回：可挂载到本地后端（Local
+    Backend）服务的路由。异常：组合输入缺失时由属性访问错误关闭启动。
     """
 
     router = APIRouter(prefix="/api/v1", tags=["device-telemetry"])
@@ -40,18 +38,14 @@ def create_device_telemetry_router(
     def commit_properties(
         material_uuid: str,
         payload: Any = Body(default=None),
-        authorization: str | None = Header(default=None),
     ) -> JSONResponse:
         """提交一批通用设备属性完整快照。
 
-        参数：路径物料 UUID、严格请求体和 Edge Bearer 凭证。返回：正式后端
-        ``code/data`` 响应，首次接受为 HTTP 201，幂等重复为 200。异常：全部
-        转换为稳定业务错误封装，不向 FastAPI ``detail`` 泄漏合同。
+        参数：路径物料 UUID 与严格请求体。返回：正式后端 ``code/data`` 形状
+        响应，首次接受为 HTTP 201，幂等重复为 200。异常：全部转换为稳定业务
+        错误封装，不向 FastAPI ``detail`` 泄漏合同。
         """
 
-        denied = _authorize(authority, authorization)
-        if denied is not None:
-            return denied
         try:
             commit = authority.telemetry.ingest_properties(material_uuid, payload)
         except DeviceTelemetryError as error:
@@ -62,18 +56,14 @@ def create_device_telemetry_router(
     def commit_joint_states(
         material_uuid: str,
         payload: Any = Body(default=None),
-        authorization: str | None = Header(default=None),
     ) -> JSONResponse:
         """提交一批机械臂关节状态完整快照。
 
-        参数：路径物料 UUID、严格请求体和 Edge Bearer 凭证。返回：正式后端
-        ``code/data`` 响应，首次接受为 HTTP 201，幂等重复为 200。异常：全部
-        转换为稳定业务错误封装。
+        参数：路径物料 UUID 与严格请求体。返回：正式后端 ``code/data`` 形状
+        响应，首次接受为 HTTP 201，幂等重复为 200。异常：全部转换为稳定业务
+        错误封装。
         """
 
-        denied = _authorize(authority, authorization)
-        if denied is not None:
-            return denied
         try:
             commit = authority.telemetry.ingest_joint_states(material_uuid, payload)
         except DeviceTelemetryError as error:
@@ -137,24 +127,6 @@ def create_device_telemetry_router(
         )
 
     return router
-
-
-def _authorize(
-    authority: DeviceTelemetryAuthority, authorization: str | None
-) -> JSONResponse | None:
-    """校验 Edge Bearer 凭证。
-
-    参数：本地权威与请求头。返回：成功为 ``None``，失败为 HTTP 401 的正式
-    后端错误封装。异常：无。
-    """
-
-    expected = f"Bearer {authority.api_key}"
-    if authorization is not None and hmac.compare_digest(authorization, expected):
-        return None
-    return JSONResponse(
-        status_code=401,
-        content={"code": 1001, "error": {"msg": "Unauthorized"}},
-    )
 
 
 def _commit_response(commit: TelemetryCommit) -> JSONResponse:

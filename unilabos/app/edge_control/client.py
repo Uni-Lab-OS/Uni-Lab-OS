@@ -128,6 +128,7 @@ class EdgeControlSettings:
     request_timeout: float
     event_retry_interval: float
     device_telemetry_enabled: bool = False
+    api_key_required: bool = True
 
     @classmethod
     def from_config(cls) -> "EdgeControlSettings":
@@ -160,6 +161,7 @@ class EdgeControlSettings:
             # 新设备遥测合同先只由本地后端（Local Backend）实现；正式后端
             # 接入同一合同前关闭发送，避免未知 HTTP 路由或 WS 事件断开会话。
             device_telemetry_enabled=BasicConfig.control_plane == "local",
+            api_key_required=BasicConfig.control_plane != "local",
         )
 
 
@@ -234,8 +236,10 @@ class EdgeControlClient(BaseCommunicationClient):
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        if not self.settings.api_key or not self.settings.edge_key:
-            raise ValueError("Edge production protocol requires api_key and edge_key")
+        if not self.settings.edge_key:
+            raise ValueError("Edge protocol requires edge_key")
+        if self.settings.api_key_required and not self.settings.api_key:
+            raise ValueError("Edge production protocol requires api_key")
         self._stopping.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -530,9 +534,11 @@ class EdgeControlClient(BaseCommunicationClient):
             open_timeout=self.settings.request_timeout,
             close_timeout=5,
             ping_interval=None,
-            additional_headers={
-                "Authorization": f"Bearer {self.settings.api_key}"
-            },
+            additional_headers=(
+                {"Authorization": f"Bearer {self.settings.api_key}"}
+                if self.settings.api_key
+                else {}
+            ),
         ) as websocket:
             self._websocket = websocket
             await websocket.send(json.dumps(self._hello_envelope(), ensure_ascii=False))

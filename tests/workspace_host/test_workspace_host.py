@@ -226,9 +226,11 @@ def test_host_restart_adopts_a_live_workbench_renderer(workspace: Path) -> None:
 
 def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     workspace: Path,
+    monkeypatch: Any,
 ) -> None:
     paths = WorkspacePaths.resolve(workspace)
-    token = ensure_local_token(paths)
+    ensure_local_token(paths)
+    monkeypatch.setenv("UNILABOS_EDGECONTROLCONFIG_API_KEY", "ambient-secret")
     backend = resolve_backend_launch(
         paths,
         graph_path="deployment/graphs/graph.json",
@@ -242,7 +244,7 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     first_edge = resolve_edge_launch(paths, backend_component)
     second_edge = resolve_edge_launch(paths, backend_component)
 
-    assert backend.environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"] == token
+    assert "UNILABOS_EDGECONTROLCONFIG_API_KEY" not in backend.environment
     assert backend.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
         "http://127.0.0.1:48101"
     )
@@ -258,7 +260,7 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     assert "fastapi" not in first_edge.command
     assert "--is_slave" not in first_edge.command
     assert "--hostlink_addr" not in first_edge.command
-    assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"] == token
+    assert "UNILABOS_EDGECONTROLCONFIG_API_KEY" not in first_edge.environment
     assert first_edge.environment["UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR"] == (
         backend.address
     )

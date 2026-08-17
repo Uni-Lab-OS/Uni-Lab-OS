@@ -120,12 +120,11 @@ def resolve_backend_launch(
     if backend_port == hostlink_port:
         raise WorkspaceHostError("port_conflict", "Backend 与 HostLink 端口不能相同")
     environment = _runtime_environment(paths, generation)
-    edge_token = _workspace_host_token(paths)
+    environment.pop("UNILABOS_EDGECONTROLCONFIG_API_KEY", None)
     edge_key = _workspace_edge_key(paths)
     backend_address = f"http://127.0.0.1:{backend_port}"
     environment.update(
         {
-            "UNILABOS_EDGECONTROLCONFIG_API_KEY": edge_token,
             "UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR": backend_address,
             "UNILABOS_EDGECONTROLCONFIG_EDGE_KEY": edge_key,
             "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": backend_address,
@@ -253,7 +252,7 @@ def resolve_edge_launch(
     authority_token = (
         os.environ.get("UNILAB_BACKEND_API_KEY") or _workspace_host_token(paths)
         if domain_mode == "backend"
-        else _workspace_host_token(paths)
+        else ""
     )
     edge_state_directory = paths.runtime / "edge"
     edge_state_directory.mkdir(parents=True, exist_ok=True)
@@ -274,9 +273,9 @@ def resolve_edge_launch(
         authority_digest = hashlib.sha256(state_scope.encode("utf-8")).hexdigest()[:16]
         state_db = edge_state_directory / f"edge_control-backend-{authority_digest}.db"
     environment = _runtime_environment(paths, generation)
+    environment.pop("UNILABOS_EDGECONTROLCONFIG_API_KEY", None)
     environment.update(
         {
-            "UNILABOS_EDGECONTROLCONFIG_API_KEY": authority_token,
             "UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR": authority_address,
             "UNILABOS_EDGECONTROLCONFIG_EDGE_KEY": _workspace_edge_key(paths),
             "UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR": scheduler_address,
@@ -298,6 +297,8 @@ def resolve_edge_launch(
             ),
         }
     )
+    if authority_token:
+        environment["UNILABOS_EDGECONTROLCONFIG_API_KEY"] = authority_token
     edge_graph = Path(str(metadata["validatedGraphPath"]))
     if mode == "dry-run":
         edge_graph = runtime_directory / "selected-graph.json"

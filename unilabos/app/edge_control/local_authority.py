@@ -1,9 +1,8 @@
-"""Loopback implementation of the production-shaped durable Edge protocol.
+"""正式 Edge 协议形状的本地实现。
 
-The Workspace Backend owns this adapter.  It persists dispatch intent and
-results, while an independently restartable Edge Runtime consumes the same
-HTTP/WebSocket contract used by the production Backend.  No device driver or
-ROS object is imported here.
+工作区后端（Workspace Backend）拥有此适配器并持久化调度意图和结果；可独立
+重启的边缘运行时（Edge Runtime）消费与正式后端（Backend）一致的 HTTP 与
+WebSocket 合同。本模块不导入设备驱动或 ROS 对象。
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, WebSocket
+from fastapi import APIRouter, Header, HTTPException, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 
 from unilabos.app.scheduler.dispatch import DispatchPayload
@@ -740,13 +739,10 @@ class LocalEdgeAuthorityStore:
 
 
 class LocalEdgeControlAuthority:
-    """Dispatcher plus loopback protocol authority owned by Local Backend."""
+    """本地后端（Local Backend）拥有的无 API key 调度与协议权威。"""
 
-    def __init__(self, store: LocalEdgeAuthorityStore, *, api_key: str) -> None:
-        if not api_key:
-            raise ValueError("Local Edge authority requires an API key")
+    def __init__(self, store: LocalEdgeAuthorityStore) -> None:
         self.store = store
-        self.api_key = api_key
         from unilabos.app.edge_control.device_telemetry import DeviceTelemetryHub
 
         self.telemetry = DeviceTelemetryHub(store.has_device_binding)
@@ -846,21 +842,19 @@ class LocalEdgeControlAuthority:
 def create_local_edge_control_router(
     authority: LocalEdgeControlAuthority,
 ) -> APIRouter:
-    """Create the production-shaped HTTP/WebSocket adapter for Local Backend."""
+    """创建与正式协议同形的本地后端（Local Backend）适配器。
+
+    本地边缘控制权威（LocalEdgeControlAuthority）依赖工作区部署边界，不复制
+    正式后端（Backend）的 API key 认证。设备会话仍携带稳定 ``edge_key``；单个
+    作业仍由命令 UUID 和作业 token 共同约束。
+    """
 
     router = APIRouter(prefix="/api/v1/edge", tags=["local-edge-control"])
-
-    def authorize(value: str | None) -> None:
-        expected = f"Bearer {authority.api_key}"
-        if value is None or not hmac.compare_digest(value, expected):
-            raise HTTPException(status_code=401, detail="Edge token invalid")
 
     @router.post("/sessions")
     def register_session(
         payload: dict[str, Any],
-        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        authorize(authorization)
         try:
             result = authority.store.register_session(payload)
         except (TypeError, ValueError) as error:
@@ -934,10 +928,8 @@ def create_local_edge_control_router(
     @router.post("/jobs/{job_uuid}/resolve-unknown")
     def resolve_unknown(
         job_uuid: str,
-        request: Request,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        authorize(request.headers.get("Authorization"))
         try:
             result = authority.store.create_unknown_resolution(
                 job_uuid, reason=str(payload.get("reason") or "")
@@ -950,12 +942,6 @@ def create_local_edge_control_router(
 
     @router.websocket("/ws")
     async def edge_websocket(websocket: WebSocket) -> None:
-        authorization = websocket.headers.get("Authorization")
-        if authorization is None or not hmac.compare_digest(
-            authorization, f"Bearer {authority.api_key}"
-        ):
-            await websocket.close(code=4401)
-            return
         await websocket.accept()
         session_uuid = ""
         try:

@@ -13,7 +13,6 @@ from fastapi.testclient import TestClient
 
 from unilabos.app.edge_control.device_telemetry import (
     DEVICE_PROPERTIES,
-    DeviceTelemetryError,
     DeviceTelemetryHub,
 )
 from unilabos.app.edge_control.device_telemetry_api import (
@@ -52,10 +51,7 @@ def _properties_payload(
 def _registered_authority(
     path: Path,
 ) -> tuple[LocalEdgeControlAuthority, str]:
-    authority = LocalEdgeControlAuthority(
-        LocalEdgeAuthorityStore(path),
-        api_key="managed-local-secret",
-    )
+    authority = LocalEdgeControlAuthority(LocalEdgeAuthorityStore(path))
     material_uuid = str(uuid.uuid4())
     authority.store.register_session(
         {
@@ -82,17 +78,14 @@ def test_http_commit_is_strict_idempotent_and_backend_shaped(
     application.include_router(create_device_telemetry_router(authority))
     client = TestClient(application)
     url = f"/api/v1/edge/devices/{material_uuid}/telemetry/properties"
-    headers = {"Authorization": "Bearer managed-local-secret"}
     try:
-        first = client.post(url, headers=headers, json=_properties_payload())
-        duplicate = client.post(url, headers=headers, json=_properties_payload())
+        first = client.post(url, json=_properties_payload())
+        duplicate = client.post(url, json=_properties_payload())
         conflict = client.post(
             url,
-            headers=headers,
             json=_properties_payload(value=22.0),
         )
-        invalid = client.post(url, headers=headers, json=None)
-        denied = client.post(url, json=_properties_payload())
+        invalid = client.post(url, json=None)
 
         assert first.status_code == 201
         assert first.json()["code"] == 0
@@ -103,11 +96,6 @@ def test_http_commit_is_strict_idempotent_and_backend_shaped(
         assert conflict.json()["code"] == 7001
         assert invalid.status_code == 200
         assert invalid.json()["code"] == 1000
-        assert denied.status_code == 401
-        assert denied.json() == {
-            "code": 1001,
-            "error": {"msg": "Unauthorized"},
-        }
     finally:
         authority.stop()
 

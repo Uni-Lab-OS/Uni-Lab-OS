@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import requests
 
 from unilabos.app.edge_control.store import StoredJob
 from unilabos.utils.tracing import inject_trace_context, span
-
 
 BACKEND_UNAUTHORIZED_BUSINESS_CODE = 1001
 
@@ -42,7 +42,8 @@ class EdgeDataPlane:
         self.api_key = api_key
         self.timeout = timeout
         self._session = requests.Session()
-        self._session.headers.update({"Authorization": f"Bearer {api_key}"})
+        if api_key:
+            self._session.headers.update({"Authorization": f"Bearer {api_key}"})
         self._lock = threading.Lock()
 
     def register_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:

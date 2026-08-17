@@ -31,9 +31,7 @@ def _payload(*, device_id: str = "robot-01") -> DispatchPayload:
 
 
 def _authority(path: Path) -> LocalEdgeControlAuthority:
-    return LocalEdgeControlAuthority(
-        LocalEdgeAuthorityStore(path), api_key="managed-local-secret"
-    )
+    return LocalEdgeControlAuthority(LocalEdgeAuthorityStore(path))
 
 
 def test_latest_registration_returns_detached_edge_capabilities(
@@ -95,7 +93,7 @@ def test_dispatch_is_idempotent_and_rejects_changed_identity(tmp_path: Path) -> 
         authority.stop()
 
 
-def test_http_websocket_round_trip_projects_one_terminal_outcome(
+def test_unauthenticated_loopback_round_trip_projects_one_terminal_outcome(
     tmp_path: Path,
 ) -> None:
     authority = _authority(tmp_path / "authority.db")
@@ -108,10 +106,8 @@ def test_http_websocket_round_trip_projects_one_terminal_outcome(
     application = FastAPI()
     application.include_router(create_local_edge_control_router(authority))
     client = TestClient(application)
-    authorization = {"Authorization": "Bearer managed-local-secret"}
     registration = client.post(
         "/api/v1/edge/sessions",
-        headers=authorization,
         json={
             "edge_key": "workspace-edge",
             "instance_uuid": str(uuid.uuid4()),
@@ -123,9 +119,7 @@ def test_http_websocket_round_trip_projects_one_terminal_outcome(
     authority.dispatch(payload)
 
     try:
-        with client.websocket_connect(
-            "/api/v1/edge/ws", headers=authorization
-        ) as websocket:
+        with client.websocket_connect("/api/v1/edge/ws") as websocket:
             hello_uuid = str(uuid.uuid4())
             websocket.send_json(
                 {
