@@ -29,12 +29,19 @@ data:
     )
     destination = Path("/runtime-graphs/szlab-local-debug.json")
     graph = json.loads(source.read_text(encoding="utf-8"))
-    plc_nodes = [
-        node for node in graph["nodes"] if node.get("id") == "szlab_poly_plc"
-    ]
-    if len(plc_nodes) != 1:
-        raise SystemExit("运行图必须包含唯一的 szlab_poly_plc 节点")
-    plc_nodes[0].setdefault("config", {})["url"] = "opc.tcp://plc-sim:4855"
+
+    def unique_node(node_id: str) -> dict:
+        nodes = [node for node in graph["nodes"] if node.get("id") == node_id]
+        if len(nodes) != 1:
+            raise SystemExit(f"运行图必须包含唯一的 {node_id} 节点")
+        return nodes[0]
+
+    unique_node("szlab_poly_plc").setdefault("config", {})["url"] = (
+        "opc.tcp://plc-sim:4855"
+    )
+    unique_node("szlab_mixer_robot").setdefault("config", {})[
+        "standard_journal_path"
+    ] = "/runtime/edge/szlab_robot_commands.sqlite3"
     destination.write_text(
         json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

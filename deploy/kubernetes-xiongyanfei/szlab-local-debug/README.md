@@ -94,7 +94,9 @@ http://115.190.137.109:30183
 脚本会让两个 Deployment 等待 GUI 管理的 OPC UA Server 在 `plc-sim:4855` 就绪，
 然后分别在 Pod 的 `emptyDir` 中生成 URL 为 `opc.tcp://plc-sim:4855` 的运行图，并将
 该临时目录覆盖到工作区的 `deployment/graphs`；因此运行图仍位于 Uni-Lab-OS 允许
-的工作区边界内。该过程不会修改源码，也不引入 TCP proxy sidecar。
+的工作区边界内。初始化脚本还会把机械臂的命令日志路径派生到可写的
+`/runtime/edge/szlab_robot_commands.sqlite3`，使容器根文件系统可以保持只读。
+该过程不会修改源码，也不引入 TCP proxy sidecar。
 
 最终链路为：
 
