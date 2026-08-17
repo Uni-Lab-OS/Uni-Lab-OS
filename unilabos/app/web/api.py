@@ -5,12 +5,14 @@ API模块
 """
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 import asyncio
 
 import yaml
 
 from unilabos.app.web.controller import (
     devices,
+    get_resources as load_resources,
     job_add,
     job_info,
     get_online_devices,
@@ -27,6 +29,11 @@ from unilabos.app.model import (
     JobData,
 )
 from unilabos.app.web.utils.host_utils import get_host_node_info
+from unilabos.app.web.device_catalog import (
+    project_backend_device_overviews,
+    project_device_catalog,
+)
+from unilabos.config.config import BasicConfig
 from unilabos.registry.registry import lab_registry
 from unilabos.utils.type_check import NoAliasDumper
 
@@ -243,7 +250,23 @@ async def broadcast_status_page_data():
 @api.websocket("/ws/device_status")
 async def websocket_device_status(websocket: WebSocket):
     """WebSocket端点，用于实时获取设备状态"""
-    await websocket.accept()
+    from unilabos.utils.tracing import extract_trace_context, span
+
+    carrier = {
+        key: value
+        for key in ("traceparent", "tracestate")
+        if (value := websocket.query_params.get(key))
+    }
+    with span(
+        "WS CONNECT /api/v1/ws/device_status",
+        attributes={
+            "http.route": "/api/v1/ws/device_status",
+            "network.protocol.name": "websocket",
+        },
+        kind="server",
+        parent_context=extract_trace_context(carrier),
+    ):
+        await websocket.accept()
     active_connections.add(websocket)
     try:
         while True:
@@ -1226,21 +1249,93 @@ def get_file_browser_data(path: str = ""):
 @api.get("/resources", summary="Resource list", response_model=Resp)
 def get_resources():
     """获取资源列表"""
+    isok, data = load_resources()
+    if not isok:
+        return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
+
+    return Resp(data=[node for tree in data.dump() for node in tree])
+
+
+@api.get("/health", summary="Process health")
+def api_health() -> dict[str, str]:
+    """返回进程健康状态；生产模式不触碰本地 Scheduler 模块。"""
+
+    scheduler_status = "disabled"
+    if BasicConfig.control_plane == "local":
+        from unilabos.app.scheduler.integration import get_edge_scheduler
+
+        scheduler_status = "ready" if get_edge_scheduler() is not None else "disabled"
+    return {"status": "ok", "scheduler": scheduler_status}
+
+
+@api.get("/authoring/device-catalog", summary="Authoring device catalog", response_model=Resp)
+def get_authoring_device_catalog():
+    """返回 OS 创作工具使用的富设备目录，而不占用共享 Backend 路由。"""
+
     isok, data = devices()
     if not isok:
         return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
 
-    return Resp(data=dict(data))
+    online_ok, online_data = get_online_devices()
+    online_devices = (
+        online_data.get("online_devices", {})
+        if online_ok and isinstance(online_data, dict)
+        else {}
+    )
+    return Resp(
+        data=project_device_catalog(
+            resources=data,
+            registry_devices=lab_registry.obtain_registry_device_info(),
+            online_devices=online_devices,
+        )
+    )
 
 
-@api.get("/devices", summary="Device list", response_model=Resp)
-def get_devices():
-    """获取设备列表"""
-    isok, data = devices()
-    if not isok:
-        return Resp(code=RespCode.ErrorHostNotInit, message=str(data))
+@api.get("/devices", summary="Backend-compatible device list")
+def get_devices() -> JSONResponse:
+    """返回与 Go Backend ``GET /api/v1/devices`` 同形的设备读模型。
 
-    return Resp(data=dict(data))
+    本地运行时只连接已装配的 Local Backend Edge 会话与同进程库存权威；不从
+    注册表或 ROS 图猜测物料身份。未装配或尚未注册时返回成功空数组。
+    """
+
+    from unilabos.app.edge_control.local_authority import LocalEdgeControlAuthority
+    from unilabos.app.scheduler.integration import (
+        get_edge_backend,
+        get_inventory_service,
+    )
+
+    edge_backend = get_edge_backend()
+    inventory_service = get_inventory_service()
+    if (
+        not isinstance(edge_backend, LocalEdgeControlAuthority)
+        or inventory_service is None
+    ):
+        return JSONResponse(content={"code": 0, "data": []})
+    registration = edge_backend.store.latest_registration()
+    # ``type`` 与 ``revision`` 只在本设备读模型中从现有权威表连接；本接口
+    # 不改变 `/materials` 合同或库存 Schema。设备 Material 的实例类型等于
+    # 所属设备模板类型，修订沿用 material_inventory 聚合版本。
+    materials = inventory_service.store.query_all(
+        "SELECT material.*,resource_template.resource_type AS type,"
+        "COALESCE(material_inventory.aggregate_version,1) AS revision "
+        "FROM material "
+        "JOIN resource_template ON resource_template.uuid="
+        "material.resource_template_uuid "
+        "LEFT JOIN material_inventory ON material_inventory.material_uuid="
+        "material.uuid "
+        "WHERE material.deleted_at IS NULL "
+        "ORDER BY material.uuid"
+    )
+    return JSONResponse(
+        content={
+            "code": 0,
+            "data": project_backend_device_overviews(
+                registration=registration,
+                materials=materials,
+            ),
+        }
+    )
 
 
 @api.get("/online-devices", summary="Online devices list", response_model=Resp)

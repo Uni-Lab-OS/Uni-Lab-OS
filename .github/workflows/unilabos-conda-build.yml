@@ -140,6 +140,13 @@ jobs:
           echo "Building unilabos-env (conda environment dependencies)..."
           conda run -n build-env rattler-build build -r .conda/environment/recipe.yaml --target-platform ${{ matrix.platform }} -c uni-lab -c robostack-staging -c conda-forge
 
+      - name: Build vendored pip-only runtime dependencies
+        if: steps.should_build.outputs.should_build == 'true'
+        run: |
+          conda run -n build-env rattler-build build -r .conda/vendor/rfc8785/recipe.yaml --target-platform ${{ matrix.platform }} -c conda-forge --output-dir ./output
+          conda run -n build-env rattler-build build -r .conda/vendor/msgcenterpy/recipe.yaml --target-platform ${{ matrix.platform }} -c conda-forge --channel ./output --output-dir ./output
+          conda run -n build-env rattler-build build -r .conda/vendor/pylabrobot/recipe.yaml --target-platform ${{ matrix.platform }} -c conda-forge --channel ./output --output-dir ./output
+
       - name: Upload unilabos-env to Anaconda.org (if enabled)
         if: |
           steps.should_build.outputs.should_build == 'true' &&
@@ -150,6 +157,15 @@ jobs:
         run: |
           echo "Uploading unilabos-env to uni-lab organization..."
           for package in $(find ./output -name "unilabos-env*.conda"); do
+            conda run -n build-env anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --user uni-lab --force "$package"
+          done
+          for package in $(find ./output -name "rfc8785*.conda"); do
+            conda run -n build-env anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --user uni-lab --force "$package"
+          done
+          for package in $(find ./output -name "msgcenterpy*.conda"); do
+            conda run -n build-env anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --user uni-lab --force "$package"
+          done
+          for package in $(find ./output -name "pylabrobot*.conda"); do
             conda run -n build-env anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --user uni-lab --force "$package"
           done
 

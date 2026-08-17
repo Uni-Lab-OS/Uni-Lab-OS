@@ -17,7 +17,7 @@ def start_backend(
     visual: str = "None",
     resources_mesh_config: dict = {},
     **kwargs,
-):
+) -> threading.Thread:
     if backend == "ros":
         # 假设 ros_main, simple_main, automancer_main 是不同 backend 的启动函数
         from unilabos.ros.main_slave_run import main, slave  # 如果选择 'ros' 作为 backend
@@ -48,3 +48,4 @@ def start_backend(
     )
     backend_thread.start()
     logger.info(f"Backend {backend} started.")
+    return backend_thread

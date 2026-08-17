@@ -1,0 +1,235 @@
+name: UniLabOS Constructor Installers
+
+on:
+  pull_request:
+    paths:
+      - '.conda/constructor/**'
+      - '.github/workflows/constructor-build.yml'
+      - 'tests/integration/test_managed_runtime_supervisor_windows.py'
+      - 'unilabos/__init__.py'
+      - 'unilabos/managed_runtime/**'
+  workflow_run:
+    workflows: ["UniLabOS Conda Build"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: '逗号分隔：win-64, linux/linux-64, osx/osx-64, osx-arm64'
+        required: false
+        default: 'linux-64,osx-64,osx-arm64,win-64'
+        type: string
+      package_variant:
+        description: '安装器包含的 Uni-Lab-OS 包'
+        required: true
+        default: unilabos
+        type: choice
+        options:
+          - unilabos
+          - unilabos-full
+      package_version:
+        description: '留空时读取 unilabos/__init__.py'
+        required: false
+        type: string
+
+jobs:
+  validate:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          miniforge-version: latest
+          use-mamba: true
+          activate-environment: constructor-build
+          auto-update-conda: false
+          channels: conda-forge
+          channel-priority: strict
+
+      - name: Install constructor
+        run: mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 -y
+
+      - name: Resolve installer metadata
+        env:
+          REQUESTED_PACKAGE: ${{ github.event.inputs.package_variant }}
+          REQUESTED_VERSION: ${{ github.event.inputs.package_version }}
+        run: |
+          source_version="$(python -c 'import runpy; print(runpy.run_path("unilabos/__init__.py")["__version__"])')"
+          echo "UNILABOS_INSTALLER_VERSION=${REQUESTED_VERSION:-$source_version}" >> "$GITHUB_ENV"
+          echo "UNILABOS_INSTALLER_PACKAGE=${REQUESTED_PACKAGE:-unilabos}" >> "$GITHUB_ENV"
+
+      - name: Render all supported platforms
+        run: |
+          for platform in linux-64 osx-64 osx-arm64 win-64; do
+            echo "Rendering ${platform}"
+            constructor .conda/constructor --platform "$platform" --render > "/tmp/construct-${platform}.yaml"
+            test -s "/tmp/construct-${platform}.yaml"
+          done
+
+      - name: Validate rendered configurations against the constructor schema
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from constructor.construct import parse, verify
+
+          config = Path(".conda/constructor/construct.yaml")
+          for platform in ("linux-64", "osx-64", "osx-arm64", "win-64"):
+              verify(parse(config, platform))
+              print(f"{platform}: schema OK")
+          PY
+
+  build:
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-64
+          - os: macos-15-intel
+            platform: osx-64
+          - os: macos-latest
+            platform: osx-arm64
+          - os: windows-latest
+            platform: win-64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - name: Select platform
+        id: select
+        env:
+          REQUESTED_PLATFORMS: ${{ github.event.inputs.platforms }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" || -z "$REQUESTED_PLATFORMS" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          enabled=false
+          IFS=',' read -ra requested <<< "$REQUESTED_PLATFORMS"
+          for item in "${requested[@]}"; do
+            item="${item//[[:space:]]/}"
+            case "$item" in
+              linux) item=linux-64 ;;
+              osx) item=osx-64 ;;
+            esac
+            if [[ "$item" == "$TARGET_PLATFORM" ]]; then
+              enabled=true
+            fi
+          done
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        if: steps.select.outputs.enabled == 'true'
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - uses: conda-incubator/setup-miniconda@v4
+        if: steps.select.outputs.enabled == 'true'
+        with:
+          miniforge-version: latest
+          use-mamba: true
+          activate-environment: constructor-build
+          auto-update-conda: false
+          channels: conda-forge
+          channel-priority: strict
+
+      - name: Install constructor
+        if: steps.select.outputs.enabled == 'true'
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [[ "$TARGET_PLATFORM" == "win-64" ]]; then
+            mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 conda-standalone=26.3.2.post1 -y
+            conda_exe="$(python -c 'import os; from pathlib import Path; print(Path(os.environ["CONDA_PREFIX"], "standalone_conda", "conda.exe"))')"
+          else
+            mamba install -n constructor-build --override-channels -c conda-forge constructor=3.16.1 micromamba=2.8.1 -y
+            conda_exe="$(command -v micromamba)"
+          fi
+          python -c 'from pathlib import Path; import sys; assert Path(sys.argv[1]).is_file()' "$conda_exe"
+          echo "CONSTRUCTOR_CONDA_EXE=$conda_exe" >> "$GITHUB_ENV"
+
+      - name: Resolve installer metadata
+        if: steps.select.outputs.enabled == 'true'
+        env:
+          REQUESTED_PACKAGE: ${{ github.event.inputs.package_variant }}
+          REQUESTED_VERSION: ${{ github.event.inputs.package_version }}
+        run: |
+          source_version="$(python -c 'import runpy; print(runpy.run_path("unilabos/__init__.py")["__version__"])')"
+          echo "UNILABOS_INSTALLER_VERSION=${REQUESTED_VERSION:-$source_version}" >> "$GITHUB_ENV"
+          echo "UNILABOS_INSTALLER_PACKAGE=${REQUESTED_PACKAGE:-unilabos}" >> "$GITHUB_ENV"
+
+      - name: Validate Windows managed process-tree lifecycle
+        if: steps.select.outputs.enabled == 'true' && matrix.platform == 'win-64'
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = (Get-Location).Path
+          python tests/integration/test_managed_runtime_supervisor_windows.py
+
+      - name: Solve target environment
+        if: steps.select.outputs.enabled == 'true'
+        run: constructor .conda/constructor --platform "${{ matrix.platform }}" --conda-exe "$CONSTRUCTOR_CONDA_EXE" --dry-run
+
+      - name: Build installer
+        if: steps.select.outputs.enabled == 'true'
+        run: constructor .conda/constructor --platform "${{ matrix.platform }}" --conda-exe "$CONSTRUCTOR_CONDA_EXE" --output-dir dist/constructor
+
+      - name: Smoke test Unix installer
+        if: steps.select.outputs.enabled == 'true' && matrix.platform != 'win-64'
+        run: |
+          installer="$(find dist/constructor -maxdepth 1 -type f -name '*.sh' -print -quit)"
+          test -n "$installer"
+          prefix="$RUNNER_TEMP/unilabos-constructor-test"
+          bash "$installer" -b -p "$prefix"
+          source "$prefix/etc/profile.d/conda.sh"
+          conda activate "$prefix"
+          python -c "import unilabos; print(unilabos.__version__)"
+          python -c "import rclpy; print('rclpy: OK')"
+          unilab --help
+          unilab-supervisor --help
+
+      - name: Smoke test Windows installer
+        if: steps.select.outputs.enabled == 'true' && matrix.platform == 'win-64'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist/constructor -Filter *.exe | Select-Object -First 1
+          if (-not $installer) { throw "Constructor did not produce an EXE installer" }
+          $prefix = Join-Path $env:RUNNER_TEMP "unilabos-constructor-test"
+          $arguments = @(
+            "/S",
+            "/InstallationType=JustMe",
+            "/NoRegistry=1",
+            "/NoShortcuts=1",
+            "/RegisterPython=0",
+            "/D=$prefix"
+          )
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
+          $env:PATH = "$prefix;$prefix\Scripts;$prefix\Library\bin;$env:PATH"
+          & "$prefix\python.exe" -c "import unilabos; print(unilabos.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "unilabos import failed" }
+          & "$prefix\python.exe" -c "import rclpy; print('rclpy: OK')"
+          if ($LASTEXITCODE -ne 0) { throw "rclpy import failed" }
+          & "$prefix\Scripts\unilab.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "unilab --help failed" }
+          & "$prefix\Scripts\unilab-supervisor.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "unilab-supervisor --help failed" }
+
+      - name: Upload installer and manifests
+        if: steps.select.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: Uni-Lab-OS-constructor-${{ matrix.platform }}
+          path: dist/constructor/*
+          if-no-files-found: error
+          retention-days: 30

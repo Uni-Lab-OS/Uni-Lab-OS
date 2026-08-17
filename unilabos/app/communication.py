@@ -76,6 +76,26 @@ class BaseCommunicationClient(ABC):
         """
         pass
 
+    def publish_action_lock(self, device_id: str, action_name: str, free: bool) -> None:
+        """
+        主动上报单个 device+action 的锁(可用性)状态(默认空实现)
+
+        Args:
+            device_id: 设备ID
+            action_name: 动作名称
+            free: 是否空闲(True 空闲, False 占用)
+        """
+        pass
+
+    def publish_action_locks(self, locks: list) -> None:
+        """
+        批量主动上报 device+action 的锁(可用性)状态(默认空实现)
+
+        Args:
+            locks: [{"device_id": str, "action_name": str, "free": bool}, ...]
+        """
+        pass
+
     def setup_pong_subscription(self) -> None:
         """
         设置pong消息订阅（可选实现）
@@ -123,6 +143,8 @@ class CommunicationClientFactory:
 
         if protocol == "websocket":
             return cls._create_websocket_client()
+        elif protocol == "edge_control":
+            return cls._create_edge_control_client()
         else:
             logger.error(f"[CommunicationFactory] Unsupported protocol: {protocol}")
             logger.warning(f"[CommunicationFactory] Falling back to WebSocket")
@@ -157,6 +179,17 @@ class CommunicationClientFactory:
             raise
 
     @classmethod
+    def _create_edge_control_client(cls) -> BaseCommunicationClient:
+        """创建正式 Backend/Scheduler 使用的生产 Edge 客户端。"""
+        try:
+            from unilabos.app.edge_control import EdgeControlClient
+
+            return EdgeControlClient()
+        except Exception as e:
+            logger.error(f"[CommunicationFactory] 创建生产 Edge 客户端失败: {str(e)}")
+            raise
+
+    @classmethod
     def reset_client(cls):
         """重置客户端缓存（用于测试或重新配置）"""
         if cls._client_cache:
@@ -176,7 +209,7 @@ class CommunicationClientFactory:
         Returns:
             支持的协议列表
         """
-        return ["websocket"]
+        return ["websocket", "edge_control"]
 
 
 def get_communication_client(protocol: Optional[str] = None) -> BaseCommunicationClient:

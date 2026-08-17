@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 package_name = 'unilabos'
 
@@ -7,7 +7,16 @@ setup(
     version='0.11.3',
     packages=find_packages(),
     include_package_data=True,
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+        'jsonschema>=4.18',
+        'rfc8785>=0.1.4,<0.2',
+        'msgcenterpy>=0.1.8,<0.2',
+        'pylabrobot==0.2.1',
+    ],
+    extras_require={
+        'mcp': ['mcp>=1.10,<2'],
+    },
     zip_safe=True,
     author="The unilabos developers",
     maintainer='Junhan Chang, Xuwznln',
@@ -17,7 +26,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            "unilab = unilabos.app.main:main"
+            "unilab = unilabos.app.main:main",
+            "unilab-supervisor = unilabos.managed_runtime.supervisor:main",
+            "unilab-mcp = unilabos.agent_tools.workflow:main",
         ],
     },
 )
