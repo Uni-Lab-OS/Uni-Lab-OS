@@ -58,6 +58,17 @@ nerdctl -n k8s.io build \
 
 ```bash
 kubectl delete namespace xiongyanfei --wait=true
+kubectl create namespace xiongyanfei
+kubectl apply -f \
+  /home/xiongyanfei/PLC-Sim/deploy/kubernetes-xiongyanfei/plc-sim.yaml
+kubectl rollout status deployment/plc-sim -n xiongyanfei --timeout=5m
+```
+
+打开 `http://115.190.137.109:30160`，先在 GUI 中启动监听
+`0.0.0.0:4855` 的 OPC UA Server，再用 `szlab` profile、`all` workflow 启动
+SZLab Handshake Agent。GUI 状态确认两个进程均为 running 后再部署 Uni-Lab-OS：
+
+```bash
 kubectl apply -f deploy/kubernetes-xiongyanfei/szlab-local-debug/unilabos-local-debug.yaml
 kubectl rollout status deployment/unilabos-local-debug -n xiongyanfei --timeout=10m
 ```
@@ -70,8 +81,9 @@ http://115.190.137.109:30183
 
 该调试接口没有 TLS 和访问认证，只应在明确接受该风险的临时调试环境使用。
 
-当前 `szlab-local-debug.json` 中 PLC URL 是
-`opc.tcp://127.0.0.1:4855/xuse_sim/`。本清单不部署 PLC-Sim；只有在 PLC-Sim
-与 Uni-Lab-OS 共享网络命名空间时，该地址才会连通。因此当前 Deployment 使用
-`SZLAB_PLC_AUTO_CONNECT=false` 保证 Uni-Lab-OS 可独立启动；部署 PLC-Sim 后应
-移除此环境变量覆盖并滚动重启。
+源码中的 `szlab-local-debug.json` 仍保留本地调试 URL。Deployment 的一次性
+initContainer 会等待 GUI 管理的 OPC UA Server 在 `plc-sim:4855` 就绪，然后只在
+`emptyDir` 中生成 URL 为 `opc.tcp://plc-sim:4855` 的运行图，并将该临时目录覆盖到
+工作区的 `deployment/graphs`；因此运行图仍位于 Uni-Lab-OS 允许的工作区边界内。
+该过程不会修改源码，也不引入 TCP proxy sidecar。主进程恢复 PLC 自动连接，
+PLC-Sim 未启动 Server 时会停留在初始化阶段而不会错误进入 Ready。

@@ -32,6 +32,51 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: prepare-szlab-runtime-graph
+          image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
+          imagePullPolicy: Never
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              /opt/conda/bin/python - <<'PY'
+              import json
+              import socket
+              import time
+              from pathlib import Path
+
+              for _ in range(150):
+                  try:
+                      with socket.create_connection(("plc-sim", 4855), timeout=2):
+                          break
+                  except OSError:
+                      time.sleep(2)
+              else:
+                  raise SystemExit("等待 plc-sim:4855 超时")
+
+              source = Path(
+                  "/opt/runtime-src/szlab/deployment/graphs/szlab-local-debug.json"
+              )
+              destination = Path("/runtime-graphs/szlab-local-debug.json")
+              graph = json.loads(source.read_text(encoding="utf-8"))
+              plc_nodes = [
+                  node for node in graph["nodes"] if node.get("id") == "szlab_poly_plc"
+              ]
+              if len(plc_nodes) != 1:
+                  raise SystemExit("运行图必须包含唯一的 szlab_poly_plc 节点")
+              plc_nodes[0].setdefault("config", {})["url"] = "opc.tcp://plc-sim:4855"
+              destination.write_text(
+                  json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8",
+              )
+              PY
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime-graphs
+              mountPath: /runtime-graphs
       containers:
         - name: unilabos
           image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
@@ -60,9 +105,6 @@ spec:
               value: "78"
             - name: ROS_LOCALHOST_ONLY
               value: "0"
-            # 本阶段只部署 Uni-Lab-OS；PLC-Sim 就绪后移除此覆盖并滚动重启。
-            - name: SZLAB_PLC_AUTO_CONNECT
-              value: "false"
           ports:
             - name: http
               containerPort: 18003
@@ -95,8 +137,13 @@ spec:
           volumeMounts:
             - name: runtime
               mountPath: /runtime
+            - name: runtime-graphs
+              mountPath: /opt/runtime-src/szlab/deployment/graphs
+              readOnly: true
       volumes:
         - name: runtime
+          emptyDir: {}
+        - name: runtime-graphs
           emptyDir: {}
 ---
 apiVersion: v1
