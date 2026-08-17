@@ -14,8 +14,10 @@ from .test_authoring_engine import (
     ANALYZE_NODE_UUID,
     PREPARE_NODE_UUID,
     WORKFLOW_UUID,
+    _applied_graph,
     _compile,
     _engine,
+    _source,
 )
 
 
@@ -88,6 +90,71 @@ def test_compile_generate_compile_reaches_semantic_fixed_point(
     assert repeated.graph == compiled.graph
     assert repeated.normalized_python_source == generated.normalized_python_source
     assert CandidateChangeset.model_validate(repeated.changeset).kind == "source_only"
+
+
+def test_source_tags_round_trip_without_baking_path_tags_into_decorator(
+    authoring_engine: WorkflowAuthoringEngine,
+) -> None:
+    """路径标签与代码标签并集后，只把代码标签写回工作流源码。
+
+    参数：``authoring_engine`` 是隔离的工作流创作编译器。返回无；测试证明中文
+    路径标签保持在包来源元数据中，``@workflow(tags=...)`` 只保留显式语义标签，
+    第二次编译仍达到同一候选图固定点。
+    """
+
+    applied_graph = _applied_graph()
+    applied_graph["workflow"]["tags"] = ["取样", "operations"]
+    applied_graph["workflow"]["meta_data"] = {
+        "unilab": {
+            "source_bootstrap": {
+                "kind": "editable_package_manifest",
+                "path_tags": ["取样", "operations"],
+            }
+        }
+    }
+    source = _source().replace(
+        '    description="Prepare and analyze one sample.",\n',
+        '    description="Prepare and analyze one sample.",\n'
+        '    tags=("样品谱系", "取样"),\n',
+    )
+
+    compiled = _compile(authoring_engine, source, graph=applied_graph)
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    assert compiled.graph["workflow"]["tags"] == [
+        "取样",
+        "operations",
+        "样品谱系",
+    ]
+    generated = authoring_engine.generate_python(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        graph=compiled.graph,
+        source_uri="package://lab/workflows/operations/取样/generated.py",
+    )
+    assert generated.valid and generated.normalized_python_source is not None
+    module = ast.parse(generated.normalized_python_source)
+    workflow_function = next(
+        statement
+        for statement in module.body
+        if isinstance(statement, ast.FunctionDef)
+    )
+    decorator = workflow_function.decorator_list[0]
+    assert isinstance(decorator, ast.Call)
+    decorator_keywords = {
+        keyword.arg: ast.literal_eval(keyword.value)
+        for keyword in decorator.keywords
+        if keyword.arg is not None
+    }
+    assert decorator_keywords["tags"] == ("样品谱系", "取样")
+
+    repeated = _compile(
+        authoring_engine,
+        generated.normalized_python_source,
+        graph=compiled.graph,
+    )
+    assert repeated.valid
+    assert repeated.graph == compiled.graph
 
 
 def test_typed_result_record_is_the_canonical_round_trip_form(

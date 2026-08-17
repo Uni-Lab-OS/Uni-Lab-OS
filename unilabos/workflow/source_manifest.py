@@ -19,6 +19,10 @@ from yaml.events import (
 )
 from yaml.nodes import MappingNode
 
+from unilabos.workflow.authoring_tags import (
+    WorkflowTagError,
+    normalize_workflow_tags,
+)
 from unilabos.workflow.models import validate_uuid
 
 YAML_DEPTH_LIMIT = 32
@@ -88,11 +92,11 @@ class SourceManifestError(RuntimeError):
 
 @dataclass(frozen=True)
 class WorkflowSourceEntry:
-    """一项工作流（Workflow）到 Python 源码及目录标签的稳定声明。"""
+    """一项工作流（Workflow）到 Python 源码及派生路径标签的稳定声明。"""
 
     workflow_uuid: str
     relative_path: str
-    tags: tuple[str, ...] = ()
+    path_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -124,10 +128,7 @@ def parse_editable_package_manifest(raw: bytes) -> EditablePackageManifest:
         raise SourceManifestError("invalid_package")
     # ``workflow_rows`` 允许显式空列表，使新建可编辑包先形成合法身份，再逐步加入
     # 工作流源码（Workflow Source）；null 或缺失字段仍不是空声明。
-    if (
-        not isinstance(workflow_rows, list)
-        or len(workflow_rows) > WORKFLOW_ENTRY_LIMIT
-    ):
+    if not isinstance(workflow_rows, list) or len(workflow_rows) > WORKFLOW_ENTRY_LIMIT:
         raise SourceManifestError("invalid_manifest")
 
     # 工作流身份与相对路径共同决定后续来源注册，必须保持声明顺序稳定。
@@ -199,26 +200,11 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     """
 
     required_fields = {"workflow_uuid", "source"}
-    if (
-        not isinstance(raw, dict)
-        or not required_fields <= set(raw)
-        or set(raw) - (required_fields | {"tags"})
-    ):
+    if not isinstance(raw, dict) or set(raw) != required_fields:
         raise SourceManifestError("invalid_workflow_source")
     raw_uuid = raw["workflow_uuid"]
     raw_source = raw["source"]
-    raw_tags = raw.get("tags", [])
     if not isinstance(raw_uuid, str) or not isinstance(raw_source, str):
-        raise SourceManifestError("invalid_workflow_source")
-    if (
-        not isinstance(raw_tags, list)
-        or len(raw_tags) > 16
-        or any(
-            not isinstance(tag, str) or not tag or tag != tag.strip() or len(tag) > 64
-            for tag in raw_tags
-        )
-        or len(set(raw_tags)) != len(raw_tags)
-    ):
         raise SourceManifestError("invalid_workflow_source")
     try:
         workflow_uuid = validate_uuid(raw_uuid)
@@ -243,8 +229,33 @@ def _parse_workflow_source(raw: Any, *, package_id: str) -> WorkflowSourceEntry:
     return WorkflowSourceEntry(
         workflow_uuid=workflow_uuid,
         relative_path=relative_path,
-        tags=tuple(raw_tags),
+        path_tags=workflow_path_tags(relative_path),
     )
+
+
+def workflow_path_tags(relative_path: str) -> tuple[str, ...]:
+    """从工作流源码路径派生从内向外排列的稳定标签。
+
+    参数：``relative_path`` 是相对 Python 包根的 ``workflows/**/*.py`` 路径。
+    返回：排除 ``workflows`` 根和文件名、按最内层到最外层去重的目录名元组。
+    异常：路径形状或任一目录标签违反数量、空白和长度约束时抛出
+    ``SourceManifestError``。
+    """
+
+    source_path = PurePosixPath(relative_path)
+    if (
+        source_path.is_absolute()
+        or relative_path != source_path.as_posix()
+        or len(source_path.parts) < 2
+        or source_path.parts[0] != "workflows"
+        or source_path.suffix != ".py"
+    ):
+        raise SourceManifestError("invalid_workflow_source")
+    # 标签按最具体目录优先；统一规范器负责首次出现去重和数量/长度门禁。
+    try:
+        return normalize_workflow_tags(tuple(reversed(source_path.parts[1:-1])))
+    except WorkflowTagError:
+        raise SourceManifestError("invalid_workflow_source")
 
 
 __all__ = [
@@ -252,4 +263,5 @@ __all__ = [
     "SourceManifestError",
     "WorkflowSourceEntry",
     "parse_editable_package_manifest",
+    "workflow_path_tags",
 ]

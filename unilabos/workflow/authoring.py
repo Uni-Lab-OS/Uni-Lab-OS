@@ -68,8 +68,8 @@ class _AuthoringBlock(AbstractContextManager[None]):
 def workflow(**metadata: Any) -> Callable[[_Function], _Function]:
     """声明工作流定义（Workflow Definition）的规范静态装饰器。
 
-    参数说明：``metadata`` 包含工作流 UUID、展示名和描述；返回保持原函数不变
-    的装饰器。可信编译只读取 AST，不信任这里的运行结果。
+    参数说明：``metadata`` 包含工作流 UUID、展示名、描述和可选 ``tags``；返回
+    保持原函数不变的装饰器。可信编译只读取 AST，不信任这里的运行结果。
     """
 
     del metadata

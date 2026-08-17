@@ -27,7 +27,7 @@ def _registration(
 
     参数：``workflow_uuid`` 是清单声明的工作流（Workflow）身份；包身份、包目录、
     相对路径与来源 URI 共同形成工作流源码（Workflow Source）身份；``tags``
-    是首次创建定义时写入的目录标签。
+    是首次创建定义时写入的解析后标签。
     返回：可交给存储安装接口的独立字典；本函数不读写文件或数据库。
     """
 
@@ -90,7 +90,10 @@ def test_missing_definition_is_created_with_stable_manifest_provenance(
     """
 
     # ``registration`` 是显式授权清单产生的唯一可信身份输入。
-    registration = _registration(tags=("取样", "sampling"))
+    registration = _registration(
+        relative_path="workflows/operations/取样/demo.py",
+        tags=("取样", "operations", "样品谱系"),
+    )
 
     installed = workflow_store.install_discovered_sources((registration,))
 
@@ -106,13 +109,16 @@ def test_missing_definition_is_created_with_stable_manifest_provenance(
                 "source_bootstrap": {
                     "kind": "editable_package_manifest",
                     "package_id": "alpha_lab",
-                    "relative_path": "workflows/demo.py",
-                    "source_uri": "package://alpha_lab/workflows/demo.py",
+                    "relative_path": "workflows/operations/取样/demo.py",
+                    "source_uri": (
+                        "package://alpha_lab/workflows/operations/取样/demo.py"
+                    ),
+                    "path_tags": ["取样", "operations"],
                 }
             }
         },
         "name": "alpha_lab.demo",
-        "tags": ["取样", "sampling"],
+        "tags": ["取样", "operations", "样品谱系"],
         "revision": 1,
     }
     # ``authoring_record`` 证明同一事务已经创建空创作事实，但没有编译候选。

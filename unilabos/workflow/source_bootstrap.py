@@ -8,8 +8,17 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
+from unilabos.workflow.authoring_tags import (
+    WorkflowTagError,
+    merge_workflow_tags,
+    normalize_workflow_tags,
+)
 from unilabos.workflow.json_codec import encode_json
 from unilabos.workflow.models import validate_uuid
+from unilabos.workflow.source_manifest import (
+    SourceManifestError,
+    workflow_path_tags,
+)
 
 _REGISTRATION_FIELDS = (
     "workflow_uuid",
@@ -92,8 +101,8 @@ def _normalize_registrations(
     """冻结并验证完整来源注册字段。
 
     参数：``registrations`` 是调用者提供的来源映射集合。返回：只含五个来源身份
-    字段和目录标签的独立字典元组。异常：集合不可迭代、字段缺失、值非字符串/
-    为空、标签未规范化或来源 URI 与包身份不一致时抛出
+    字段、派生路径标签和解析后标签的独立字典元组。异常：集合不可迭代、字段
+    缺失、值非字符串/为空、标签未规范化或来源 URI 与包身份不一致时抛出
     ``SourceBootstrapConflict``。
     """
 
@@ -111,7 +120,7 @@ def _normalize_registrations(
     normalized = tuple(
         {
             **{field: registration[field] for field in _REGISTRATION_FIELDS},
-            "tags": tuple(registration.get("tags", ())),
+            "tags": registration.get("tags", ()),
         }
         for registration in incoming_rows
     )
@@ -121,19 +130,13 @@ def _normalize_registrations(
             for field in _REGISTRATION_FIELDS
         ):
             raise SourceBootstrapConflict("工作流源码注册字段无效")
-        tags = registration["tags"]
-        if (
-            len(tags) > 16
-            or any(
-                not isinstance(tag, str)
-                or not tag
-                or tag != tag.strip()
-                or len(tag) > 64
-                for tag in tags
-            )
-            or len(set(tags)) != len(tags)
-        ):
+        try:
+            normalized_tags = normalize_workflow_tags(registration["tags"])
+        except WorkflowTagError:
+            raise SourceBootstrapConflict("工作流目录标签无效") from None
+        if tuple(registration["tags"]) != normalized_tags:
             raise SourceBootstrapConflict("工作流目录标签无效")
+        registration["tags"] = normalized_tags
         try:
             # ``canonical_workflow_uuid`` 是不可由宽松字符串改写得到的规范工作流身份。
             canonical_workflow_uuid = validate_uuid(registration["workflow_uuid"])
@@ -151,6 +154,19 @@ def _normalize_registrations(
         )
         if registration["source_uri"] != expected_source_uri:
             raise SourceBootstrapConflict("工作流源码 URI 与清单身份不一致")
+        try:
+            # ``path_tags`` 由规范相对路径重新计算，调用方不能伪造目录分类。
+            path_tags = workflow_path_tags(registration["relative_path"])
+        except SourceManifestError:
+            raise SourceBootstrapConflict("工作流源码相对路径无效") from None
+        # ``resolved_tags`` 允许目录发现与目录编译分别提供标签，但最终始终采用
+        # 路径优先的并集顺序。
+        try:
+            resolved_tags = merge_workflow_tags(path_tags, registration["tags"])
+        except WorkflowTagError:
+            raise SourceBootstrapConflict("工作流目录标签无效") from None
+        registration["path_tags"] = path_tags
+        registration["tags"] = resolved_tags
     return normalized
 
 
@@ -352,14 +368,16 @@ def _insert_workflow_skeleton(
     source_stem = PurePosixPath(registration["relative_path"]).stem
     workflow_name = f"{registration['package_id']}.{source_stem}"
     # ``manifest_provenance`` 只记录稳定清单来源坐标，供后续编译诊断和身份审计使用。
+    source_bootstrap = {
+        "kind": "editable_package_manifest",
+        "package_id": registration["package_id"],
+        "relative_path": registration["relative_path"],
+        "source_uri": registration["source_uri"],
+        "path_tags": list(registration["path_tags"]),
+    }
     manifest_provenance = {
         "unilab": {
-            "source_bootstrap": {
-                "kind": "editable_package_manifest",
-                "package_id": registration["package_id"],
-                "relative_path": registration["relative_path"],
-                "source_uri": registration["source_uri"],
-            }
+            "source_bootstrap": source_bootstrap,
         }
     }
     conn.execute(

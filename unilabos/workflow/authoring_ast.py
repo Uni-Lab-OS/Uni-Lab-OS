@@ -20,6 +20,10 @@ from unilabos.workflow.authoring_material import (
     MaterialSourceDeclaration,
     parse_material_source_declaration,
 )
+from unilabos.workflow.authoring_tags import (
+    WorkflowTagError,
+    normalize_workflow_tags,
+)
 from unilabos.workflow.models import CandidateSourceMapEntry, validate_uuid
 from unilabos.workflow.source_coordinates import (
     codepoint_offset_to_utf16_column,
@@ -131,6 +135,7 @@ class WorkflowProgram:
     function_docstring: str | None
     display_name: str
     description: str | None
+    tags: tuple[str, ...]
     imports: tuple[tuple[str, str], ...]
     devices: tuple[DeviceDeclaration, ...]
     input_contract: dict[str, Any]
@@ -219,7 +224,7 @@ def parse_authoring_source(
     # ``function_docstring`` 只由 Python AST 的规范函数文档语义读取；普通首表达式
     # 不会成为文档，且整个过程不 import、compile 或执行作者代码。
     function_docstring = ast.get_docstring(function, clean=True)
-    workflow_uuid, display_name, description = _workflow_declaration(
+    workflow_uuid, display_name, description, tags = _workflow_declaration(
         function,
         imports,
     )
@@ -278,6 +283,7 @@ def parse_authoring_source(
         function_docstring=function_docstring,
         display_name=display_name,
         description=description,
+        tags=tags,
         imports=tuple(sorted(imports.items())),
         devices=tuple(devices),
         input_contract=input_contract,
@@ -498,11 +504,11 @@ def _device_declaration(
 def _workflow_declaration(
     function: ast.FunctionDef,
     imports: dict[str, str],
-) -> tuple[str, str, str | None]:
+) -> tuple[str, str, str | None, tuple[str, ...]]:
     """读取工作流定义装饰器的稳定元数据。
 
     参数说明：``function`` 是唯一函数，``imports`` 用于识别装饰器；返回工作流
-    UUID、展示名和可选描述。位置参数、动态值或重复字段失败关闭。
+    UUID、展示名、可选描述和代码标签。位置参数、动态值或重复字段失败关闭。
     """
 
     declarations = [
@@ -520,7 +526,7 @@ def _workflow_declaration(
     if declaration.args:
         _fail("invalid_workflow_declaration", "工作流声明不接受位置参数", declaration)
     values = _literal_keywords(declaration, "invalid_workflow_declaration")
-    if set(values) - {"workflow_uuid", "displayname", "description"}:
+    if set(values) - {"workflow_uuid", "displayname", "description", "tags"}:
         _fail("invalid_workflow_declaration", "工作流声明包含未知字段", declaration)
     try:
         workflow_uuid = validate_uuid(values["workflow_uuid"])
@@ -528,11 +534,17 @@ def _workflow_declaration(
     except (KeyError, TypeError, ValueError):
         _fail("invalid_workflow_declaration", "工作流 UUID 或展示名无效", declaration)
     description = values.get("description")
+    raw_tags = values.get("tags", ())
     if not isinstance(display_name, str) or not display_name.strip():
         _fail("invalid_workflow_declaration", "工作流展示名不能为空", declaration)
     if description is not None and not isinstance(description, str):
         _fail("invalid_workflow_declaration", "工作流描述必须是字符串", declaration)
-    return workflow_uuid, display_name.strip(), description
+    try:
+        # ``tags`` 保持作者首次声明顺序；重复值由并集语义消除。
+        tags = normalize_workflow_tags(raw_tags)
+    except WorkflowTagError:
+        _fail("invalid_workflow_declaration", "工作流标签必须是规范字符串序列", declaration)
+    return workflow_uuid, display_name.strip(), description, tags
 
 
 def _workflow_parameters(

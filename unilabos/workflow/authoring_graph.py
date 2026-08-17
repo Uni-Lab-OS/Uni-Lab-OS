@@ -36,6 +36,10 @@ from unilabos.workflow.authoring_material import (
     MaterialSourceDeclaration,
     build_material_source_node,
 )
+from unilabos.workflow.authoring_tags import (
+    WorkflowTagError,
+    resolved_source_workflow_tags,
+)
 from unilabos.workflow.composite import CompositeAuthoring, CompositeExpansion
 from unilabos.workflow.composite_compatibility import (
     classify_pinned_published_workflow_invocation,
@@ -346,6 +350,17 @@ def build_candidate_graph(
     workflow["description"] = program.description
     workflow_meta = dict(workflow.get("meta_data") or {})
     unilab_meta = dict(workflow_meta.get("unilab") or {})
+    try:
+        resolved_source_tags = resolved_source_workflow_tags(
+            unilab_meta=unilab_meta,
+            declared_tags=program.tags,
+        )
+    except WorkflowTagError as error:
+        raise AuthoringGraphError("candidate_invalid", str(error)) from error
+    if resolved_source_tags is not None:
+        workflow["tags"] = resolved_source_tags
+        # ``authoring_tags`` 只保存代码标记，生成源码时不得把路径标签烘焙进装饰器。
+        unilab_meta["authoring_tags"] = list(program.tags)
     unilab_meta.update(
         {
             "authoring_function_name": program.function_name,

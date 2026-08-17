@@ -21,6 +21,10 @@ from unilabos.workflow.authoring_material import (
     RenderedMaterialSource,
     render_material_source_call,
 )
+from unilabos.workflow.authoring_tags import (
+    WorkflowTagError,
+    workflow_authoring_tags,
+)
 from unilabos.workflow.material_graph_validation import (
     MaterialGraphValidationError,
     validate_material_graph_projection,
@@ -279,6 +283,12 @@ def render_authoring_python(
     )
     if workflow.get("description") is not None:
         lines.append(f"    description={workflow.get('description')!r},")
+    try:
+        authoring_tags = workflow_authoring_tags(workflow)
+    except WorkflowTagError as error:
+        raise AuthoringGraphError("candidate_invalid", str(error)) from error
+    if authoring_tags:
+        lines.append(f"    tags={authoring_tags!r},")
     lines.append(")")
     function_name = _safe_identifier(
         str(

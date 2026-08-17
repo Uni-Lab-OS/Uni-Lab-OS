@@ -49,6 +49,7 @@ class EditableSourceRegistration:
     relative_path: str
     source_uri: str
     tags: tuple[str, ...] = ()
+    path_tags: tuple[str, ...] = ()
     module: str | None = None
     symbol: str | None = None
     definition_content_hash: str | None = None
@@ -96,7 +97,8 @@ def discover_editable_sources(
                 package_root=package_root,
                 relative_path=entry.relative_path,
                 source_uri=(f"package://{manifest.package_id}/{entry.relative_path}"),
-                tags=entry.tags,
+                tags=entry.path_tags,
+                path_tags=entry.path_tags,
             )
             for entry in manifest.workflows
         )

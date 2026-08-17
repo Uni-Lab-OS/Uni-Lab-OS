@@ -91,3 +91,33 @@ def test_source_map_cannot_reference_foreign_node() -> None:
             source_map=source_map,
             changeset=changeset,
         )
+
+
+def test_package_source_authoring_tags_cannot_forge_unchanged_resolved_tags() -> None:
+    """包来源代码标签即使未改变并集，也必须由路径证据证明。
+
+    返回无；测试把候选代码标签伪造成并集以外的值，同时保持最终标签不变，
+    公共候选边界必须在接受保留元数据前失败关闭。
+    """
+
+    graph, base_graph, source_map, changeset = _valid_bundle()
+    source_bootstrap = {
+        "kind": "editable_package_manifest",
+        "path_tags": ["取样", "operations"],
+    }
+    for workflow in (graph["workflow"], base_graph["workflow"]):
+        workflow["tags"] = ["取样", "operations"]
+        workflow.setdefault("meta_data", {}).setdefault("unilab", {})[
+            "source_bootstrap"
+        ] = deepcopy(source_bootstrap)
+    graph["workflow"]["meta_data"]["unilab"]["authoring_tags"] = ["伪造标签"]
+
+    with pytest.raises(CandidateBundleError):
+        validate_candidate_bundle(
+            graph=graph,
+            base_graph=base_graph,
+            workflow_uuid=WORKFLOW_UUID,
+            revision=7,
+            source_map=source_map,
+            changeset=changeset,
+        )

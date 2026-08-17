@@ -21,7 +21,7 @@ def _write_package(workspace_root: Path, *, broken_source: bool = False) -> None
 
     # ``package_root`` 是包目录（PackageCatalog）允许读取的 Python 包边界。
     package_root = workspace_root / "catalog_lab"
-    workflow_root = package_root / "workflows"
+    workflow_root = package_root / "workflows" / "operations" / "取样"
     workflow_root.mkdir(parents=True)
     package_root.joinpath("__init__.py").write_text("", encoding="utf-8")
     workspace_root.joinpath("pyproject.toml").write_text(
@@ -37,8 +37,7 @@ def _write_package(workspace_root: Path, *, broken_source: bool = False) -> None
         "  name: catalog_lab\n"
         "workflows:\n"
         f"  - workflow_uuid: {WORKFLOW_UUID}\n"
-        "    source: catalog_lab/workflows/prepare.py\n"
-        "    tags: [测试, catalog]\n",
+        "    source: catalog_lab/workflows/operations/取样/prepare.py\n",
         encoding="utf-8",
     )
     package_root.joinpath("definitions.py").write_text(
@@ -69,7 +68,11 @@ def _write_package(workspace_root: Path, *, broken_source: bool = False) -> None
     )
     workflow_root.joinpath("prepare.py").write_text(
         "from unilabos.workflow.authoring import workflow\n\n"
-        f'@workflow(workflow_uuid="{WORKFLOW_UUID}", displayname="准备实验")\n'
+        "@workflow(\n"
+        f'    workflow_uuid="{WORKFLOW_UUID}",\n'
+        '    displayname="准备实验",\n'
+        '    tags=("样品谱系", "取样"),\n'
+        ")\n"
         "def prepare():\n"
         "    return {}\n",
         encoding="utf-8",
@@ -151,9 +154,17 @@ def test_compile_package_source_discovers_complete_catalog_without_import(
     assert [item.id for item in catalog.definitions.workflows] == ["prepare"]
     assert catalog.definitions.workflows[0].details["workflow_uuid"] == WORKFLOW_UUID
     assert catalog.definitions.workflows[0].details["source_uri"] == (
-        "package://catalog_lab/workflows/prepare.py"
+        "package://catalog_lab/workflows/operations/取样/prepare.py"
     )
-    assert catalog.definitions.workflows[0].details["tags"] == ("测试", "catalog")
+    assert catalog.definitions.workflows[0].details["path_tags"] == (
+        "取样",
+        "operations",
+    )
+    assert catalog.definitions.workflows[0].details["tags"] == (
+        "取样",
+        "operations",
+        "样品谱系",
+    )
     # ``process_schema`` 是注册表（Registry）规范动作合同的 JSON Schema 投影。
     process_schema = catalog.definitions.devices[0].details["registry_entry"]["class"][
         "action_value_mappings"
@@ -353,7 +364,9 @@ def test_legacy_no_output_workflow_compiles_as_empty_output_contract(
         "def child(*, value):\n    return value\n",
         encoding="utf-8",
     )
-    workspace_root.joinpath("catalog_lab/workflows/prepare.py").write_text(
+    workspace_root.joinpath(
+        "catalog_lab/workflows/operations/取样/prepare.py"
+    ).write_text(
         "from catalog_lab.workflows.child import child\n"
         "from unilabos.workflow.authoring import resource_ref, workflow_definition\n\n"
         f'@workflow_definition(workflow_uuid="{WORKFLOW_UUID}", displayname="准备实验")\n'

@@ -12,6 +12,11 @@ from unilabos.workflow.authoring_graph import (
     candidate_changeset,
     semantic_graph_equal,
 )
+from unilabos.workflow.authoring_tags import (
+    WorkflowTagError,
+    has_package_source_tag_contract,
+    validate_package_source_tag_change,
+)
 from unilabos.workflow.composite_compatibility import (
     classify_pinned_published_workflow_invocation,
 )
@@ -185,14 +190,26 @@ def _workflow_authoring_boundary(
 ) -> None:
     """限制作者源码可以改变的工作流字段。
 
-    参数说明：候选可改变名称、描述和保留 ``meta_data.unilab``；UUID、修订、
-    标签、投影时间和非保留元数据必须保持权威值，否则失败关闭。
+    参数说明：候选可改变名称、描述和保留 ``meta_data.unilab``；包来源标签只可
+    按路径标签与代码标签并集改变；UUID、修订、投影时间和非保留元数据必须保持
+    权威值，否则失败关闭。
     """
 
-    for field in ("uuid", "revision", "tags", "create_time", "update_time"):
-        if field in candidate or field in base:
-            if not strict_json_equal(candidate.get(field), base.get(field)):
-                _fail("候选结果改变了非创作工作流字段")
+    for field in ("uuid", "revision", "create_time", "update_time"):
+        if (field in candidate or field in base) and not strict_json_equal(
+            candidate.get(field),
+            base.get(field),
+        ):
+            _fail("候选结果改变了非创作工作流字段")
+    if (
+        has_package_source_tag_contract(candidate)
+        or has_package_source_tag_contract(base)
+        or not strict_json_equal(candidate.get("tags"), base.get("tags"))
+    ):
+        try:
+            validate_package_source_tag_change(candidate=candidate, base=base)
+        except WorkflowTagError as error:
+            _fail(str(error))
     candidate_meta = dict(candidate["meta_data"])
     base_meta = dict(base["meta_data"])
     candidate_meta.pop("unilab", None)

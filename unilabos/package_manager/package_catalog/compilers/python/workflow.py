@@ -11,6 +11,7 @@ from unilabos.workflow.authoring_ast import (
     parse_authoring_source,
 )
 from unilabos.workflow.authoring_material import MaterialSourceDeclaration
+from unilabos.workflow.authoring_tags import WorkflowTagError, merge_workflow_tags
 from unilabos.workflow.source_manifest import EditablePackageManifest
 
 from ...model import (
@@ -86,6 +87,19 @@ def compile_workflow_definitions(
                 )
             )
         identities.add(fqid)
+        # ``resolved_tags`` 把目录结构与代码语义收敛为一份稳定工作流标签投影。
+        try:
+            resolved_tags = merge_workflow_tags(entry.path_tags, program.tags)
+        except WorkflowTagError as error:
+            raise PackageCompileError(
+                (
+                    PackageDiagnostic(
+                        code="invalid_workflow_tags",
+                        message="工作流路径与代码标签并集无效",
+                        path=logical_path,
+                    ),
+                )
+            ) from error
         # ``module`` 与函数符号共同保存源码映射，不承担工作流 UUID 身份。
         module = logical_path.removesuffix(".py").replace("/", ".")
         definitions.append(
@@ -107,7 +121,8 @@ def compile_workflow_definitions(
                         for name, schema in program.declared_output_schemas
                     ],
                     "source_uri": (f"package://{import_package}/{entry.relative_path}"),
-                    "tags": entry.tags,
+                    "path_tags": entry.path_tags,
+                    "tags": resolved_tags,
                     "workflow_uuid": workflow_uuid,
                 },
             )
