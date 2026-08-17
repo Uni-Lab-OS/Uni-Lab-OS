@@ -77,6 +77,7 @@ def _task_snapshot(
         "site": None,
         "slot_range": None,
         "flow_role": "primary_sample",
+        "custody_policy": "task_exclusive",
     }
     # ``snapshot_nodes`` 是已应用工作流图的不可变节点顺序；物料来源节点只提供
     # 任务物料绑定（TaskMaterialBinding），两个 ILab 节点才是可派发动作。

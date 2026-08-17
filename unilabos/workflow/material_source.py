@@ -19,6 +19,13 @@ class MaterialFlowRole(str, Enum):
     CONSUMABLE = "consumable"
 
 
+class MaterialCustodyPolicy(str, Enum):
+    """声明物料在 Task 与 Job 两个生命周期中的占用策略闭集。"""
+
+    TASK_EXCLUSIVE = "task_exclusive"
+    SHARED_SOURCE = "shared_source"
+
+
 # 该映射是 wire 值与权威中文显示名的同源目录；调用方不得另行翻译。
 MATERIAL_FLOW_ROLE_LABELS_ZH = MappingProxyType(
     {
@@ -29,5 +36,17 @@ MATERIAL_FLOW_ROLE_LABELS_ZH = MappingProxyType(
     }
 )
 
+MATERIAL_CUSTODY_POLICY_LABELS_ZH = MappingProxyType(
+    {
+        MaterialCustodyPolicy.TASK_EXCLUSIVE.value: "Task 全程独占",
+        MaterialCustodyPolicy.SHARED_SOURCE.value: "动作期间共享",
+    }
+)
 
-__all__ = ["MATERIAL_FLOW_ROLE_LABELS_ZH", "MaterialFlowRole"]
+
+__all__ = [
+    "MATERIAL_CUSTODY_POLICY_LABELS_ZH",
+    "MATERIAL_FLOW_ROLE_LABELS_ZH",
+    "MaterialCustodyPolicy",
+    "MaterialFlowRole",
+]

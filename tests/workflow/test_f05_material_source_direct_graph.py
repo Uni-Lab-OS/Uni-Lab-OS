@@ -185,6 +185,10 @@ def _mutated_graph(candidate: dict[str, Any], case: str) -> dict[str, Any]:
         selector["flow_role"] = ["primary_sample"]
     elif case == "flow-role-object":
         selector["flow_role"] = {"value": "primary_sample"}
+    elif case == "custody-policy-list":
+        selector["custody_policy"] = ["task_exclusive"]
+    elif case == "custody-policy-unknown":
+        selector["custody_policy"] = "until_first_action"
     elif case == "top-level-material":
         source_node["material_uuid"] = FIXED_MATERIAL_UUID
     else:
@@ -203,6 +207,8 @@ INVALID_GRAPH_CASES = (
     "noncanonical-mount",
     "flow-role-list",
     "flow-role-object",
+    "custody-policy-list",
+    "custody-policy-unknown",
     "top-level-material",
 )
 

@@ -99,6 +99,7 @@ def _source(
     mode: str = "existing",
     material_uuid: str | None = None,
     flow_role: str = "PRIMARY_SAMPLE",
+    custody_policy: str = "TASK_EXCLUSIVE",
 ) -> str:
     """生成一个物料来源向动作线性传递的作者源码。
 
@@ -111,6 +112,7 @@ def _source(
     return f'''from lab.devices import Reactor
 from lab.resources import plate_96
 from unilabos.workflow.authoring import (
+    MaterialCustodyPolicy,
     MaterialFlowRole,
     device,
     material_source,
@@ -134,6 +136,7 @@ def material_assay():
         site=None,
         slot_range=None,
         flow_role=MaterialFlowRole.{flow_role},
+        custody_policy=MaterialCustodyPolicy.{custody_policy},
     )
     # unilab:node_uuid={PREPARE_NODE_UUID}
     prepared = reactor.prepare(sample=assay_plate)
@@ -180,6 +183,7 @@ def test_material_source_compiles_to_backend_shaped_selector_and_edge() -> None:
         "site": None,
         "slot_range": None,
         "flow_role": "primary_sample",
+        "custody_policy": "task_exclusive",
     }
     assert len(compiled.graph["edges"]) == 1
     assert {
@@ -237,9 +241,13 @@ def test_material_source_selector_matrix_reaches_python_graph_fixed_point(
         node for node in compiled.graph["nodes"] if node["type"] == "material_source"
     )
     assert source_node["param"]["flow_role"] == role_value
+    assert source_node["param"]["custody_policy"] == "task_exclusive"
     assert source_node["param"]["material_uuid"] == material_uuid
     assert compiled.normalized_python_source is not None
     assert f"flow_role=MaterialFlowRole.{role_member}" in (
+        compiled.normalized_python_source
+    )
+    assert "custody_policy=MaterialCustodyPolicy.TASK_EXCLUSIVE" in (
         compiled.normalized_python_source
     )
     assert "resource_template=plate_96" in compiled.normalized_python_source
@@ -263,6 +271,7 @@ def test_material_source_selector_matrix_reaches_python_graph_fixed_point(
         "mode",
         "create-new-fixed",
         "free-string-role",
+        "free-string-custody",
         "missing-field",
         "extra-field",
     ],
@@ -290,6 +299,10 @@ def test_invalid_material_source_selector_returns_stable_diagnostic(
         "free-string-role": (
             "MaterialFlowRole.PRIMARY_SAMPLE",
             "'primary_sample'",
+        ),
+        "free-string-custody": (
+            "MaterialCustodyPolicy.TASK_EXCLUSIVE",
+            "'task_exclusive'",
         ),
         "missing-field": ("        site=None,\n", ""),
         "extra-field": (

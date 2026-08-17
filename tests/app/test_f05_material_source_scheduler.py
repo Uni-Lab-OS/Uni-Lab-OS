@@ -107,6 +107,7 @@ def _source_plan_node(*, automatic: bool = False) -> dict[str, Any]:
             "site": None,
             "slot_range": None,
             "flow_role": "primary_sample",
+            "custody_policy": "task_exclusive",
         },
         "execution_policy": {},
         "inputs": [],

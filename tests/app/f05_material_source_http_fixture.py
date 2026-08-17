@@ -218,6 +218,7 @@ def graph_payload(
                     "site": site_uuid,
                     "slot_range": slot_uuids,
                     "flow_role": "primary_sample",
+                    "custody_policy": "task_exclusive",
                 },
                 "execution_policy": {},
                 "disabled": False,

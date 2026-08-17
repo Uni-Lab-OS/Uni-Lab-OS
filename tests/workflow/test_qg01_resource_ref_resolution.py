@@ -165,6 +165,7 @@ def _material_source_code() -> str:
 
     return f'''from lab.resources import plate_96
 from unilabos.workflow.authoring import (
+    MaterialCustodyPolicy,
     MaterialFlowRole,
     material_source,
     resource_ref,
@@ -184,6 +185,7 @@ def s07_material_source():
         site=None,
         slot_range=None,
         flow_role=MaterialFlowRole.PRIMARY_SAMPLE,
+        custody_policy=MaterialCustodyPolicy.TASK_EXCLUSIVE,
     )
     return workflow_output()
 '''
