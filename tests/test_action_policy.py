@@ -19,6 +19,7 @@ from unilabos.registry.ast_registry_scanner import (
 from unilabos.registry.decorators import action, get_action_meta
 from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode
 from unilabos.utils.type_check import (
+    device_result_declares_failure,
     get_result_info_str,
     serialize_result_info,
 )
@@ -176,6 +177,20 @@ def test_failed_result_does_not_claim_success_type():
     result = serialize_result_info("failed", False, None)
 
     assert result == {"error": "failed", "suc": False, "return_value": None}
+
+
+@pytest.mark.parametrize(
+    "return_value",
+    [
+        {"success": False},
+        {"state": "UNKNOWN"},
+        {"state": "REJECTED"},
+    ],
+)
+def test_result_info_detects_explicit_device_business_failure(return_value):
+    result = serialize_result_info("", True, return_value)
+
+    assert device_result_declares_failure(result) is True
 
 
 def test_result_info_serializes_attached_resource_as_stable_reference():

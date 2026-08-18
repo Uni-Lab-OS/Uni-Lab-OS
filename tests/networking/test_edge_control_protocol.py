@@ -926,6 +926,54 @@ def test_job_start_fetches_http_payload_and_outcome_precedes_notification(
     asyncio.run(scenario())
 
 
+def test_device_business_failure_cannot_be_committed_as_success(
+    tmp_path: Path,
+) -> None:
+    """ROS 传输成功不能覆盖设备返回的明确业务失败。"""
+
+    path = tmp_path / "runtime.db"
+    store = EdgeControlStore(str(path))
+    client = EdgeControlClient(_settings(path), store=store)
+    job_uuid = str(uuid.uuid4())
+    command_uuid = str(uuid.uuid4())
+    store.save_job_start(
+        {
+            "job_uuid": job_uuid,
+            "task_uuid": str(uuid.uuid4()),
+            "node_uuid": str(uuid.uuid4()),
+            "job_access_token": "short-token",
+        },
+        command_uuid,
+    )
+
+    inserted = client._persist_terminal_status(
+        job_uuid,
+        "success",
+        {},
+        {
+            "suc": True,
+            "return_value": {
+                "success": False,
+                "state": "UNKNOWN",
+                "message": "place 完成见证不一致",
+            },
+        },
+        "robot-01",
+    )
+
+    pending = store.get_pending_outcome(job_uuid)
+    assert inserted is True
+    assert pending is not None
+    assert pending.outcome == "failed"
+    assert pending.error_info == [
+        {
+            "message": "place 完成见证不一致",
+            "outcome": "failed",
+        }
+    ]
+    store.close()
+
+
 def test_terminal_job_token_rejection_retires_pending_outcome(
     tmp_path: Path,
 ) -> None:

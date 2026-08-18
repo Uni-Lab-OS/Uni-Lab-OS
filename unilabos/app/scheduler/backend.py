@@ -43,6 +43,7 @@ from unilabos.registry.material_lock_schema import (
     MaterialLockSchemaError,
     compile_material_lock_schema,
 )
+from unilabos.utils.type_check import device_result_declares_failure
 from unilabos.utils.tracing import (
     add_event,
     capture_context,
@@ -220,7 +221,7 @@ class JobExecutionBackend:
             ret_value = return_info.get("return_value")
             suc_type = str(return_info.get("suc_type") or "normal")
         effective_success = status == "success"
-        if isinstance(ret_value, Mapping) and ret_value.get("success") is False:
+        if device_result_declares_failure(return_info):
             effective_success = False
         parent = extract_trace_context(item.trace_context)
         self._put_event(

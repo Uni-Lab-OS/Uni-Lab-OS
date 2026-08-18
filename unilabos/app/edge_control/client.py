@@ -32,6 +32,7 @@ from unilabos.app.edge_control.store import EdgeControlStore, StoredEvent, Store
 from unilabos.config.config import BasicConfig, EdgeControlConfig, HTTPConfig
 from unilabos.resources.instance_identity import normalize_resource_instance_barcode
 from unilabos.utils.log import get_comm_logger
+from unilabos.utils.type_check import device_result_declares_failure
 from unilabos.utils.tracing import (
     extract_trace_context,
     inject_trace_context,
@@ -914,6 +915,8 @@ class EdgeControlClient(BaseCommunicationClient):
             "canceled": "canceled",
             "timeout": "timeout",
         }.get(status, "failed")
+        if outcome == "succeeded" and device_result_declares_failure(return_info):
+            outcome = "failed"
         if job.status == "cancel_requested" and outcome == "failed":
             outcome = "canceled"
         normalized_return = _return_info(return_info, result_data)
@@ -1132,6 +1135,9 @@ def _return_info(return_info: Any, result_data: Dict[str, Any]) -> Dict[str, Any
 def _error_info(return_info: Any, outcome: str) -> Dict[str, Any]:
     if isinstance(return_info, dict):
         message = return_info.get("error") or return_info.get("message")
+        return_value = return_info.get("return_value")
+        if not message and isinstance(return_value, dict):
+            message = return_value.get("error") or return_value.get("message")
         if message:
             return {"message": str(message), "outcome": outcome}
     if return_info:
