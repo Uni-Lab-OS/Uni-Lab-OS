@@ -83,6 +83,13 @@ class WorkspaceHost:
         self._endpoint = ""
         self._configuration = self._initial_configuration()
         self._components = {name: idle_component(name) for name in COMPONENT_NAMES}
+        self._workflow_environment_reset: dict[str, object] = {
+            "phase": "idle",
+            "message": "运行前环境尚未复位",
+            "baselineFingerprint": None,
+            "receiptUuid": None,
+            "error": None,
+        }
         self._restore_interrupted_components()
         self._closed = threading.Event()
         self._monitor = threading.Thread(
@@ -291,6 +298,8 @@ class WorkspaceHost:
         if command == "plc.restart":
             self._stop_component("plc")
             return self._start_plc()
+        if command == "workflow.environment-reset":
+            return self._reset_workflow_environment(parameters)
         if command == "configuration.update":
             return self._update_configuration(parameters)
         if command == "authority.switch":
@@ -570,6 +579,8 @@ class WorkspaceHost:
         method: str = "GET",
         body: object = None,
         authorization: bool = False,
+        error_code: str = "layout_projection_failed",
+        error_label: str = "布局实时投影",
     ) -> dict[str, object]:
         headers = {"Accept": "application/json"}
         data = None
@@ -584,21 +595,233 @@ class WorkspaceHost:
                 timeout=self.readiness_timeout,
             ) as response:
                 payload = json.loads(response.read())
+        except HTTPError as error:
+            try:
+                details = json.loads(error.read())
+            except (OSError, ValueError):
+                details = {"status": error.code, "reason": str(error.reason)}
+            raise WorkspaceHostError(
+                error_code,
+                f"{error_label}被目标拒绝（HTTP {error.code}）",
+                details=details,
+            ) from error
         except (OSError, ValueError, URLError) as error:
             raise WorkspaceHostError(
-                "layout_projection_failed", f"布局实时投影请求失败：{error}"
+                error_code, f"{error_label}请求失败：{error}"
             ) from error
         if not isinstance(payload, dict):
             raise WorkspaceHostError(
-                "layout_projection_failed", "布局实时投影响应不是 JSON object"
+                error_code, f"{error_label}响应不是 JSON object"
             )
         if payload.get("code", 0) != 0 or payload.get("ok") is False:
             raise WorkspaceHostError(
-                "layout_projection_failed",
-                "布局实时投影被目标拒绝",
+                error_code,
+                f"{error_label}被目标拒绝",
                 details=payload.get("error"),
             )
         return payload
+
+    def _reset_workflow_environment(
+        self, parameters: dict[str, object]
+    ) -> dict[str, object]:
+        """以当前 OS selected graph 协调 PG 增量对齐与 PLC-Sim 复位。"""
+
+        unknown = sorted(set(parameters) - {"backendUrl"})
+        if unknown:
+            raise WorkspaceHostError(
+                "environment_reset_parameters_invalid",
+                f"未知运行前复位字段：{', '.join(unknown)}",
+            )
+        with self._lock:
+            edge = dict(self._components["edge"])
+            configured_backend_url = self._configuration.get("backendUrl")
+        target_backend_url = self._normalize_backend_url(
+            _optional_text(parameters.get("backendUrl"))
+            or _optional_text(configured_backend_url)
+        )
+        source_metadata = edge.get("metadata")
+        selected_fingerprint = (
+            _optional_text(source_metadata.get("graphFingerprint"))
+            if isinstance(source_metadata, dict)
+            else None
+        )
+        baseline_path_value = (
+            _optional_text(source_metadata.get("baselineFilePath"))
+            if isinstance(source_metadata, dict)
+            else None
+        )
+        runtime_directory_value = (
+            _optional_text(source_metadata.get("runtimeDirectory"))
+            if isinstance(source_metadata, dict)
+            else None
+        )
+        if edge.get("phase") != "ready":
+            raise WorkspaceHostError(
+                "environment_reset_source_not_ready",
+                "当前 Edge/OS 尚未就绪，无法读取实际 selected graph",
+            )
+        if not selected_fingerprint or not baseline_path_value or not runtime_directory_value:
+            raise WorkspaceHostError(
+                "environment_reset_baseline_ambiguous",
+                "当前 Edge/OS 缺少本代 selected graph 基线，已拒绝复位；请重启 OS 后重试",
+            )
+        baseline_path = Path(baseline_path_value).resolve()
+        runtime_directory = Path(runtime_directory_value).resolve()
+        if baseline_path.parent != runtime_directory:
+            raise WorkspaceHostError(
+                "environment_reset_baseline_ambiguous",
+                "当前 Edge/OS 基线路径不属于本代运行目录，已拒绝复位",
+            )
+        self._set_workflow_environment_reset_progress(
+            "validating",
+            "正在读取并核验当前 OS selected graph 基线",
+            clear_identity=True,
+        )
+        try:
+            try:
+                baseline = read_json(baseline_path)
+            except WorkspaceHostError as error:
+                raise WorkspaceHostError(
+                    "environment_reset_baseline_failed",
+                    "当前 Edge/OS 本代 selected graph 基线不可读；请重启 OS 后重试",
+                    details={"path": str(baseline_path), "cause": error.as_dict()},
+                ) from error
+            if not isinstance(baseline, dict):
+                raise WorkspaceHostError(
+                    "environment_reset_baseline_ambiguous",
+                    "当前 OS 未返回唯一、完整的 selected graph 基线",
+                )
+            baseline_graph_fingerprint = _required_text(
+                baseline, "selected_graph_fingerprint"
+            ).removeprefix("sha256:")
+            if baseline_graph_fingerprint != selected_fingerprint.removeprefix(
+                "sha256:"
+            ):
+                raise WorkspaceHostError(
+                    "environment_reset_baseline_ambiguous",
+                    "运行中的 OS 基线与 Workspace 当前 selected graph 不一致，已拒绝复位",
+                    details={
+                        "workspaceFingerprint": selected_fingerprint,
+                        "runtimeFingerprint": baseline_graph_fingerprint,
+                    },
+                )
+            baseline_fingerprint = _required_text(
+                baseline, "baseline_fingerprint"
+            )
+            self._set_workflow_environment_reset_progress(
+                "reconciling",
+                "正在通过 Backend 正式 API 增量对齐 PG 物料、Site 占用与 ledger",
+                baseline_fingerprint=baseline_fingerprint,
+            )
+            begin_payload = self._json_request(
+                f"{target_backend_url}/api/v1/runtime-environment-resets",
+                method="POST",
+                body={
+                    **baseline,
+                    "idempotency_key": f"pre-run-reset:{uuid.uuid4()}",
+                },
+                error_code="environment_reset_backend_rejected",
+                error_label="Backend 运行前复位",
+            )
+            receipt = begin_payload.get("data")
+            if not isinstance(receipt, dict):
+                raise WorkspaceHostError(
+                    "environment_reset_backend_invalid",
+                    "Backend 未返回运行前复位回执",
+                )
+            receipt_uuid = _required_text(receipt, "uuid")
+            receipt_baseline = _required_text(receipt, "baseline_fingerprint")
+            if receipt_baseline != baseline_fingerprint:
+                raise WorkspaceHostError(
+                    "environment_reset_backend_invalid",
+                    "Backend 复位回执与当前基线不一致",
+                )
+            self._set_workflow_environment_reset_progress(
+                "resetting-plc",
+                "正在复位 Edge 设备运行态与当前 CSV/握手配置下的 PLC-Sim",
+                baseline_fingerprint=baseline_fingerprint,
+                receipt_uuid=receipt_uuid,
+            )
+            # Backend 已在 begin 阶段确认没有活动任务、锁、预留或未消费结果。
+            # 先停 Edge，避免设备在 PLC 冷启动期间继续持有内存态；PLC 就绪后再
+            # 启动 Edge。仿真图可通过设备自身的显式冷启动配置清理本地命令账本，
+            # 真实设备图仍保留其 UNKNOWN 对账语义。
+            self._stop_component("edge")
+            self._stop_component("plc")
+            self._start_plc()
+            self._start_edge()
+            self._set_workflow_environment_reset_progress(
+                "verifying",
+                "正在复查任务、锁、预留与未消费结果并解除运行门",
+                baseline_fingerprint=baseline_fingerprint,
+                receipt_uuid=receipt_uuid,
+            )
+            complete_payload = self._json_request(
+                f"{target_backend_url}/api/v1/runtime-environment-resets/{receipt_uuid}/complete",
+                method="POST",
+                body={"baseline_fingerprint": baseline_fingerprint},
+                error_code="environment_reset_completion_rejected",
+                error_label="Backend 运行前复位完成确认",
+            )
+            completed = complete_payload.get("data")
+            if not isinstance(completed, dict) or completed.get("status") != "completed":
+                raise WorkspaceHostError(
+                    "environment_reset_completion_invalid",
+                    "Backend 未确认运行前环境已安全完成",
+                )
+        except BaseException as error:  # noqa: BLE001 - 统一记录可恢复失败状态。
+            normalized = (
+                error
+                if isinstance(error, WorkspaceHostError)
+                else WorkspaceHostError("environment_reset_failed", str(error))
+            )
+            self._set_workflow_environment_reset_progress(
+                "failed",
+                str(normalized),
+                error=normalized.as_dict(),
+            )
+            raise normalized
+        self._set_workflow_environment_reset_progress(
+            "succeeded",
+            "运行前环境已按当前 selected graph 与 PLC 配置完成复位",
+            baseline_fingerprint=baseline_fingerprint,
+            receipt_uuid=receipt_uuid,
+        )
+        return {
+            "status": "completed",
+            "baselineFingerprint": baseline_fingerprint,
+            "receipt": completed,
+        }
+
+    def _set_workflow_environment_reset_progress(
+        self,
+        phase: str,
+        message: str,
+        *,
+        baseline_fingerprint: str | None = None,
+        receipt_uuid: str | None = None,
+        error: object = None,
+        clear_identity: bool = False,
+    ) -> None:
+        """发布可由 Workbench 实时投影的运行前复位阶段。"""
+
+        with self._lock:
+            previous = self._workflow_environment_reset
+            self._workflow_environment_reset = {
+                "phase": phase,
+                "message": message,
+                "baselineFingerprint": None
+                if clear_identity
+                else baseline_fingerprint or previous.get("baselineFingerprint"),
+                "receiptUuid": None
+                if clear_identity
+                else receipt_uuid or previous.get("receiptUuid"),
+                "error": error,
+            }
+            self._publish_locked(
+                "workflow.environment-reset.progress",
+                self._workflow_environment_reset,
+            )
 
     def _reset_local_edge_protocol_state(self) -> None:
         """Reset transient Edge protocol facts for an explicit local rebuild.
@@ -743,13 +966,14 @@ class WorkspaceHost:
         plan = resolve_edge_launch(self.paths, backend)
         self._spawn(plan)
         ready_file = Path(str(plan.metadata["readyFilePath"]))
+        baseline_file = Path(str(plan.metadata["baselineFilePath"]))
         deadline = time.monotonic() + self.readiness_timeout
         while time.monotonic() < deadline:
             with self._lock:
                 process = self._processes.get("edge")
                 if process is None or process.poll() is not None:
                     raise WorkspaceHostError("os_start_failed", "OS 在就绪前退出")
-            if ready_file.is_file():
+            if ready_file.is_file() and baseline_file.is_file():
                 with self._lock:
                     self._components["edge"]["phase"] = "ready"
                     self._components["edge"]["diagnostic"] = None
@@ -785,24 +1009,29 @@ class WorkspaceHost:
                 "plc_readiness_failed", "等待 PLC-Sim API 就绪超时"
             )
         metadata = plan.metadata
-        self._post_json(
-            f"{metadata['guiUrl']}/api/server/start",
-            {
-                "csv": metadata["variableTablePath"],
-                "host": "127.0.0.1",
-                "port": metadata["opcUaPort"],
-            },
-        )
-        self._post_json(
-            f"{metadata['guiUrl']}/api/agent/start",
-            {
-                "profile": metadata["handshakeProfile"],
-                "workflow": metadata["handshakeWorkflow"],
-                "host": "127.0.0.1",
-                "port": metadata["opcUaPort"],
-                "csv": metadata["variableTablePath"],
-            },
-        )
+        try:
+            self._post_json(
+                f"{metadata['guiUrl']}/api/server/start",
+                {
+                    "csv": metadata["variableTablePath"],
+                    "host": "127.0.0.1",
+                    "port": metadata["opcUaPort"],
+                },
+            )
+            self._post_json(
+                f"{metadata['guiUrl']}/api/agent/start",
+                {
+                    "profile": metadata["handshakeProfile"],
+                    "workflow": metadata["handshakeWorkflow"],
+                    "host": "127.0.0.1",
+                    "port": metadata["opcUaPort"],
+                    "csv": metadata["variableTablePath"],
+                },
+            )
+            self._wait_plc_runtime_ready(plan)
+        except BaseException:
+            self._stop_component("plc")
+            raise
         with self._lock:
             component = self._components["plc"]
             component["phase"] = "ready"
@@ -810,6 +1039,47 @@ class WorkspaceHost:
             component["capabilities"] = ["opcua-simulation", "handshake"]
             self._publish_locked("plc.ready", {"generation": plan.generation})
             return self._snapshot_locked()
+
+    def _wait_plc_runtime_ready(self, plan: LaunchPlan) -> None:
+        """Require this GUI generation to own both PLC child processes."""
+
+        deadline = time.monotonic() + self.readiness_timeout
+        stable_since: float | None = None
+        last_state: object = None
+        stability_window = min(0.5, max(0.05, self.readiness_timeout / 4))
+        state_url = f"{plan.metadata['guiUrl']}/api/state"
+        while time.monotonic() < deadline:
+            with self._lock:
+                process = self._processes.get("plc")
+                if process is None or process.poll() is not None:
+                    raise WorkspaceHostError(
+                        "plc_start_failed", "PLC-Sim 在运行管线就绪前退出"
+                    )
+            try:
+                state = self._json_request(
+                    state_url,
+                    error_code="plc_readiness_failed",
+                    error_label="PLC-Sim 运行状态",
+                )
+                last_state = state
+            except WorkspaceHostError as error:
+                last_state = error.as_dict()
+                stable_since = None
+                time.sleep(0.1)
+                continue
+            now = time.monotonic()
+            if _plc_runtime_state_matches(state, plan.metadata):
+                stable_since = stable_since or now
+                if now - stable_since >= stability_window:
+                    return
+            else:
+                stable_since = None
+            time.sleep(0.1)
+        raise WorkspaceHostError(
+            "plc_readiness_failed",
+            "PLC-Sim 本代 Server/Handshake Agent 未完整就绪",
+            details={"state": last_state, "generation": plan.generation},
+        )
 
     def _post_json(self, url: str, payload: dict[str, object]) -> None:
         request = Request(
@@ -1705,6 +1975,7 @@ class WorkspaceHost:
             "components": {
                 name: dict(component) for name, component in self._components.items()
             },
+            "workflowEnvironmentReset": dict(self._workflow_environment_reset),
             "updatedAt": utc_timestamp(),
         }
 
@@ -1904,7 +2175,17 @@ class WorkspaceHost:
             ready_path = (
                 metadata.get("readyFilePath") if isinstance(metadata, dict) else None
             )
-            return isinstance(ready_path, str) and Path(ready_path).is_file()
+            baseline_path = (
+                metadata.get("baselineFilePath")
+                if isinstance(metadata, dict)
+                else None
+            )
+            return (
+                isinstance(ready_path, str)
+                and Path(ready_path).is_file()
+                and isinstance(baseline_path, str)
+                and Path(baseline_path).is_file()
+            )
         address = component.get("address")
         if not isinstance(address, str) or not address:
             return name == "renderer"
@@ -2062,6 +2343,46 @@ def _package_mounts_ready(payload: dict[str, object]) -> bool:
         and data.get("schemaVersion") == "workspace-package-mounts/v1"
         and isinstance(data.get("items"), list)
         and bool(data["items"])
+    )
+
+
+def _plc_runtime_state_matches(
+    payload: dict[str, object], metadata: dict[str, object]
+) -> bool:
+    """Reject a reachable stale OPC UA endpoint not owned by this GUI."""
+
+    server = payload.get("server")
+    agent = payload.get("agent")
+    if not isinstance(server, dict) or not isinstance(agent, dict):
+        return False
+    server_pid = server.get("pid")
+    agent_pid = agent.get("pid")
+    if (
+        not isinstance(server_pid, int)
+        or isinstance(server_pid, bool)
+        or server_pid < 1
+        or not isinstance(agent_pid, int)
+        or isinstance(agent_pid, bool)
+        or agent_pid < 1
+        or server.get("running") is not True
+        or agent.get("running") is not True
+        or server.get("attached") is True
+        or agent.get("attached") is True
+    ):
+        return False
+    expected_endpoint = f"{metadata.get('opcUaUrl', '')}/xuse_sim".rstrip("/")
+    actual_endpoint = str(server.get("endpoint") or "").rstrip("/")
+    if actual_endpoint != expected_endpoint:
+        return False
+    csv_paths = server.get("csv")
+    expected_csv = str(Path(str(metadata.get("variableTablePath") or "")).resolve())
+    if not isinstance(csv_paths, list) or [str(Path(str(path)).resolve()) for path in csv_paths] != [expected_csv]:
+        return False
+    connections = server.get("connections")
+    return (
+        isinstance(connections, dict)
+        and connections.get("available") is True
+        and connections.get("stale") is not True
     )
 
 

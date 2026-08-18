@@ -1423,6 +1423,27 @@ def main():
     args_dict["devices_config"] = resource_tree_set
     args_dict["graph"] = graph_res.physical_setup_graph
 
+    # 冻结本代 OS 实际解析的 selected graph；运行前复位只能读取这份事实，
+    # 不能从前端配置路径或 Backend 当前物料状态反推基线。
+    from unilabos.app.runtime_baseline import freeze_runtime_baseline_if_valid
+
+    _, baseline_error = freeze_runtime_baseline_if_valid(
+        resource_tree_set=resource_tree_set,
+        registry=lab_registry,
+        source_id=str(file_path or "remote-startup.json"),
+        graph_fingerprint=os.environ.get(
+            "UNILABOS_WORKBENCH_GRAPH_FINGERPRINT",
+            "",
+        ),
+        output_path=os.environ.get("UNILABOS_WORKBENCH_BASELINE_FILE"),
+    )
+    if baseline_error:
+        logger.warning(
+            "当前 selected graph 无法生成唯一运行前复位基线；"
+            "OS 将继续启动，但运行前复位不可用：%s",
+            baseline_error,
+        )
+
     slave_device_ids: List[str] = []
     if not BasicConfig.is_host_mode:
         from unilabos.app.scheduler.host_network import (

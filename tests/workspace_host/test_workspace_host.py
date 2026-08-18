@@ -22,6 +22,7 @@ from unilabos.workspace_host.host import (
     WorkspaceHost,
     _handler_type,
     _pid_exists,
+    _plc_runtime_state_matches,
     _renderer_process_environment,
 )
 from unilabos.workspace_host.launch import (
@@ -190,6 +191,110 @@ def test_workspace_client_status_is_stable_while_host_is_offline(
     assert result["diagnostic"]["code"] == "host_not_found"
 
 
+def test_workflow_environment_reset_coordinates_backend_and_plc(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    baseline_path = paths.runtime / "edge" / "edge-a" / "runtime-baseline.json"
+    baseline_path.parent.mkdir(parents=True)
+    baseline_path.write_text(json.dumps({
+        "schema_version": "unilab.runtime-baseline/v1",
+        "source_graph_id": "graph.json",
+        "selected_graph_fingerprint": "sha256:graph-a",
+        "baseline_fingerprint": "sha256:baseline-a",
+        "registry_fingerprint": "sha256:registry-a",
+        "materials": [{"material_uuid": "64000000-0000-4000-8000-000000000001"}],
+        "sites": [],
+    }), encoding="utf-8")
+    host._components["backend"].update({
+        "phase": "ready",
+        "address": "http://127.0.0.1:48001",
+        "metadata": {"graphFingerprint": "graph-a"},
+    })
+    host._components["edge"].update({
+        "phase": "ready",
+        "metadata": {
+            "graphFingerprint": "graph-a",
+            "baselineFilePath": str(baseline_path),
+            "runtimeDirectory": str(baseline_path.parent),
+        },
+    })
+    calls: list[tuple[str, str]] = []
+
+    def request(url: str, **options: object) -> dict[str, object]:
+        calls.append((str(options.get("method") or "GET"), url))
+        if url.endswith("/runtime-environment-resets"):
+            return {"code": 0, "data": {
+                "uuid": "74000000-0000-4000-8000-000000000001",
+                "baseline_fingerprint": "sha256:baseline-a",
+                "status": "awaiting_simulator_reset",
+            }}
+        return {"code": 0, "data": {
+            "uuid": "74000000-0000-4000-8000-000000000001",
+            "baseline_fingerprint": "sha256:baseline-a",
+            "status": "completed",
+        }}
+
+    monkeypatch.setattr(host, "_json_request", request)
+    monkeypatch.setattr(host, "_stop_component", lambda name: calls.append(("STOP", name)) or {})
+    monkeypatch.setattr(host, "_start_plc", lambda: calls.append(("START", "plc")) or {})
+    monkeypatch.setattr(host, "_start_edge", lambda: calls.append(("START", "edge")) or {})
+    try:
+        result = host._dispatch(
+            "workflow.environment-reset",
+            {"backendUrl": "http://127.0.0.1:8000"},
+        )
+        snapshot = host.snapshot()
+    finally:
+        host.close()
+
+    assert result["status"] == "completed"
+    assert snapshot["workflowEnvironmentReset"]["phase"] == "succeeded"
+    assert calls == [
+        ("POST", "http://127.0.0.1:8000/api/v1/runtime-environment-resets"),
+        ("STOP", "edge"),
+        ("STOP", "plc"),
+        ("START", "plc"),
+        ("START", "edge"),
+        ("POST", "http://127.0.0.1:8000/api/v1/runtime-environment-resets/74000000-0000-4000-8000-000000000001/complete"),
+    ]
+
+
+def test_plc_readiness_requires_managed_server_and_agent_processes() -> None:
+    metadata = {
+        "opcUaUrl": "opc.tcp://127.0.0.1:4855",
+        "variableTablePath": "/workspace/plc.csv",
+    }
+    stale_endpoint = {
+        "server": {
+            "pid": None,
+            "running": False,
+            "attached": False,
+            "endpoint": "opc.tcp://127.0.0.1:4855/xuse_sim/",
+            "csv": ["/workspace/plc.csv"],
+            "connections": {"available": False, "stale": False},
+        },
+        "agent": {"pid": 41002, "running": True, "attached": False},
+    }
+    managed_pipeline = {
+        "server": {
+            "pid": 41001,
+            "running": True,
+            "attached": False,
+            "endpoint": "opc.tcp://127.0.0.1:4855/xuse_sim/",
+            "csv": ["/workspace/plc.csv"],
+            "connections": {"available": True, "stale": False},
+        },
+        "agent": {"pid": 41002, "running": True, "attached": False},
+    }
+
+    assert _plc_runtime_state_matches(stale_endpoint, metadata) is False
+    assert _plc_runtime_state_matches(managed_pipeline, metadata) is True
+
+
 def test_attached_renderer_records_a_reusable_headless_adapter(workspace: Path) -> None:
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()
@@ -309,6 +414,15 @@ def test_split_runtime_launches_share_local_edge_protocol_and_stable_state(
     assert first_edge.metadata["runtimeDirectory"] != second_edge.metadata[
         "runtimeDirectory"
     ]
+    assert first_edge.metadata["baselineFilePath"] == str(
+        Path(str(first_edge.metadata["runtimeDirectory"])) / "runtime-baseline.json"
+    )
+    assert first_edge.environment["UNILABOS_WORKBENCH_BASELINE_FILE"] == (
+        first_edge.metadata["baselineFilePath"]
+    )
+    assert first_edge.environment["UNILABOS_WORKBENCH_GRAPH_FINGERPRINT"] == (
+        first_edge.metadata["graphFingerprint"]
+    )
 
 
 def test_backend_launch_keeps_local_domain_store_across_process_generations(
