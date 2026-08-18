@@ -674,6 +674,7 @@ def test_unknown_resolution_is_committed_locally_before_edge_ack(
         )
         command_uuid = str(uuid.uuid4())
         job_uuid = str(uuid.uuid4())
+        device_command_id = f"workflow-node-job:{job_uuid}:atomic-transfer-place"
         await client._handle_envelope(
             {
                 "protocol_version": 1,
@@ -684,7 +685,7 @@ def test_unknown_resolution_is_committed_locally_before_edge_ack(
                 "payload": {
                     "job_uuid": job_uuid,
                     "local_device_id": "robot-01",
-                    "device_command_id": f"workflow-node-job:{job_uuid}",
+                    "device_command_id": device_command_id,
                     "resolution": "canceled",
                     "reason": "操作员确认 PLC 已复位且设备空闲",
                 },
@@ -694,7 +695,7 @@ def test_unknown_resolution_is_committed_locally_before_edge_ack(
         assert host_node.unknown_resolutions == [
             {
                 "device_id": "robot-01",
-                "device_command_id": f"workflow-node-job:{job_uuid}",
+                "device_command_id": device_command_id,
                 "resolution_command_uuid": command_uuid,
                 "reason": "操作员确认 PLC 已复位且设备空闲",
             }
@@ -708,7 +709,7 @@ def test_unknown_resolution_is_committed_locally_before_edge_ack(
         assert events[0].payload == {
             "job_uuid": job_uuid,
             "command_uuid": command_uuid,
-            "device_command_id": f"workflow-node-job:{job_uuid}",
+            "device_command_id": device_command_id,
             "resolution": "canceled",
             "previous_state": "UNKNOWN",
             "current_state": "CANCELED",
@@ -724,7 +725,7 @@ def test_unknown_resolution_is_committed_locally_before_edge_ack(
                 "payload": {
                     "job_uuid": job_uuid,
                     "local_device_id": "robot-01",
-                    "device_command_id": f"workflow-node-job:{job_uuid}",
+                    "device_command_id": device_command_id,
                     "resolution": "canceled",
                     "reason": "操作员确认 PLC 已复位且设备空闲",
                 },
