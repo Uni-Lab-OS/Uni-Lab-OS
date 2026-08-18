@@ -9,8 +9,11 @@ import pytest
 from unilabos.workspace_host.discovery import ensure_local_token
 from unilabos.workspace_host.host import WorkspaceHost
 from unilabos.workspace_host.model import WorkspaceHostError, WorkspacePaths
-from unilabos.workspace_host.reset_safety import inspect_local_reset_blockers
-from unilabos.workspace_host.reset_safety import LocalResetBlocker
+from unilabos.workspace_host.reset_safety import (
+    LocalResetBlocker,
+    LocalResetInspectionError,
+    inspect_local_reset_blockers,
+)
 
 
 @pytest.fixture
@@ -201,6 +204,87 @@ def test_second_check_restores_previously_ready_components_on_race(
         "start:backend",
         "start:edge",
     ]
+    host.close()
+
+
+def test_after_stop_check_retries_transient_inspection_error(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend 停止后的 SQLite WAL 短暂不可读必须等待后重新安全检查。"""
+
+    paths = WorkspacePaths.resolve(workspace)
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    inspections: list[list[LocalResetBlocker] | LocalResetInspectionError] = [
+        LocalResetInspectionError("disk I/O error"),
+        LocalResetInspectionError("database is locked"),
+        [],
+    ]
+    observed_delays: list[float] = []
+
+    def inspect(_paths: WorkspacePaths) -> list[LocalResetBlocker]:
+        result = inspections.pop(0)
+        if isinstance(result, LocalResetInspectionError):
+            raise result
+        return result
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.host.inspect_local_reset_blockers",
+        inspect,
+    )
+    monkeypatch.setattr(
+        "unilabos.workspace_host.host.time.sleep",
+        observed_delays.append,
+    )
+
+    host._assert_local_reset_safe("after-stop")
+
+    assert inspections == []
+    assert observed_delays == [0.1, 0.1]
+    audit = paths.audit.read_text(encoding="utf-8")
+    assert audit.count('"event":"local.reset-state.preflight-retry"') == 2
+    assert '"event":"local.reset-state.preflight-failed"' not in audit
+    host.close()
+
+
+def test_after_stop_check_still_fails_closed_after_retry_limit(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """持续不可读的本地状态即使经过有限重试也绝不能执行重建。"""
+
+    paths = WorkspacePaths.resolve(workspace)
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    attempts: list[Path] = []
+    observed_delays: list[float] = []
+
+    def inspect(inspected_paths: WorkspacePaths) -> list[LocalResetBlocker]:
+        attempts.append(inspected_paths.workspace)
+        raise LocalResetInspectionError("persistent disk I/O error")
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.host.inspect_local_reset_blockers",
+        inspect,
+    )
+    monkeypatch.setattr(
+        "unilabos.workspace_host.host.time.sleep",
+        observed_delays.append,
+    )
+    monkeypatch.setattr(
+        "unilabos.workspace_host.host._LOCAL_RESET_AFTER_STOP_INSPECTION_ATTEMPTS",
+        3,
+    )
+
+    with pytest.raises(WorkspaceHostError) as raised:
+        host._assert_local_reset_safe("after-stop")
+
+    assert raised.value.code == "local_reset_state_preflight_failed"
+    assert raised.value.details == {
+        "stage": "after-stop",
+        "message": "persistent disk I/O error",
+    }
+    assert attempts == [paths.workspace, paths.workspace, paths.workspace]
+    assert observed_delays == [0.1, 0.1]
     host.close()
 
 

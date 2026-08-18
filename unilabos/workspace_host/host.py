@@ -52,6 +52,8 @@ _STOP_TIMEOUT_SECONDS = 10.0
 _READINESS_TIMEOUT_SECONDS = 90.0
 _MAX_BODY_BYTES = 1024 * 1024
 _SUPERVISED_COMPONENTS = frozenset({"backend", "edge", "plc"})
+_LOCAL_RESET_AFTER_STOP_INSPECTION_ATTEMPTS = 20
+_LOCAL_RESET_INSPECTION_RETRY_DELAY_SECONDS = 0.1
 
 
 class WorkspaceHost:
@@ -644,19 +646,40 @@ class WorkspaceHost:
         return self._start_backend(parameters)
 
     def _assert_local_reset_safe(self, stage: str) -> None:
-        try:
-            blockers = inspect_local_reset_blockers(self.paths)
-        except LocalResetInspectionError as error:
-            with self._lock:
-                self._audit_locked(
-                    "local.reset-state.preflight-failed",
-                    {"stage": stage, "message": str(error)},
-                )
-            raise WorkspaceHostError(
-                "local_reset_state_preflight_failed",
-                "无法证明本地状态可以安全重建；未修改任何持久数据",
-                details={"stage": stage, "message": str(error)},
-            ) from error
+        max_attempts = (
+            _LOCAL_RESET_AFTER_STOP_INSPECTION_ATTEMPTS
+            if stage == "after-stop"
+            else 1
+        )
+        blockers = []
+        for attempt in range(1, max_attempts + 1):
+            try:
+                blockers = inspect_local_reset_blockers(self.paths)
+                break
+            except LocalResetInspectionError as error:
+                if attempt < max_attempts:
+                    with self._lock:
+                        self._audit_locked(
+                            "local.reset-state.preflight-retry",
+                            {
+                                "stage": stage,
+                                "attempt": attempt,
+                                "maxAttempts": max_attempts,
+                                "message": str(error),
+                            },
+                        )
+                    time.sleep(_LOCAL_RESET_INSPECTION_RETRY_DELAY_SECONDS)
+                    continue
+                with self._lock:
+                    self._audit_locked(
+                        "local.reset-state.preflight-failed",
+                        {"stage": stage, "message": str(error)},
+                    )
+                raise WorkspaceHostError(
+                    "local_reset_state_preflight_failed",
+                    "无法证明本地状态可以安全重建；未修改任何持久数据",
+                    details={"stage": stage, "message": str(error)},
+                ) from error
         if not blockers:
             return
         details = {
