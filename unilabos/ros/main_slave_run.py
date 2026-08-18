@@ -113,7 +113,9 @@ def main(
             device_uuid=str(uuid.uuid4()),
         )
         joint_republisher = JointRepublisher(
-            "joint_republisher", host_node.resource_tracker
+            device_id="joint_republisher",
+            registry_name="",
+            resource_tracker=host_node.resource_tracker,
         )
         # lh_joint_pub = LiquidHandlerJointPublisher(
         #     resources_config=resources_list, resource_tracker=host_node.resource_tracker
@@ -349,7 +351,9 @@ def slave(
             device_id="resource_mesh_manager",
         )
         joint_republisher = JointRepublisher(
-            "joint_republisher", DeviceNodeResourceTracker()
+            device_id="joint_republisher",
+            registry_name="",
+            resource_tracker=DeviceNodeResourceTracker(),
         )
         lh_joint_pub = LiquidHandlerJointPublisher(
             resources_config=resources_list,

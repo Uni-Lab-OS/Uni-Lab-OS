@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import sqlite3
 import sys
 import threading
@@ -1163,7 +1162,15 @@ def test_backend_crash_is_supervised_into_a_new_process_generation(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ready Local Backend is a supervised service, not a UI child process."""
+    """证明就绪 Backend 崩溃后由宿主恢复到新的进程代次。
+
+    Args:
+        workspace: 当前用例的最小可启动工作区。
+        monkeypatch: pytest 提供的启动计划替换工具。
+
+    Returns:
+        无返回值；Backend 未被恢复为新 PID 和新代次时断言失败。
+    """
 
     ready_server = ThreadingHTTPServer(("127.0.0.1", 0), _ReadyHandler)
     threading.Thread(target=ready_server.serve_forever, daemon=True).start()
@@ -1207,7 +1214,9 @@ def test_backend_crash_is_supervised_into_a_new_process_generation(
         client.wait(str(started["operationId"]), timeout=5)
         before = client.snapshot()["components"]["backend"]
         first_pid = int(before["pid"])
-        os.kill(first_pid, signal.SIGKILL)
+        first_process = host._processes["backend"]
+        assert first_process.pid == first_pid
+        first_process.kill()
 
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -1227,8 +1236,9 @@ def test_backend_crash_is_supervised_into_a_new_process_generation(
             stopped = client.submit("backend.stop", operation_id="crash-cleanup")
             client.wait(str(stopped["operationId"]), timeout=5)
         except WorkspaceHostError:
-            if recovered_pid and _pid_running(recovered_pid):
-                os.kill(recovered_pid, signal.SIGKILL)
+            recovered_process = host._processes.get("backend")
+            if recovered_process is not None and recovered_process.poll() is None:
+                recovered_process.kill()
         server.shutdown()
         server.server_close()
         host.close()

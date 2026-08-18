@@ -46,10 +46,12 @@ from .model import (
     read_json,
     utc_timestamp,
 )
+from .process_lifecycle import process_exists as _pid_exists
+from .process_lifecycle import terminate_process_tree as _terminate_process_tree
 from .reset_safety import LocalResetInspectionError, inspect_local_reset_blockers
 
-_STOP_TIMEOUT_SECONDS = 10.0
 _READINESS_TIMEOUT_SECONDS = 90.0
+_COLD_START_READINESS_TIMEOUT_SECONDS = 180.0
 _MAX_BODY_BYTES = 1024 * 1024
 _SUPERVISED_COMPONENTS = frozenset({"backend", "edge", "plc"})
 
@@ -726,6 +728,15 @@ class WorkspaceHost:
             return self._snapshot_locked()
 
     def _start_edge(self) -> dict[str, object]:
+        """启动边缘运行时（Edge Runtime）并等待其就绪文件。
+
+        Returns:
+            边缘运行时进入 ``ready`` 后的工作区宿主快照。
+
+        Raises:
+            WorkspaceHostError: Backend、Edge 进程或 Edge 就绪等待失败。
+        """
+
         with self._lock:
             if self._components["edge"]["phase"] == "ready":
                 return self._snapshot_locked()
@@ -743,7 +754,9 @@ class WorkspaceHost:
         plan = resolve_edge_launch(self.paths, backend)
         self._spawn(plan)
         ready_file = Path(str(plan.metadata["readyFilePath"]))
-        deadline = time.monotonic() + self.readiness_timeout
+        deadline = time.monotonic() + _startup_readiness_timeout(
+            "edge", self.readiness_timeout
+        )
         while time.monotonic() < deadline:
             with self._lock:
                 process = self._processes.get("edge")
@@ -916,7 +929,23 @@ class WorkspaceHost:
         path: str,
         accepts: Callable[[dict[str, object]], bool],
     ) -> dict[str, object]:
-        deadline = time.monotonic() + self.readiness_timeout
+        """等待 Backend 的一个只读就绪探测满足接受条件。
+
+        Args:
+            plan: 当前 Backend 启动计划及其进程身份信息。
+            path: 相对于 Backend 地址的只读探测路径。
+            accepts: 判断 JSON 响应是否已满足就绪条件的函数。
+
+        Returns:
+            首个满足接受条件的 Backend JSON 响应。
+
+        Raises:
+            WorkspaceHostError: Backend 提前退出或冷启动期限耗尽。
+        """
+
+        deadline = time.monotonic() + _startup_readiness_timeout(
+            plan.component, self.readiness_timeout
+        )
         while time.monotonic() < deadline:
             with self._lock:
                 process = self._processes.get(plan.component)
@@ -2125,88 +2154,30 @@ def _renderer_process_environment(
     return environment
 
 
-def _pid_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    if os.name != "nt":
-        try:
-            completed = subprocess.run(
-                ["ps", "-o", "stat=", "-p", str(pid)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=1,
-            )
-            if completed.returncode == 0 and completed.stdout.lstrip().startswith(b"Z"):
-                return False
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    return True
-
-
 def _recovery_order(name: str) -> int:
     """Recover authorities before their device and simulator dependants."""
 
     return {"backend": 0, "plc": 1, "edge": 2}.get(name, 99)
 
 
-def _terminate_process_tree(pid: int, process: subprocess.Popen[bytes] | None) -> None:
-    if process is not None and process.poll() is not None:
-        return
-    if os.name == "nt":
-        system_root = os.environ.get("SystemRoot")
-        if not system_root:
-            raise WorkspaceHostError("stop_failed", "Windows 缺少 SystemRoot")
-        completed = subprocess.run(
-            [
-                str(Path(system_root) / "System32" / "taskkill.exe"),
-                "/PID",
-                str(pid),
-                "/T",
-                "/F",
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=_STOP_TIMEOUT_SECONDS,
-        )
-        if completed.returncode != 0 and _pid_exists(pid):
-            raise WorkspaceHostError("stop_failed", f"无法停止进程树：{pid}")
-        return
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        if not _pid_exists(pid):
-            return
-        raise
-        return
-    deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if process is not None:
-            if process.poll() is not None:
-                return
-        elif not _pid_exists(pid):
-            return
-        time.sleep(0.05)
-    if (process is not None and process.poll() is None) or (
-        process is None and _pid_exists(pid)
-    ):
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            if not _pid_exists(pid):
-                return
-            raise
-            return
-    if process is not None:
-        try:
-            process.wait(timeout=_STOP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as error:
-            raise WorkspaceHostError("stop_failed", f"进程树未退出：{pid}") from error
+def _startup_readiness_timeout(
+    component: str,
+    configured_timeout: float,
+) -> float:
+    """计算受管组件冷启动的就绪期限。
+
+    Args:
+        component: 当前启动计划中的组件名称。
+        configured_timeout: 工作区宿主配置的通用就绪超时秒数。
+
+    Returns:
+        Backend 和 Edge 使用不短于已验证冷启动下限的期限；其他组件保持
+        调用方配置的通用期限。
+    """
+
+    if component in {"backend", "edge"}:
+        return max(configured_timeout, _COLD_START_READINESS_TIMEOUT_SECONDS)
+    return configured_timeout
 
 
 def sys_platform() -> str:

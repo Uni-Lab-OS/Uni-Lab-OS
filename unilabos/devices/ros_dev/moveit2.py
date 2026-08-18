@@ -312,6 +312,8 @@ class MoveIt2:
         self.motion_suceeded = False
         self.__execution_goal_handle = None
         self.__last_error_code = None
+        self.__last_planning_error_code = None
+        self.__last_cartesian_fraction = None
         self.__wait_until_executed_rate = self._node.create_rate(1000.0)
         self.__execution_mutex = threading.Lock()
         self.__move_action_retry = MoveGroupActionRetry(
@@ -352,6 +354,16 @@ class MoveIt2:
 
     def get_last_execution_error_code(self) -> Optional[MoveItErrorCodes]:
         return self.__last_error_code
+
+    def get_last_planning_error_code(self) -> Optional[MoveItErrorCodes]:
+        """返回最近一次独立规划服务的 MoveIt 错误码。"""
+
+        return self.__last_planning_error_code
+
+    def get_last_cartesian_fraction(self) -> Optional[float]:
+        """返回最近一次笛卡尔规划实际覆盖的路径比例。"""
+
+        return self.__last_cartesian_fraction
 
     ####
 
@@ -541,6 +553,8 @@ class MoveIt2:
         首个成功的关节轨迹，预算耗尽返回 ``None``。异常：底层 ROS 客户端异常
         原样上抛。安全：此处不重放控制失败，也不属于工作流（Workflow）重试。
         """
+        self.__last_planning_error_code = None
+        self.__last_cartesian_fraction = None
         plan_kwargs = {
             key: value
             for key, value in locals().items()
@@ -716,6 +730,8 @@ class MoveIt2:
 
         # Cartesian
         if cartesian:
+            self.__last_planning_error_code = res.error_code
+            self.__last_cartesian_fraction = float(res.fraction)
             if MoveItErrorCodes.SUCCESS == res.error_code.val:
                 if res.fraction >= cartesian_fraction_threshold:
                     trajectory = res.solution.joint_trajectory
@@ -735,6 +751,7 @@ class MoveIt2:
 
         # Else Kinematic
         res = res.motion_plan_response
+        self.__last_planning_error_code = res.error_code
         if MoveItErrorCodes.SUCCESS == res.error_code.val:
             return res.trajectory.joint_trajectory
         else:
@@ -1894,6 +1911,24 @@ class MoveIt2:
         self.__planning_scene = self._get_planning_scene_service.call(
             GetPlanningScene.Request()
         ).scene
+        return True
+
+    def request_planning_scene_update(self) -> Optional[Future]:
+        """异步请求当前 PlanningScene，避免调用线程阻塞在同步 ROS 服务。"""
+
+        if not self._get_planning_scene_service.service_is_ready():
+            return None
+        return self._get_planning_scene_service.call_async(GetPlanningScene.Request())
+
+    def process_planning_scene_update(self, future: Future) -> bool:
+        """接纳已完成的 PlanningScene 响应；未完成时保持非阻塞。"""
+
+        if not future.done():
+            return False
+        response = future.result()
+        if response is None or getattr(response, "scene", None) is None:
+            raise RuntimeError("MoveIt GetPlanningScene 返回空响应")
+        self.__planning_scene = response.scene
         return True
 
     def allow_collisions(self, id: str, allow: bool) -> Optional[Future]:

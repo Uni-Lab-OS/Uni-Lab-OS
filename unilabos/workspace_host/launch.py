@@ -333,6 +333,8 @@ def resolve_edge_launch(
         "--action_mode",
         "real" if mode == "normal" else "simulate",
         *(("--external_devices_only",) if external_devices_only else ()),
+        "--visual",
+        "rviz",
         "--ros_discovery_server",
         "off",
     )
@@ -449,16 +451,53 @@ def resolve_plc_launch(paths: WorkspacePaths) -> LaunchPlan:
 
 
 def _runtime_environment(paths: WorkspacePaths, generation: str) -> dict[str, str]:
+    """构建组件进程共享的工作区隔离环境。
+
+    Args:
+        paths: 当前工作区的标准运行时与日志路径集合。
+        generation: 当前组件进程的唯一启动代次，用于隔离可变运行数据。
+
+    Returns:
+        包含 Python 导入路径、可观测配置和 ROS 2 日志目录的进程环境。
+    """
+
     environment = dict(os.environ)
     checkout = Path(__file__).resolve().parents[2]
     imports = [str(checkout), str(paths.workspace)]
     inherited = environment.get("PYTHONPATH")
     if inherited:
         imports.append(inherited)
+    ros_log_directory = paths.logs / "ros" / generation
+    ros_log_directory.mkdir(parents=True, exist_ok=True)
+    ros_prefix = Path(sys.prefix) / "Library"
+    if os.name == "nt" and (ros_prefix / "share" / "ament_index").is_dir():
+        ros_defaults = {
+            "AMENT_PREFIX_PATH": str(ros_prefix),
+            "AMENT_PYTHON_EXECUTABLE": sys.executable,
+            "QT_PLUGIN_PATH": str(ros_prefix / "plugins"),
+            "ROS_ETC_DIR": str(ros_prefix / "etc" / "ros"),
+            "ROS_OS_OVERRIDE": "conda:win64",
+        }
+        for name, value in ros_defaults.items():
+            if not environment.get(name):
+                environment[name] = value
+        rviz_runtime = ros_prefix / "opt" / "rviz_ogre_vendor" / "bin"
+        path_entries = _windows_dll_compatible_path_entries(
+            environment.get("PATH", "")
+        )
+        environment["PATH"] = os.pathsep.join(path_entries)
+        normalized_entries = {os.path.normcase(entry) for entry in path_entries}
+        if (
+            rviz_runtime.is_dir()
+            and os.path.normcase(str(rviz_runtime)) not in normalized_entries
+        ):
+            environment["PATH"] = os.pathsep.join((str(rviz_runtime), *path_entries))
+        environment["PYTHONHOME"] = ""
     environment.update(
         {
             "PYTHONPATH": os.pathsep.join(imports),
             "PYTHONUNBUFFERED": "1",
+            "ROS_LOG_DIR": str(ros_log_directory),
             "UNILABOS_OBSERVABILITYCONFIG_ENABLED": "true",
             "UNILABOS_OBSERVABILITYCONFIG_PROJECT_NAME": "uni-lab-workbench",
             "UNILABOS_WORKBENCH_GENERATION": generation,
@@ -466,6 +505,24 @@ def _runtime_environment(paths: WorkspacePaths, generation: str) -> dict[str, st
         }
     )
     return environment
+
+
+def _windows_dll_compatible_path_entries(value: str) -> list[str]:
+    """剔除无法加入 Windows DLL 搜索路径的现存 PATH 目录。"""
+
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    entries: list[str] = []
+    for entry in (item for item in value.split(os.pathsep) if item):
+        if not callable(add_dll_directory) or not os.path.isdir(entry):
+            entries.append(entry)
+            continue
+        try:
+            handle = add_dll_directory(os.path.abspath(entry))
+        except OSError:
+            continue
+        handle.close()
+        entries.append(entry)
+    return entries
 
 
 def _workspace_file(paths: WorkspacePaths, value: str, *, code: str) -> Path:
