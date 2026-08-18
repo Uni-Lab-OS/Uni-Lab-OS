@@ -461,7 +461,7 @@ def _runtime_environment(paths: WorkspacePaths, generation: str) -> dict[str, st
         包含 Python 导入路径、可观测配置和 ROS 2 日志目录的进程环境。
     """
 
-    environment = dict(os.environ)
+    environment = _with_conda_ros_environment(dict(os.environ))
     checkout = Path(__file__).resolve().parents[2]
     imports = [str(checkout), str(paths.workspace)]
     inherited = environment.get("PYTHONPATH")
@@ -504,6 +504,69 @@ def _runtime_environment(paths: WorkspacePaths, generation: str) -> dict[str, st
             "UNILABOS_WORKBENCH_WORKSPACE": str(paths.workspace),
         }
     )
+    return environment
+
+
+def _with_conda_ros_environment(
+    environment: dict[str, str],
+    *,
+    platform: str = sys.platform,
+    prefix: Path | None = None,
+    executable: str | None = None,
+) -> dict[str, str]:
+    """Restore RoboStack activation variables for detached Windows children.
+
+    Workbench starts its Workspace Host with the selected environment's Python
+    executable, but a GUI process has no activated Conda shell.  RoboStack's
+    ``rclpy`` then imports successfully while RMW initialization fails because
+    ``AMENT_PREFIX_PATH`` was never populated.  Reconstruct the stable subset
+    of the environment's activation contract directly from that interpreter.
+    Explicit caller overrides remain authoritative.
+    """
+
+    if platform != "win32":
+        return environment
+    conda_prefix = (prefix or Path(sys.prefix)).resolve()
+    library = conda_prefix / "Library"
+    if not (conda_prefix / "conda-meta").is_dir():
+        return environment
+    if not (library / "local_setup.bat").is_file():
+        return environment
+
+    python_executable = executable or sys.executable
+    environment.setdefault("CONDA_PREFIX", str(conda_prefix))
+    environment.setdefault("CONDA_DEFAULT_ENV", conda_prefix.name)
+    environment.setdefault("AMENT_PREFIX_PATH", str(library))
+    environment.setdefault("AMENT_PYTHON_EXECUTABLE", python_executable)
+    environment.setdefault("QT_PLUGIN_PATH", str(library / "plugins"))
+    environment.setdefault("ROS_DISTRO", "humble")
+    environment.setdefault("ROS_ETC_DIR", str(library / "etc" / "ros"))
+    environment.setdefault("ROS_LOCALHOST_ONLY", "0")
+    environment.setdefault("ROS_OS_OVERRIDE", "conda:win64")
+    environment.setdefault("ROS_PYTHON_VERSION", str(sys.version_info.major))
+    environment.setdefault("ROS_VERSION", "2")
+    environment["PYTHONHOME"] = ""
+
+    existing_path = environment.get("PATH", "")
+    path_entries = [
+        library / "bin",
+        conda_prefix,
+        library / "mingw-w64" / "bin",
+        library / "usr" / "bin",
+        conda_prefix / "Scripts",
+        conda_prefix / "bin",
+    ]
+    merged = [str(entry) for entry in path_entries]
+    merged.extend(part for part in existing_path.split(os.pathsep) if part)
+    seen: set[str] = set()
+    preserved: list[str] = []
+    for part in merged:
+        key = part.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        preserved.append(part)
+    environment["PATH"] = os.pathsep.join(preserved)
     return environment
 
 

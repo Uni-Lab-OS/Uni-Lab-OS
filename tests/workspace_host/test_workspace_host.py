@@ -20,10 +20,12 @@ from unilabos.workspace_host.discovery import WorkspaceHostLock, ensure_local_to
 from unilabos.workspace_host.host import (
     WorkspaceHost,
     _handler_type,
+    _pid_exists,
     _renderer_process_environment,
 )
 from unilabos.workspace_host.launch import (
     LaunchPlan,
+    _with_conda_ros_environment,
     resolve_backend_launch,
     resolve_edge_launch,
     resolve_plc_launch,
@@ -64,6 +66,35 @@ def test_workspace_token_is_private_and_stable(workspace: Path) -> None:
     assert len(first) == 64
     if os.name != "nt":
         assert paths.token.stat().st_mode & 0o777 == 0o600
+
+
+def test_detached_windows_runtime_restores_conda_ros_activation(tmp_path: Path) -> None:
+    prefix = tmp_path / "szlab-unilab"
+    (prefix / "conda-meta").mkdir(parents=True)
+    library = prefix / "Library"
+    library.mkdir()
+    (library / "local_setup.bat").write_text("@rem fixture\n")
+    environment = {
+        "PATH": r"C:\Windows\System32",
+        "AMENT_PREFIX_PATH": r"D:\explicit\ament",
+        "PYTHONHOME": r"D:\wrong-python-home",
+    }
+
+    result = _with_conda_ros_environment(
+        environment,
+        platform="win32",
+        prefix=prefix,
+        executable=str(prefix / "python.exe"),
+    )
+
+    assert result["CONDA_PREFIX"] == str(prefix.resolve())
+    assert result["CONDA_DEFAULT_ENV"] == "szlab-unilab"
+    assert result["AMENT_PREFIX_PATH"] == r"D:\explicit\ament"
+    assert result["AMENT_PYTHON_EXECUTABLE"] == str(prefix / "python.exe")
+    assert result["ROS_DISTRO"] == "humble"
+    assert result["ROS_VERSION"] == "2"
+    assert result["PYTHONHOME"] == ""
+    assert result["PATH"].split(os.pathsep)[0] == str(library / "bin")
 
 
 def test_workspace_client_executes_and_normalizes_one_host_operation(
@@ -194,6 +225,19 @@ def test_headless_renderer_inherits_selected_backend_authority() -> None:
     assert environment["UNILAB_RENDERER_MANAGED_HEADLESS"] == "1"
     assert environment["UNILAB_BACKEND_PROXY_TARGET"] == "http://127.0.0.1:18080"
     assert environment["PATH"] == "/fixture/bin"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PID probing contract")
+def test_pid_probe_never_uses_os_kill_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def destructive_probe(_pid: int, _signal: int) -> None:
+        raise AssertionError("Windows PID probing must not call os.kill")
+
+    monkeypatch.setattr(os, "kill", destructive_probe)
+
+    assert _pid_exists(os.getpid()) is True
+    assert _pid_exists(987654) is False
 
 
 def test_host_restart_adopts_a_live_workbench_renderer(workspace: Path) -> None:
