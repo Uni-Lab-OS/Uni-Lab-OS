@@ -91,6 +91,7 @@ def _spec_to_dict(spec: Any) -> Dict[str, Any]:
                 "param": n.param,
                 "node_type": n.node_type,
                 "disabled": n.disabled,
+                "always_free": n.always_free,
                 "material_requirements": [
                     {
                         "template_id": r.template_id,

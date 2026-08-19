@@ -104,6 +104,8 @@ class WorkflowNode:
     # 比较请用 is_ilab()，容忍大小写差异）
     node_type: str = "ILab"
     disabled: bool = False
+    # 仅由任务创建时冻结的动作目录标记填充；它只跳过设备/动作队列，不跳过物料锁。
+    always_free: bool = False
     # 可选物料需求（向后兼容：空列表 = 无物料，行为与旧 workflow 完全一致）
     material_requirements: List[MaterialRequirement] = field(default_factory=list)
 
@@ -132,6 +134,9 @@ class WorkflowNode:
 
     def is_manual_confirm(self) -> bool:
         return normalize_node_type(self.node_type) == "manual_confirm"
+
+    def is_always_free(self) -> bool:
+        return self.always_free is True
 
 
 @dataclass
@@ -259,6 +264,7 @@ def node_from_dict(data: Dict[str, Any]) -> WorkflowNode:
         param_schema=param_schema,
         node_type=normalize_node_type(data.get("node_type") or data.get("type")),
         disabled=bool(data.get("disabled", False)),
+        always_free=data.get("always_free") is True,
         material_requirements=[
             MaterialRequirement.from_dict(r)
             for r in (data.get("material_requirements") or [])

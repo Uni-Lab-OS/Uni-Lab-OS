@@ -859,7 +859,11 @@ class EdgeScheduler:
             device_key = task.node.device_lock_key
             # manual_confirm 是 always-free 特殊节点：不占设备动作锁，也不受其阻塞
             manual_confirm = task.node.is_manual_confirm()
-            if not manual_confirm and (action_key in busy or device_key in busy):
+            # 普通 always_free 动作仍会派发到执行器；这里只免除设备/动作队列，
+            # 下方动作物料锁与外部 PlatformUI ResourceGate 继续完整生效。
+            always_free = task.node.is_always_free()
+            device_lock_free = manual_confirm or always_free
+            if not device_lock_free and (action_key in busy or device_key in busy):
                 # 动作或设备已被占用：本轮跳过，等占用作业完成后准入重试。
                 continue
 
@@ -957,6 +961,7 @@ class EdgeScheduler:
                     "action.name": task.node.action_name,
                     "action.type": task.node.action_type,
                     "action.manual_confirm": manual_confirm,
+                    "action.always_free": always_free,
                 },
             )
             self._job_spans[job_id] = action_trace
@@ -1017,7 +1022,7 @@ class EdgeScheduler:
                     "action.estimate.source": estimate_source,
                 },
             )
-            if not manual_confirm:
+            if not device_lock_free:
                 # 同轮立即登记两种键；后续候选即使动作不同，也不能绕过设备互斥。
                 busy.update((action_key, device_key))
             # ``dispatched_item`` 同时供返回值、监控和标准 Task/Job 状态投影使用。
@@ -1226,7 +1231,9 @@ class EdgeScheduler:
             run = self._workflows.get(job.workflow_id)
             node = run.node(job.node_id) if run is not None else None
             # 人工确认节点只等待操作者输入，不使用设备执行器，也不建立设备互斥。
-            if node is not None and node.is_manual_confirm():
+            if node is not None and (
+                node.is_manual_confirm() or node.is_always_free()
+            ):
                 continue
             busy.add(job.device_action_key)
             busy.add(f"/devices/{job.device_id}")

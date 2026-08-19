@@ -308,6 +308,27 @@ def test_frozen_param_schema_enters_legacy_scheduler_node() -> None:
     assert spec.nodes[0].param_schema == _action_schema()
 
 
+def test_frozen_always_free_marker_enters_legacy_scheduler_node() -> None:
+    """动作目录的免设备排队标记必须随任务快照进入本地调度节点。"""
+
+    graph = _real_authoring_graph()
+    graph["node_templates"][1]["meta_data"]["unilab"]["always_free"] = True
+    plan, jobs = ExecutionPlanBuilder().build(
+        graph,
+        run_mode="normal",
+        target_node_uuid=None,
+    )
+    task_snapshot = {
+        "uuid": TASK_UUID,
+        "workflow_snapshot": graph,
+        "execution_plan": plan,
+    }
+    spec = WorkflowSpecCompiler().compile(task_snapshot, jobs)
+
+    assert _action_plan_node(plan)["always_free"] is True
+    assert spec.nodes[0].always_free is True
+
+
 def test_frozen_action_contract_wins_over_changed_registry() -> None:
     """冻结动作合同必须覆盖任务创建后的实时注册表变化。
 

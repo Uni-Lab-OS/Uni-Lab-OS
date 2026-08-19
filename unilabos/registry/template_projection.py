@@ -694,6 +694,10 @@ class RegistryTemplateProjection:
                 "display_name": resource_display_name,
             },
         }
+        # ``always_free`` 是动作装饰器拥有的调度合同，不是工作流作者可编辑策略。
+        # 将它随节点模板冻结，任务创建时才能在不读取实时注册表的前提下保持语义。
+        if action.get("always_free") is True:
+            unilab_metadata["always_free"] = True
         executor_kind = str(action.get("executor_kind") or "").strip()
         if executor_kind:
             unilab_metadata["executor_kind"] = executor_kind

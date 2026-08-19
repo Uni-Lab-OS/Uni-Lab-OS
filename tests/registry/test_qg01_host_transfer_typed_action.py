@@ -89,6 +89,7 @@ def test_builtin_host_transfer_is_projected_with_material_lock_contract(
     )
     assert transfer_template["node_type"] == "ILab"
     assert transfer_template["meta_data"]["unilab"]["contract_kind"] == "typed"
+    assert transfer_template["meta_data"]["unilab"]["always_free"] is True
     assert (
         transfer_template["meta_data"]["unilab"]["executor_kind"]
         == "material_transfer"

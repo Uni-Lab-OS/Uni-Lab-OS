@@ -522,3 +522,103 @@ class TestManualConfirmNodes:
         assert [
             (item["device_id"], item["action"]) for item in dispatcher.dispatched
         ] == [("operator", "confirm")]
+
+
+class TestAlwaysFreeActions:
+    """always_free 动作不占设备锁，但仍通过真实执行器派发。"""
+
+    def test_same_device_ready_actions_dispatch_together(self):
+        scheduler, dispatcher = _make()
+        spec = WorkflowSpec(
+            workflow_id="wf-always-free-parallel",
+            nodes=[
+                WorkflowNode(
+                    id="A",
+                    device_id="material",
+                    action_name="run_operation",
+                    action_type="goal",
+                    always_free=True,
+                ),
+                WorkflowNode(
+                    id="B",
+                    device_id="material",
+                    action_name="run_operation",
+                    action_type="goal",
+                    always_free=True,
+                ),
+            ],
+        )
+
+        result = scheduler.submit_workflow(spec)
+
+        assert [item["node_id"] for item in result["dispatched"]] == ["A", "B"]
+        assert [item["node_id"] for item in dispatcher.dispatched] == ["A", "B"]
+
+    def test_inflight_always_free_action_does_not_block_ordinary_device_action(self):
+        scheduler, dispatcher = _make()
+        scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-always-free-inflight",
+                nodes=[
+                    WorkflowNode(
+                        id="free",
+                        device_id="material",
+                        action_name="run_operation",
+                        action_type="goal",
+                        always_free=True,
+                    )
+                ],
+            )
+        )
+
+        ordinary = scheduler.submit_workflow(
+            WorkflowSpec(
+                workflow_id="wf-ordinary-after-free",
+                nodes=[_node("ordinary", device="material", action="inspect")],
+            )
+        )
+
+        assert [item["node_id"] for item in ordinary["dispatched"]] == ["ordinary"]
+        assert [item["node_id"] for item in dispatcher.dispatched] == [
+            "free",
+            "ordinary",
+        ]
+
+    def test_same_material_lock_still_serializes_always_free_actions(self):
+        material_uuid = "10000000-0000-4000-8000-000000000001"
+        material_schema = {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "object",
+                    "properties": {
+                        "resource": {
+                            "type": "object",
+                            "x-unilabos-material-lock": True,
+                        }
+                    },
+                }
+            },
+        }
+        scheduler, dispatcher = _make()
+        spec = WorkflowSpec(
+            workflow_id="wf-always-free-material-lock",
+            nodes=[
+                WorkflowNode(
+                    id=node_id,
+                    device_id="material",
+                    action_name="run_operation",
+                    action_type="goal",
+                    param={"resource": {"uuid": material_uuid}},
+                    param_schema=material_schema,
+                    always_free=True,
+                )
+                for node_id in ("A", "B")
+            ],
+        )
+
+        first = scheduler.submit_workflow(spec)
+
+        assert [item["node_id"] for item in first["dispatched"]] == ["A"]
+        scheduler.on_job_finished(first["dispatched"][0]["job_id"], True, {})
+        assert [item["node_id"] for item in dispatcher.dispatched] == ["A", "B"]

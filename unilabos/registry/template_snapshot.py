@@ -234,6 +234,7 @@ def _action_definition(raw_action: Any) -> dict[str, Any]:
         ).strip(),
     }
     for field in (
+        "always_free",
         "contract_kind",
         "contract_diagnostic",
         "description",

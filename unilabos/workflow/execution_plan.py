@@ -186,6 +186,9 @@ class ExecutionPlanBuilder:
                     node_uuid=node_uuid,
                 )
                 planned_node["param_schema"] = action_contract
+                # 免设备排队语义来自冻结模板目录，不能由节点 execution_policy
+                # 或提交参数自行开启；缺失（旧快照）按 False 兼容。
+                planned_node["always_free"] = self._frozen_always_free(template)
             if node.get("material_uuid") is not None:
                 planned_node["material_uuid"] = node["material_uuid"]
             if node.get("script") is not None:
@@ -463,6 +466,14 @@ class ExecutionPlanBuilder:
                 f"设备动作模板缺少完整动作合同：{node_uuid}",
             )
         return deepcopy(dict(contract))
+
+    @staticmethod
+    def _frozen_always_free(template: Mapping[str, Any]) -> bool:
+        """读取模板目录冻结的免设备排队标记，拒绝可编辑节点策略参与。"""
+
+        metadata = template.get("meta_data")
+        unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
+        return isinstance(unilab, Mapping) and unilab.get("always_free") is True
 
     @staticmethod
     def _device_action_contract(
