@@ -196,9 +196,29 @@ class TaskSchedulerBridge:
         if self._closed:
             raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
         normalized_uuid = self._required_text(task_uuid, field="task_uuid")
-        if not self._scheduler.cancel_workflow(normalized_uuid):
-            raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
+        jobs = self._store.list_jobs(normalized_uuid)
+        scheduler_canceled = self._scheduler.cancel_workflow(normalized_uuid)
+        if not scheduler_canceled:
+            task = self._store.get_task(normalized_uuid)
+            # 物料不足时任务只登记在 admission pending，尚未进入旧调度器；进程
+            # 重启后这个内存集合也会丢失。只要持久事实仍为 pending 且没有作业
+            # 越过派发边界，就可以直接投影取消，不要求存在调度器内存运行。
+            if task.get("status") != "pending" or self._crossed_dispatch_boundary(
+                jobs
+            ):
+                raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
         aggregate = self._projection.project_canceled(normalized_uuid)
+        if any(
+            job.get("executor_kind") == "material_source"
+            for job in aggregate["jobs"]
+        ):
+            # 来源准入形成的是任务级短期预留；取消不会经过普通节点的成功/失败
+            # 终态监听器，因此必须在这里按同一任务身份幂等释放。否则下一任务会
+            # 被已取消任务遗留的预留永久挡在 admission pending。
+            self._material_sources.release_terminal_reservations(
+                normalized_uuid,
+                reason="workflow_canceled",
+            )
         self._store.stop_debug(normalized_uuid)
         self._submitted_tasks.discard(normalized_uuid)
         self._admission_pending_tasks.discard(normalized_uuid)

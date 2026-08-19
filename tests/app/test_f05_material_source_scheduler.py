@@ -351,6 +351,51 @@ def test_source_admission_commits_before_ordinary_action_dispatch(
     assert dispatcher.dispatched[0]["job_id"] == ACTION_JOB_UUID
 
 
+def test_canceled_source_task_releases_terminal_reservations(
+    store: WorkflowStore,
+) -> None:
+    """取消已完成来源准入的任务必须释放整任务短期预留。"""
+
+    task = _seed_task(store, with_action=True)
+    inventory = _ToggleInventory(available=True)
+    scheduler = EdgeScheduler(
+        dispatcher=RecordingDispatcher(),
+        inventory=inventory,
+    )
+    bridge = TaskSchedulerBridge(store, scheduler=scheduler)
+    try:
+        bridge.submit(task)
+        aggregate = bridge.cancel(TASK_UUID)
+    finally:
+        bridge.close()
+
+    assert aggregate["task"]["status"] == "canceled"
+    assert inventory.release_calls == [(TASK_UUID, "workflow_canceled")]
+
+
+def test_cancel_admission_pending_source_task_without_scheduler_registration(
+    store: WorkflowStore,
+) -> None:
+    """物料准入受阻的任务尚未注册 DAG，也必须可以直接取消。"""
+
+    task = _seed_task(store, with_action=True)
+    inventory = _ToggleInventory(available=False)
+    scheduler = EdgeScheduler(
+        dispatcher=RecordingDispatcher(),
+        inventory=inventory,
+    )
+    bridge = TaskSchedulerBridge(store, scheduler=scheduler)
+    try:
+        blocked = bridge.submit(task)
+        aggregate = bridge.cancel(TASK_UUID)
+    finally:
+        bridge.close()
+
+    assert blocked["task"]["status"] == "pending"
+    assert aggregate["task"]["status"] == "canceled"
+    assert inventory.release_calls == [(TASK_UUID, "workflow_canceled")]
+
+
 def test_automatic_source_projects_selected_material_before_dispatch(
     store: WorkflowStore,
 ) -> None:
