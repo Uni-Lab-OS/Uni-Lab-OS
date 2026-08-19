@@ -107,6 +107,12 @@ class ExecutionPlanGraphNormalizer:
         structural = self._mapping_object(
             composite.get("structural_mappings"), field="structural_mappings"
         )
+        entry_targets = self._mapping_items(
+            structural.get("entry_targets", []), field="entry_targets"
+        )
+        completion_sources = self._mapping_items(
+            structural.get("completion_sources", []), field="completion_sources"
+        )
         incoming = [
             edge for edge in edges if edge.get("target_node_uuid") == invocation_uuid
         ]
@@ -120,6 +126,18 @@ class ExecutionPlanGraphNormalizer:
             and edge.get("source_node_uuid") != invocation_uuid
         ]
         generated: list[dict[str, Any]] = []
+
+        # 纯展示型 operation 子工作流可能合法地没有任何启用的叶动作，也没有
+        # 值边界。它仍是父图里的顺序节点；保留这个虚拟 no-op 及其原始边，交给
+        # 后续虚拟节点收缩统一旁路，既不会切断跨父节点依赖，也避免在多层空
+        # 组合之间生成笛卡尔积边。
+        if (
+            not entry_targets
+            and not completion_sources
+            and not target_mappings
+            and not source_mappings
+        ):
+            return [dict(edge) for edge in edges]
 
         incoming_by_handle: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
         for edge in incoming:
@@ -222,9 +240,6 @@ class ExecutionPlanGraphNormalizer:
                         binding=binding,
                     )
 
-        entry_targets = self._mapping_items(
-            structural.get("entry_targets", []), field="entry_targets"
-        )
         # 每条父级入边都是整个组合调用的就绪前置条件。业务值仍按上面的边界
         # 映射进入具体参数；这里复用原来源端点并投向内部 ready 目标。计划边在
         # 实例化时会按 ready 目标把它标成纯依赖，因此既不会把业务值注入 ready，
@@ -255,9 +270,6 @@ class ExecutionPlanGraphNormalizer:
                     )
                 )
 
-        completion_sources = self._mapping_items(
-            structural.get("completion_sources", []), field="completion_sources"
-        )
         for edge in outgoing:
             boundary_handle_uuid = str(edge.get("source_handle_uuid") or "")
             source_mapping = source_mappings.get(boundary_handle_uuid)
@@ -650,6 +662,7 @@ class ExecutionPlanGraphNormalizer:
                 active=active,
                 handles=handles,
                 runtime_handle_ids=runtime_handle_ids,
+                visited_virtual=set(),
                 seen=seen,
                 planned=planned,
             )
@@ -669,6 +682,7 @@ class ExecutionPlanGraphNormalizer:
         active: Mapping[str, Mapping[str, Any]],
         handles: Mapping[str, Mapping[str, Any]],
         runtime_handle_ids: Mapping[tuple[str, str], str],
+        visited_virtual: set[str],
         seen: set[tuple[str, str]],
         planned: list[dict[str, Any]],
     ) -> None:
@@ -690,6 +704,12 @@ class ExecutionPlanGraphNormalizer:
             next_path_edges = (*path_edges, str(edge.get("uuid") or ""))
             next_path_nodes = (*path_nodes, target_uuid)
             if target_uuid not in active:
+                # 大型分层审阅图包含大量汇合的虚拟菱形。对同一活动来源而言，
+                # 一个虚拟节点的全部下游只需遍历一次；否则按路径枚举会呈指数
+                # 增长。先保留当前路径查环，再用集合收敛已访问的虚拟后缀。
+                if target_uuid in visited_virtual:
+                    continue
+                visited_virtual.add(target_uuid)
                 self._walk_contracted_edges(
                     source_uuid=source_uuid,
                     current_uuid=target_uuid,
@@ -699,6 +719,7 @@ class ExecutionPlanGraphNormalizer:
                     active=active,
                     handles=handles,
                     runtime_handle_ids=runtime_handle_ids,
+                    visited_virtual=visited_virtual,
                     seen=seen,
                     planned=planned,
                 )

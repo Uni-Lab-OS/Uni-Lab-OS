@@ -510,6 +510,123 @@ def test_disabled_opaque_composite_is_not_flattened_for_execution() -> None:
     assert bindings == {}
 
 
+def test_empty_review_composite_preserves_parent_dependency() -> None:
+    """零叶动作的展示子工作流须作为透明 no-op 保留父级先后关系。"""
+
+    empty_target = "73000000-0000-4000-8000-000000000009"
+    empty_source = "73000000-0000-4000-8000-000000000010"
+    empty = _node(
+        INVOCATION_UUID,
+        INVOCATION_TEMPLATE,
+        node_type="workflow",
+    )
+    empty["meta_data"]["unilab"]["composite"] = {
+        "target_mappings": {},
+        "source_mappings": {},
+        "structural_mappings": {
+            "entry_targets": [],
+            "completion_sources": [],
+        },
+        "contract_compatibility": {"inputs": []},
+    }
+    handles = {
+        handle["uuid"]: handle
+        for handle in (
+            _handle(
+                PRODUCER_READY,
+                PRODUCER_TEMPLATE,
+                io_type="source",
+                key="ready",
+                data_source="status",
+                required=False,
+            ),
+            _handle(
+                empty_target,
+                INVOCATION_TEMPLATE,
+                io_type="target",
+                key="ready",
+                data_source="executor",
+                required=False,
+            ),
+            _handle(
+                empty_source,
+                INVOCATION_TEMPLATE,
+                io_type="source",
+                key="ready",
+                data_source="status",
+                required=False,
+            ),
+            _handle(
+                CONSUMER_TARGET,
+                CONSUMER_TEMPLATE,
+                io_type="target",
+                key="value",
+                data_source="executor",
+                required=True,
+            ),
+        )
+    }
+    nodes = {
+        node["uuid"]: node
+        for node in (
+            _node(PRODUCER_UUID, PRODUCER_TEMPLATE),
+            empty,
+            _node(CONSUMER_UUID, CONSUMER_TEMPLATE),
+        )
+    }
+    normalizer = ExecutionPlanGraphNormalizer()
+    flattened, params, bindings = normalizer.flatten_composite_edges(
+        nodes=nodes,
+        edges=[
+            _edge(
+                "74000000-0000-4000-8000-000000000015",
+                PRODUCER_UUID,
+                PRODUCER_READY,
+                INVOCATION_UUID,
+                empty_target,
+            ),
+            _edge(
+                "74000000-0000-4000-8000-000000000016",
+                INVOCATION_UUID,
+                empty_source,
+                CONSUMER_UUID,
+                CONSUMER_TARGET,
+            ),
+        ],
+        handles=handles,
+    )
+
+    assert params == {}
+    assert bindings == {}
+    assert {
+        (edge["source_node_uuid"], edge["target_node_uuid"])
+        for edge in flattened
+    } == {
+        (PRODUCER_UUID, INVOCATION_UUID),
+        (INVOCATION_UUID, CONSUMER_UUID),
+    }
+
+    active = {
+        PRODUCER_UUID: nodes[PRODUCER_UUID],
+        CONSUMER_UUID: nodes[CONSUMER_UUID],
+    }
+    _runtime_handles, runtime_ids = normalizer.runtime_handles(
+        active=active,
+        handles=handles,
+    )
+    planned = normalizer.contract_edges(
+        nodes=nodes,
+        active=active,
+        edges=flattened,
+        handles=handles,
+        runtime_handle_ids=runtime_ids,
+    )
+    assert len(planned) == 1
+    assert planned[0]["source_node_uuid"] == PRODUCER_UUID
+    assert planned[0]["target_node_uuid"] == CONSUMER_UUID
+    assert planned[0]["dependency_only"] is True
+
+
 def test_chained_composite_passthrough_counts_only_value_provider() -> None:
     """连续组合调用须保留完成边，但不得把它误算成第二个值提供者。"""
 
