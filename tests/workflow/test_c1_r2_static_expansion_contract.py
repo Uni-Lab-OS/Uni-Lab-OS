@@ -19,6 +19,7 @@ from unilabos.workflow.composite import (
 from unilabos.workflow.composite_compatibility import (
     published_workflow_compatibility_projection,
 )
+from unilabos.workflow.composite_expansion import _target_mappings
 
 PARENT_WORKFLOW_UUID = "44444444-4444-4444-8444-444444444444"
 INVOCATION_UUID = "11111111-1111-4111-8111-111111111111"
@@ -56,6 +57,30 @@ CONTRACT_DIGEST = (
     "sha256:689aaac733eba27d13279d242a71fc3c8bc41f0c144d41261dc160a52b46a1cf"
 )
 GROUP_NODE_UUID = "77777777-7777-4777-8777-777777777777"
+
+
+def test_display_only_child_may_have_empty_input_target_mapping() -> None:
+    """全禁用审阅工作流可保留输入边界，但不得伪造可执行内部目标。"""
+
+    mappings = _target_mappings(
+        {
+            "version": 1,
+            "parameters": [
+                {
+                    "name": "value",
+                    "schema": {"type": "number"},
+                    "required": True,
+                }
+            ],
+        },
+        {CHILD_NODE_UUID: {ACTION_VALUE_TARGET_UUID: {"parameter": "value"}}},
+        {},
+        [_handle(CHILD_VALUE_TARGET_UUID, "value", "target")],
+        {CHILD_NODE_UUID: EXPANDED_CHILD_NODE_UUID},
+        enabled_node_uuids=set(),
+    )
+
+    assert mappings == {CHILD_VALUE_TARGET_UUID: []}
 
 
 @dataclass
@@ -643,6 +668,73 @@ def test_parent_node_output_removes_child_scoped_input_binding() -> None:
     assert expansion.nodes[0]["meta_data"]["unilab"]["input_bindings"] == {}
 
 
+def test_workflow_input_output_passthrough_needs_no_internal_target() -> None:
+    """纯工作流输入输出透传保留空目标映射且不伪造内部消费者。
+
+    参数：无。返回：无；模拟等待 operation 执行但物料只在边界透传的运行
+    子工作流，断言组合展开成功并显式保存空目标映射。异常：展开失败或把物料
+    错投影到无关 action 时由 pytest 报告。安全：只使用内存快照。
+    """
+
+    authoring, provider, _catalog, _source_catalog = _world_components()
+    snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    snapshot["nodes"][0]["meta_data"]["unilab"]["input_bindings"] = {}
+    snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"]["result"] = {
+        "kind": "workflow_input",
+        "parameter": "value",
+    }
+
+    expansion = authoring.compile_invocation(
+        parent_workflow_uuid=PARENT_WORKFLOW_UUID,
+        invocation_uuid=INVOCATION_UUID,
+        module="c1_published_lab.workflows.child",
+        symbol="prepare_sample",
+        keyword_arguments={"value": 7.5},
+    )
+
+    assert expansion.diagnostics == ()
+    assert expansion.target_mappings == {CHILD_VALUE_TARGET_UUID: ()}
+    assert expansion.source_mappings == {
+        CHILD_VALUE_SOURCE_UUID: {
+            "kind": "workflow_input",
+            "parameter": "value",
+        }
+    }
+    assert expansion.nodes[0]["param"] == {}
+
+
+def test_disabled_review_node_is_not_a_composite_input_target() -> None:
+    """运行子工作流的禁用审阅节点不接收父边界值，启用 action 仍正常接收。"""
+
+    authoring, provider, _catalog, _source_catalog = _world_components()
+    snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    review_node = deepcopy(snapshot["nodes"][0])
+    review_node["uuid"] = SECOND_CHILD_NODE_UUID
+    review_node["disabled"] = True
+    snapshot["nodes"].append(review_node)
+
+    expansion = authoring.compile_invocation(
+        parent_workflow_uuid=PARENT_WORKFLOW_UUID,
+        invocation_uuid=INVOCATION_UUID,
+        module="c1_published_lab.workflows.child",
+        symbol="prepare_sample",
+        keyword_arguments={"value": 7.5},
+    )
+
+    assert expansion.diagnostics == ()
+    assert expansion.target_mappings == {
+        CHILD_VALUE_TARGET_UUID: (
+            {
+                "workflow_node_uuid": EXPANDED_CHILD_NODE_UUID,
+                "target_handle_uuid": ACTION_VALUE_TARGET_UUID,
+            },
+        )
+    }
+    disabled = next(node for node in expansion.nodes if node["disabled"] is True)
+    assert disabled["uuid"] != EXPANDED_CHILD_NODE_UUID
+    assert disabled["param"] == {}
+
+
 def test_presentation_group_does_not_require_structural_ready_handles() -> None:
     """展示分组不参与执行结构根/终点的连接点（Handle）投影。
 
@@ -746,6 +838,62 @@ def test_nested_published_workflow_expands_into_one_hierarchical_parent_graph() 
     assert expansion.nodes[0]["param"] == {"value": 2}
     assert expansion.nodes[0]["meta_data"]["unilab"]["input_bindings"] == {}
     assert provider.read_count == 2
+
+
+def test_disabled_nested_published_workflow_stays_opaque_in_parent_expansion() -> None:
+    """禁用的嵌套工作流只保留调用节点，父层不得再次读取或展开其子快照。
+
+    参数：无。返回：无；模拟 runtime 工作流中仅供展示的 disabled view，断言
+    更外层组合展开仍只得到不透明 view 节点。异常：递归读取或节点膨胀时由
+    pytest 报告。安全：仅使用内存快照，不创建任务或执行设备动作。
+    """
+
+    authoring, provider = _nested_world()
+    child_snapshot = provider.snapshots[CHILD_WORKFLOW_UUID]
+    nested_invocation = next(
+        node for node in child_snapshot["nodes"] if node["uuid"] == CHILD_NODE_UUID
+    )
+    nested_invocation["disabled"] = True
+    execution_node = deepcopy(provider.snapshots[LEAF_WORKFLOW_UUID]["nodes"][0])
+    execution_node["uuid"] = SECOND_CHILD_NODE_UUID
+    execution_node["workflow_uuid"] = CHILD_WORKFLOW_UUID
+    execution_node["parent_uuid"] = None
+    child_snapshot["nodes"] = [nested_invocation, execution_node]
+    child_snapshot["workflow"]["meta_data"]["unilab"]["output_bindings"][
+        "result"
+    ] = {
+        "kind": "node_output",
+        "workflow_node_uuid": SECOND_CHILD_NODE_UUID,
+        "source_handle_uuid": ACTION_VALUE_SOURCE_UUID,
+    }
+
+    expansion = authoring.compile_invocation(
+        parent_workflow_uuid=PARENT_WORKFLOW_UUID,
+        invocation_uuid=INVOCATION_UUID,
+        module="c1_published_lab.workflows.child",
+        symbol="prepare_sample",
+        keyword_arguments={"value": 2},
+    )
+
+    opaque_uuid = expanded_node_uuid(INVOCATION_UUID, CHILD_NODE_UUID)
+    execution_uuid = expanded_node_uuid(INVOCATION_UUID, SECOND_CHILD_NODE_UUID)
+    assert expansion.diagnostics == ()
+    assert [node["uuid"] for node in expansion.nodes] == [
+        opaque_uuid,
+        execution_uuid,
+    ]
+    assert expansion.nodes[0]["disabled"] is True
+    assert expansion.nodes[0]["parent_uuid"] == INVOCATION_UUID
+    assert expansion.nodes[0]["meta_data"]["unilab"]["input_bindings"] == {}
+    assert expansion.target_mappings == {
+        CHILD_VALUE_TARGET_UUID: (
+            {
+                "workflow_node_uuid": execution_uuid,
+                "target_handle_uuid": ACTION_VALUE_TARGET_UUID,
+            },
+        )
+    }
+    assert provider.read_count == 1
 
 
 def test_nested_node_output_argument_is_recovered_from_persisted_edge() -> None:

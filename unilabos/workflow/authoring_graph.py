@@ -173,12 +173,25 @@ def build_candidate_graph(
                 source_order=source_order[declaration.node_uuid],
             )
             nodes.append(invocation)
-            internal_nodes = [
-                _generated_composite_node(node, catalog=catalog)
-                for node in expansion.nodes
-            ]
+            # 静态禁用的复合调用用于分层审阅：仍经 ``compile_invocation`` 校验
+            # 已发布子工作流、pin 与边界合同，但父图只保留可导航的调用节点。
+            # 若继续复制内部节点，禁用父级会留下启用子级并使公共图校验失败；深层
+            # operation 视图还会在每一层重复复制整棵子图，造成指数级节点膨胀。
+            # 启用调用保持既有静态展开语义，真实运行与 ResourceGate 均不受影响。
+            opaque_display_invocation = (
+                declaration.node_uuid in disabled_node_uuids
+            )
+            internal_nodes = (
+                []
+                if opaque_display_invocation
+                else [
+                    _generated_composite_node(node, catalog=catalog)
+                    for node in expansion.nodes
+                ]
+            )
             nodes.extend(internal_nodes)
-            edges.extend(deepcopy(list(expansion.edges)))
+            if not opaque_display_invocation:
+                edges.extend(deepcopy(list(expansion.edges)))
             for expanded_node in [invocation, *internal_nodes]:
                 try:
                     expanded_action = catalog.require_template(
@@ -553,9 +566,13 @@ def _require_composite_expansion(expansion: CompositeExpansion) -> None:
     if expansion.invocation_node is not None and not expansion.diagnostics:
         return
     diagnostic = expansion.diagnostics[0] if expansion.diagnostics else {}
+    message = str(diagnostic.get("message") or "组合工作流展开失败")
+    path = diagnostic.get("path")
+    if isinstance(path, str) and path:
+        message = f"{message}（{path}）"
     raise AuthoringGraphError(
         str(diagnostic.get("code") or "composite_catalog_mismatch"),
-        str(diagnostic.get("message") or "组合工作流展开失败"),
+        message,
     )
 
 

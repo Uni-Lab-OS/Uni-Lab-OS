@@ -278,6 +278,12 @@ def _project_composite_boundary_inputs(
         key=lambda item: _node_depth(item[0], parent_by_uuid=parent_by_uuid),
     )
     for invocation_uuid, invocation in invocations:
+        if invocation.disabled:
+            # Disabled composite nodes are authoring-only opaque projections.  Their
+            # published pin and boundary metadata remain available for inspection,
+            # but their descendants are intentionally absent from the containing
+            # executable graph, so no boundary value may be projected through them.
+            continue
         metadata = node_meta_data.get(invocation_uuid, {})
         unilab = metadata.get("unilab") if isinstance(metadata, Mapping) else None
         composite = unilab.get("composite") if isinstance(unilab, Mapping) else None

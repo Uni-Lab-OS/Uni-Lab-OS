@@ -16,6 +16,61 @@ LEAF_TARGET = "83000000-0000-4000-8000-000000000002"
 INNER_TARGET = "83000000-0000-4000-8000-000000000003"
 
 
+def test_disabled_opaque_composite_does_not_validate_absent_descendants() -> None:
+    """禁用组合只保留审阅边界时，不要求其未加载子树仍出现在父执行图。"""
+
+    nodes = [
+        WorkflowNodeWrite(
+            uuid=OUTER_UUID,
+            workflow_node_template_uuid=OUTER_TEMPLATE,
+            name="只读 operation 视图",
+            type="workflow",
+            param={"value": 7},
+            disabled=True,
+        )
+    ]
+    templates = {
+        OUTER_TEMPLATE: {"uuid": OUTER_TEMPLATE, "node_type": "workflow"},
+    }
+    handles = {
+        OUTER_TARGET: {
+            "uuid": OUTER_TARGET,
+            "workflow_node_template_uuid": OUTER_TEMPLATE,
+            "handle_key": "value",
+            "data_key": "value",
+            "io_type": "target",
+            "type": "integer",
+            "required": True,
+        }
+    }
+    node_meta_data = {
+        OUTER_UUID: {
+            "unilab": {
+                "composite": {
+                    "target_mappings": {
+                        OUTER_TARGET: [
+                            {
+                                "workflow_node_uuid": LEAF_UUID,
+                                "target_handle_uuid": LEAF_TARGET,
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    validate_graph(
+        nodes=nodes,
+        edges=[],
+        templates=templates,
+        handles=handles,
+        effective_params={OUTER_UUID: {"value": 7}},
+        workflow_meta_data={},
+        node_meta_data=node_meta_data,
+    )
+
+
 def test_outer_boundary_may_project_to_nested_descendant() -> None:
     """外层输入可投影到孙动作，但不能因此被误判为越过调用边界。"""
 

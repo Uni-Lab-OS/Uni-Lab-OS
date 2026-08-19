@@ -284,8 +284,15 @@ class CompositeAuthoring:
         target_mappings = _target_mappings(
             input_contract,
             workflow_io.input_bindings,
+            workflow_io.output_bindings,
             boundary_handles,
             node_uuid_map,
+            enabled_node_uuids={
+                str(node["uuid"])
+                for node in nodes
+                if node.get("disabled") is not True
+                and node.get("type") != "group"
+            },
         )
         _materialize_boundary_arguments(
             nodes,
@@ -456,6 +463,29 @@ class CompositeAuthoring:
                 copied = _plain(node)
                 copied["uuid"] = mapped_uuid
                 copied["parent_uuid"] = mapped_parent
+                nodes.append(copied)
+                continue
+            if node.get("disabled") is True:
+                # A disabled workflow invocation is an authoring-only projection.
+                # Its persisted composite pin still proves which published child it
+                # represents, but a containing workflow must not recursively
+                # materialize that child's graph.  Otherwise an intentionally opaque
+                # view becomes executable structure again at the next composition
+                # layer and large operation views expand without bound.
+                copied = _plain(node)
+                copied["uuid"] = mapped_uuid
+                copied["parent_uuid"] = mapped_parent
+                metadata = copied.setdefault("meta_data", {})
+                unilab = metadata.setdefault("unilab", {})
+                if not isinstance(unilab, dict):
+                    raise _CompositeFailure(
+                        "composite_boundary_mapping_invalid",
+                        "/child/nodes/meta_data/unilab",
+                    )
+                # The opaque node remains navigable and keeps its static review
+                # parameters, but a binding to the child's local workflow parameter
+                # must not leak into the containing workflow's input namespace.
+                unilab["input_bindings"] = {}
                 nodes.append(copied)
                 continue
             nested_source = _source_from_template(self._resolver, action)
@@ -826,8 +856,10 @@ def _expand_edges(
 def _target_mappings(
     input_contract: Mapping[str, Any],
     input_bindings: Mapping[str, Mapping[str, Mapping[str, str]]],
+    output_bindings: Mapping[str, Mapping[str, str]],
     boundary_handles: Sequence[Mapping[str, Any]],
     node_uuid_map: Mapping[str, str],
+    enabled_node_uuids: set[str],
 ) -> dict[str, list[dict[str, str]]]:
     """把工作流输入绑定投影到真实展开节点目标连接点。
 
@@ -836,21 +868,34 @@ def _target_mappings(
     ``_CompositeFailure``。
     """
 
+    passthrough_inputs = {
+        str(binding.get("parameter"))
+        for binding in output_bindings.values()
+        if binding.get("kind") == "workflow_input"
+        and isinstance(binding.get("parameter"), str)
+    }
     result: dict[str, list[dict[str, str]]] = {}
     for descriptor in input_contract["parameters"]:
         name = str(descriptor["name"])
         boundary_uuid = _boundary_handle_uuid(boundary_handles, name, "target")
         targets: list[dict[str, str]] = []
         for child_node_uuid, bindings in input_bindings.items():
+            mapped_node_uuid = node_uuid_map.get(child_node_uuid)
+            if mapped_node_uuid not in enabled_node_uuids:
+                continue
             for handle_uuid, binding in bindings.items():
                 if binding.get("parameter") == name:
                     targets.append(
                         {
-                            "workflow_node_uuid": node_uuid_map[child_node_uuid],
+                            "workflow_node_uuid": mapped_node_uuid,
                             "target_handle_uuid": handle_uuid,
                         }
                     )
-        if not targets:
+        if (
+            not targets
+            and name not in passthrough_inputs
+            and enabled_node_uuids
+        ):
             raise _CompositeFailure(
                 "composite_boundary_mapping_invalid",
                 f"/target_mappings/{name}",
@@ -919,11 +964,25 @@ def _structural_mappings(
                 "composite_catalog_mismatch",
                 "/catalog/structural",
             ) from None
-        if node.get("type") == "group" or action.template.get("node_type") == "group":
+        if (
+            node.get("disabled") is True
+            or node.get("type") == "group"
+            or action.template.get("node_type") == "group"
+        ):
             continue
         node_ids.add(node_uuid)
-    incoming = {str(edge["target_node_uuid"]) for edge in edges}
-    outgoing = {str(edge["source_node_uuid"]) for edge in edges}
+    incoming = {
+        str(edge["target_node_uuid"])
+        for edge in edges
+        if str(edge["source_node_uuid"]) in node_ids
+        and str(edge["target_node_uuid"]) in node_ids
+    }
+    outgoing = {
+        str(edge["source_node_uuid"])
+        for edge in edges
+        if str(edge["source_node_uuid"]) in node_ids
+        and str(edge["target_node_uuid"]) in node_ids
+    }
     entries = [
         {
             "workflow_node_uuid": node_uuid,

@@ -173,17 +173,20 @@ class WorkflowAuthoringEngine:
                 code=error.code,
                 message=error.message,
             )
-        except CandidateBundleError:
+        except CandidateBundleError as error:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
                 code="candidate_invalid",
-                message="生成的候选结果不能通过公共工作流校验",
+                message=f"生成的候选结果不能通过公共工作流校验：{error}",
             )
-        except (KeyError, TypeError, UnicodeError, ValueError):
+        except (KeyError, TypeError, UnicodeError, ValueError) as error:
             return _error_result(
                 fingerprint=self.template_catalog_fingerprint,
                 code="candidate_invalid",
-                message="作者源码无法生成可信候选图",
+                message=(
+                    "作者源码无法生成可信候选图："
+                    f"{type(error).__name__}: {error}"
+                ),
             )
 
     def preserve_author_source(

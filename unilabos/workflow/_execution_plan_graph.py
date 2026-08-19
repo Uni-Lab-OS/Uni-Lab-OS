@@ -54,6 +54,7 @@ class ExecutionPlanGraphNormalizer:
             (node_uuid, node)
             for node_uuid, node in nodes.items()
             if executor_kind(str(node.get("type") or "")) == "workflow"
+            and node.get("disabled") is not True
         ]
         # 父调用先收敛，使投向嵌套调用的边、静态值和工作流输入绑定能在后续
         # 轮次继续穿透；同层调用仍保持冻结节点顺序。
@@ -224,19 +225,27 @@ class ExecutionPlanGraphNormalizer:
         entry_targets = self._mapping_items(
             structural.get("entry_targets", []), field="entry_targets"
         )
-        # 没有业务目标映射的入边是 ready 等纯结构边；它必须落到全部入口节点。
-        mapped_input_handles = set(target_mappings)
+        # 每条父级入边都是整个组合调用的就绪前置条件。业务值仍按上面的边界
+        # 映射进入具体参数；这里复用原来源端点并投向内部 ready 目标。计划边在
+        # 实例化时会按 ready 目标把它标成纯依赖，因此既不会把业务值注入 ready，
+        # 也不要求 MaterialSource 等协调节点额外提供一个虚构的 ready 输出。
         for edge in incoming:
-            if str(edge.get("target_handle_uuid") or "") in mapped_input_handles:
-                continue
+            source_node_uuid = str(edge.get("source_node_uuid") or "")
+            source_handle_uuid = str(edge.get("source_handle_uuid") or "")
+            source_handle = handles.get(source_handle_uuid)
+            if not isinstance(source_handle, Mapping):
+                raise ExecutionPlanBuildError(
+                    "composite_boundary_mapping_invalid",
+                    "组合工作流入边引用快照外来源连接点",
+                )
             for entry in entry_targets:
                 generated.append(
                     self._rewired_edge(
                         invocation_uuid=invocation_uuid,
                         label="entry",
                         source_edge=edge,
-                        source_node_uuid=str(edge.get("source_node_uuid") or ""),
-                        source_handle_uuid=str(edge.get("source_handle_uuid") or ""),
+                        source_node_uuid=source_node_uuid,
+                        source_handle_uuid=source_handle_uuid,
                         target_node_uuid=self._mapped_identity(
                             entry, "workflow_node_uuid", nodes
                         ),
@@ -767,7 +776,12 @@ class ExecutionPlanGraphNormalizer:
             "source_type": str(source_handle.get("type") or ""),
             "target_type": str(target_handle.get("type") or ""),
         }
-        if dependency_only(source_handle):
+        # 目标 ready 连接点本身也定义纯顺序语义。组合入口门控可以因此复用
+        # MaterialSource 的物料输出作为完成信号，而不会把该物料当作 ready 值。
+        target_is_ready = (
+            str(target_handle.get("handle_key") or "").strip().lower() == "ready"
+        )
+        if dependency_only(source_handle) or target_is_ready:
             planned["dependency_only"] = True
         return planned
 

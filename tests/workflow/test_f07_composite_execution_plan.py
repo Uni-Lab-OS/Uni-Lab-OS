@@ -20,10 +20,12 @@ INVOCATION_TEMPLATE = "72000000-0000-4000-8000-000000000002"
 INTERNAL_TEMPLATE = "72000000-0000-4000-8000-000000000003"
 CONSUMER_TEMPLATE = "72000000-0000-4000-8000-000000000004"
 PRODUCER_SOURCE = "73000000-0000-4000-8000-000000000001"
+PRODUCER_READY = "73000000-0000-4000-8000-000000000007"
 INVOCATION_TARGET = "73000000-0000-4000-8000-000000000002"
 INVOCATION_SOURCE = "73000000-0000-4000-8000-000000000003"
 INTERNAL_TARGET = "73000000-0000-4000-8000-000000000004"
 INTERNAL_READY = "73000000-0000-4000-8000-000000000005"
+INTERNAL_READY_TARGET = "73000000-0000-4000-8000-000000000008"
 CONSUMER_TARGET = "73000000-0000-4000-8000-000000000006"
 
 
@@ -122,7 +124,7 @@ def _composite_node(
             "entry_targets": [
                 {
                     "workflow_node_uuid": internal_uuid,
-                    "target_handle_uuid": INTERNAL_TARGET,
+                    "target_handle_uuid": INTERNAL_READY_TARGET,
                 }
             ],
             "completion_sources": [
@@ -160,6 +162,14 @@ def _handles() -> list[dict[str, Any]]:
             required=False,
         ),
         _handle(
+            PRODUCER_READY,
+            PRODUCER_TEMPLATE,
+            io_type="source",
+            key="ready",
+            data_source="status",
+            required=False,
+        ),
+        _handle(
             INVOCATION_TARGET,
             INVOCATION_TEMPLATE,
             io_type="target",
@@ -189,6 +199,14 @@ def _handles() -> list[dict[str, Any]]:
             io_type="source",
             key="ready",
             data_source="status",
+            required=False,
+        ),
+        _handle(
+            INTERNAL_READY_TARGET,
+            INTERNAL_TEMPLATE,
+            io_type="target",
+            key="ready",
+            data_source="executor",
             required=False,
         ),
         _handle(
@@ -305,9 +323,189 @@ def test_composite_passthrough_flattens_value_and_completion_edges() -> None:
     }
     assert endpoints == {
         (PRODUCER_UUID, PRODUCER_SOURCE, INTERNAL_UUID, INTERNAL_TARGET),
+        (
+            PRODUCER_UUID,
+            PRODUCER_SOURCE,
+            INTERNAL_UUID,
+            INTERNAL_READY_TARGET,
+        ),
         (PRODUCER_UUID, PRODUCER_SOURCE, CONSUMER_UUID, CONSUMER_TARGET),
         (INTERNAL_UUID, INTERNAL_READY, CONSUMER_UUID, CONSUMER_TARGET),
     }
+    assert params == {}
+    assert bindings == {}
+
+
+def test_composite_business_input_gates_every_internal_entry() -> None:
+    """业务输入既传值给映射目标，也须以 ready 依赖门控全部内部入口。"""
+
+    invocation = _composite_node()
+    invocation["meta_data"]["unilab"]["composite"]["structural_mappings"][
+        "entry_targets"
+    ].append(
+        {
+            "workflow_node_uuid": SECOND_INTERNAL_UUID,
+            "target_handle_uuid": INTERNAL_READY_TARGET,
+        }
+    )
+    nodes = {
+        node["uuid"]: node
+        for node in (
+            _node(PRODUCER_UUID, PRODUCER_TEMPLATE),
+            invocation,
+            _node(INTERNAL_UUID, INTERNAL_TEMPLATE),
+            _node(SECOND_INTERNAL_UUID, INTERNAL_TEMPLATE),
+        )
+    }
+
+    normalizer = ExecutionPlanGraphNormalizer()
+    handles = {
+        handle["uuid"]: handle
+        for handle in _handles()
+        if handle["uuid"] != PRODUCER_READY
+    }
+    flattened, _params, _bindings = (
+        normalizer.flatten_composite_edges(
+            nodes=nodes,
+            edges=[
+                _edge(
+                    "74000000-0000-4000-8000-000000000014",
+                    PRODUCER_UUID,
+                    PRODUCER_SOURCE,
+                    INVOCATION_UUID,
+                    INVOCATION_TARGET,
+                )
+            ],
+            handles=handles,
+        )
+    )
+
+    endpoints = {
+        (
+            edge["source_node_uuid"],
+            edge["source_handle_uuid"],
+            edge["target_node_uuid"],
+            edge["target_handle_uuid"],
+        )
+        for edge in flattened
+    }
+    assert endpoints == {
+        (PRODUCER_UUID, PRODUCER_SOURCE, INTERNAL_UUID, INTERNAL_TARGET),
+        (PRODUCER_UUID, PRODUCER_SOURCE, INTERNAL_UUID, INTERNAL_READY_TARGET),
+        (
+            PRODUCER_UUID,
+            PRODUCER_SOURCE,
+            SECOND_INTERNAL_UUID,
+            INTERNAL_READY_TARGET,
+        ),
+    }
+
+    active = {
+        node_uuid: node
+        for node_uuid, node in nodes.items()
+        if node_uuid != INVOCATION_UUID
+    }
+    _runtime_handles, runtime_ids = normalizer.runtime_handles(
+        active=active,
+        handles=handles,
+    )
+    planned = normalizer.contract_edges(
+        nodes=nodes,
+        active=active,
+        edges=flattened,
+        handles=handles,
+        runtime_handle_ids=runtime_ids,
+    )
+    ready_barriers = [
+        edge for edge in planned if edge["target_data_key"] == "ready"
+    ]
+    assert len(ready_barriers) == 2
+    assert all(edge.get("dependency_only") is True for edge in ready_barriers)
+    value_edges = [
+        edge for edge in planned if edge["target_data_key"] == "value"
+    ]
+    assert len(value_edges) == 1
+    assert value_edges[0].get("dependency_only") is not True
+
+
+def test_composite_boundary_only_passthrough_skips_internal_value_target() -> None:
+    """纯边界透传不误接内部业务参数，但仍门控内部入口。"""
+
+    invocation = _composite_node()
+    invocation["meta_data"]["unilab"]["composite"]["target_mappings"] = {
+        INVOCATION_TARGET: []
+    }
+    nodes = {
+        node["uuid"]: node
+        for node in (
+            _node(PRODUCER_UUID, PRODUCER_TEMPLATE),
+            invocation,
+            _node(INTERNAL_UUID, INTERNAL_TEMPLATE),
+            _node(CONSUMER_UUID, CONSUMER_TEMPLATE),
+        )
+    }
+
+    flattened, params, bindings = (
+        ExecutionPlanGraphNormalizer().flatten_composite_edges(
+            nodes=nodes,
+            edges=[
+                _edge(
+                    "74000000-0000-4000-8000-000000000012",
+                    PRODUCER_UUID,
+                    PRODUCER_SOURCE,
+                    INVOCATION_UUID,
+                    INVOCATION_TARGET,
+                ),
+                _edge(
+                    "74000000-0000-4000-8000-000000000013",
+                    INVOCATION_UUID,
+                    INVOCATION_SOURCE,
+                    CONSUMER_UUID,
+                    CONSUMER_TARGET,
+                ),
+            ],
+            handles={handle["uuid"]: handle for handle in _handles()},
+        )
+    )
+
+    endpoints = {
+        (
+            edge["source_node_uuid"],
+            edge["source_handle_uuid"],
+            edge["target_node_uuid"],
+            edge["target_handle_uuid"],
+        )
+        for edge in flattened
+    }
+    assert endpoints == {
+        (PRODUCER_UUID, PRODUCER_SOURCE, CONSUMER_UUID, CONSUMER_TARGET),
+        (
+            PRODUCER_UUID,
+            PRODUCER_SOURCE,
+            INTERNAL_UUID,
+            INTERNAL_READY_TARGET,
+        ),
+        (INTERNAL_UUID, INTERNAL_READY, CONSUMER_UUID, CONSUMER_TARGET),
+    }
+    assert params == {}
+    assert bindings == {}
+
+
+def test_disabled_opaque_composite_is_not_flattened_for_execution() -> None:
+    """禁用的展示型复合调用不要求快照包含其内部节点。"""
+
+    invocation = _composite_node(static_value=7)
+    invocation["disabled"] = True
+
+    flattened, params, bindings = (
+        ExecutionPlanGraphNormalizer().flatten_composite_edges(
+            nodes={INVOCATION_UUID: invocation},
+            edges=[],
+            handles={handle["uuid"]: handle for handle in _handles()},
+        )
+    )
+
+    assert flattened == []
     assert params == {}
     assert bindings == {}
 
@@ -371,8 +569,26 @@ def test_chained_composite_passthrough_counts_only_value_provider() -> None:
     }
     assert endpoints == {
         (PRODUCER_UUID, PRODUCER_SOURCE, INTERNAL_UUID, INTERNAL_TARGET),
+        (
+            PRODUCER_UUID,
+            PRODUCER_SOURCE,
+            INTERNAL_UUID,
+            INTERNAL_READY_TARGET,
+        ),
         (PRODUCER_UUID, PRODUCER_SOURCE, SECOND_INTERNAL_UUID, INTERNAL_TARGET),
+        (
+            PRODUCER_UUID,
+            PRODUCER_SOURCE,
+            SECOND_INTERNAL_UUID,
+            INTERNAL_READY_TARGET,
+        ),
         (INTERNAL_UUID, INTERNAL_READY, SECOND_INTERNAL_UUID, INTERNAL_TARGET),
+        (
+            INTERNAL_UUID,
+            INTERNAL_READY,
+            SECOND_INTERNAL_UUID,
+            INTERNAL_READY_TARGET,
+        ),
         (PRODUCER_UUID, PRODUCER_SOURCE, CONSUMER_UUID, CONSUMER_TARGET),
         (SECOND_INTERNAL_UUID, INTERNAL_READY, CONSUMER_UUID, CONSUMER_TARGET),
     }
