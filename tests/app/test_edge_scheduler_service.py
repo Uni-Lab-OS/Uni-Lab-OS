@@ -169,6 +169,64 @@ class TestTriggerOnJobFinish:
         scheduler, _ = _make()
         assert scheduler.on_job_finished("nope", True)["dispatched"] == []
 
+    def test_material_edge_passes_value_and_remains_a_completion_dependency(self):
+        """ResourceSlot 边既传物料，也必须阻止消费者抢跑。
+
+        两个节点故意分属不同设备；若物料边只被当成参数连线而不是 DAG 依赖，
+        提交时它们会被同时派发。生产者成功后，消费者才取得同一个物料 UUID。
+        """
+
+        source_handle = Handle(
+            uuid="material-source",
+            node_id="producer",
+            io_type="source",
+            data_source="executor",
+            handle_key="plate",
+            data_key="plate",
+        )
+        target_handle = Handle(
+            uuid="material-target",
+            node_id="consumer",
+            io_type="target",
+            data_source="goal",
+            handle_key="plate",
+            data_key="plate",
+        )
+        spec = WorkflowSpec(
+            workflow_id="wf-material-dependency",
+            nodes=[
+                _node("producer", device="feedlift", action="take_plate"),
+                _node("consumer", device="sampling", action="load_plate"),
+            ],
+            handles=[source_handle, target_handle],
+            edges=[
+                WorkflowEdge(
+                    uuid="material-transfer",
+                    source_node_id="producer",
+                    target_node_id="consumer",
+                    source_handle_uuid=source_handle.uuid,
+                    target_handle_uuid=target_handle.uuid,
+                )
+            ],
+        )
+        scheduler, dispatcher = _make()
+
+        submitted = scheduler.submit_workflow(spec)
+
+        assert [item["node_id"] for item in submitted["dispatched"]] == ["producer"]
+        assert [item["node_id"] for item in dispatcher.dispatched] == ["producer"]
+
+        completed = scheduler.on_job_finished(
+            submitted["dispatched"][0]["job_id"],
+            success=True,
+            ret_value={"plate": {"uuid": "plate-001"}},
+        )
+
+        assert [item["node_id"] for item in completed["dispatched"]] == ["consumer"]
+        assert dispatcher.dispatched[-1]["action_args"]["plate"] == {
+            "uuid": "plate-001"
+        }
+
 
 class TestResourceLock:
     def test_same_device_action_serialized(self):
