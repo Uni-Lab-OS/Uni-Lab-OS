@@ -19,15 +19,14 @@ def start_backend(
     **kwargs,
 ):
     if backend == "ros":
-        # 假设 ros_main, simple_main, automancer_main 是不同 backend 的启动函数
         from unilabos.ros.main_slave_run import main, slave  # 如果选择 'ros' 作为 backend
-    elif backend == "simple":
-        # 这里假设 simple_backend 和 automancer_backend 是你定义的其他两个后端
-        # from simple_backend import main as simple_main
-        pass
-    elif backend == "automancer":
-        # from automancer_backend import main as automancer_main
-        pass
+    elif backend in ("simple", "automancer"):
+        # 这两个 backend 尚未实现：原先的分支只是 pass，随后 target=main 会读到未绑定的
+        # 局部变量，抛出 UnboundLocalError。那个报错既不说明选了没实现的 backend，也不
+        # 提示该改用哪个，排查起来要一路读到这里才明白。改为在此处就说清楚。
+        raise NotImplementedError(
+            f"backend '{backend}' 尚未实现，当前只有 'ros' 可用；请使用 --backend ros。"
+        )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
