@@ -370,12 +370,20 @@ class WorkflowService:
         # 源码（Workflow Source）；SQLite 注册行仅保留跨启动历史身份。
         self._active_sources_lock = threading.RLock()
         self._active_source_workflow_uuids: frozenset[str] = frozenset()
+        # Manifest 顺序是预编译包唯一可声明的子到父激活顺序。集合继续用于 O(1)
+        # 授权判定；独立元组用于冷启动固定点，避免 SQLite 的 UUID 排序反复先编译
+        # 父来源，再在后续轮次重试同一组合依赖。
+        self._active_source_workflow_order: tuple[str, ...] = ()
         # ``_catalog_generation_tracker`` 隐藏本进程目录编译基线、变化判定和源码
         # 观测签名组合；工作流服务只在编译事务接缝提交已验证指纹。
         self._catalog_generation_tracker = CatalogAuthoringGenerationTracker()
         # 普通交互应用保持依赖扇出刷新；启动固定点批次会只在单次调用期间关闭，
-        # 改由批次逐项按最新目录代际重编译，避免冷启动 O(n²) 放大。
+        # 改由固定点轮次分层推进，避免冷启动 O(n²) 放大。
         self._refresh_catalog_dependents = True
+        # 启动固定点的一轮内目录指纹必须冻结：同层候选共享一个指纹成批提交，
+        # 轮末才重建一次包含新发布子工作流的目录，供下一层父来源编译。
+        self._defer_compiler_rebuild = False
+        self._compiler_rebuild_pending = False
 
     # 工作流（Workflow）与图（Graph） -------------------------------------
 
@@ -1329,6 +1337,9 @@ class WorkflowService:
         incoming_workflow_uuids = frozenset(
             {registration.workflow_uuid for registration in plan.registrations}
         )
+        incoming_workflow_order = tuple(
+            registration.workflow_uuid for registration in plan.registrations
+        )
         # ``registration_rows`` 是交给 SQLite 写模型的完整、不可变批次。
         registration_rows = tuple(
             {
@@ -1366,6 +1377,7 @@ class WorkflowService:
                 # 在所有相关创作锁释放前一次发布，撤权返回后不得再有旧操作读写路径。
                 with self._active_sources_lock:
                     self._active_source_workflow_uuids = incoming_workflow_uuids
+                    self._active_source_workflow_order = incoming_workflow_order
             return registered
 
     def replace_active_editable_source_authorization(
@@ -1417,17 +1429,19 @@ class WorkflowService:
     def list_registered_sources(self) -> List[Dict[str, Any]]:
         """返回本次进程配置仍授权的工作流源码（Workflow Source）。
 
-        参数：无。返回：按稳定工作流 UUID 排序的活动注册；持久历史注册不会因
-        数据库中仍存在就自动获得当前路径访问权。
+        参数：无。返回：按当前发现计划（即 manifest）顺序排列的活动注册；
+        持久历史注册不会因数据库中仍存在就自动获得当前路径访问权。
         """
 
         with self._active_sources_lock:
             active_workflow_uuids = self._active_source_workflow_uuids
-        return [
-            registration
+            active_workflow_order = self._active_source_workflow_order
+        registrations = {
+            registration["workflow_uuid"]: registration
             for registration in self._store.list_source_registrations()
             if registration["workflow_uuid"] in active_workflow_uuids
-        ]
+        }
+        return [registrations[workflow_uuid] for workflow_uuid in active_workflow_order]
 
     def recover_registered_sources(
         self,
@@ -1484,8 +1498,30 @@ class WorkflowService:
             public_error_code=lambda error: error.code,
             isolated_error_codes=_ISOLATED_WORKSPACE_ACTIVATION_ERRORS,
             error_factory=WorkflowError,
+            begin_pass=self._begin_workspace_activation_pass,
+            complete_pass=self._complete_workspace_activation_pass,
         )
         coordinator.activate_to_fixed_point()
+
+    def _begin_workspace_activation_pass(self) -> None:
+        """冻结一次启动固定点轮次使用的模板目录代际。"""
+
+        if self._defer_compiler_rebuild or self._compiler_rebuild_pending:
+            raise WorkflowError("internal_error")
+        self._defer_compiler_rebuild = True
+
+    def _complete_workspace_activation_pass(self) -> None:
+        """轮末一次发布本轮全部子工作流产生的新模板目录。"""
+
+        pending = self._compiler_rebuild_pending
+        self._compiler_rebuild_pending = False
+        self._defer_compiler_rebuild = False
+        if not pending:
+            return
+        warnings: List[Dict[str, str]] = []
+        self._rebuild_compiler_after_apply(warnings)
+        if warnings:
+            raise WorkflowError("template_catalog_unavailable")
 
     def _apply_workspace_activation_candidate(
         self,
@@ -2146,23 +2182,10 @@ class WorkflowService:
 
             warnings: List[Dict[str, str]] = []
             if self._compiler_rebuilder is not None:
-                try:
-                    rebuilt_compiler = self._compiler_rebuilder()
-                except Exception:  # noqa: BLE001 - 主事务已提交，只能关闭目录
-                    # 应用图已经提交，目录刷新失败时撤销编译入口，禁止继续用陈旧
-                    # 指纹签发父候选；下次进程启动会从持久图重建完整代际。
-                    self.compiler = None
-                    warnings.append(
-                        {
-                            "code": "template_catalog_rebuild_pending",
-                            "message": (
-                                "工作流已应用，但模板目录重建失败；"
-                                "创作编译已关闭，重启后将自动恢复。"
-                            ),
-                        }
-                    )
+                if self._defer_compiler_rebuild:
+                    self._compiler_rebuild_pending = True
                 else:
-                    self.compiler = rebuilt_compiler
+                    self._rebuild_compiler_after_apply(warnings)
             response_source = source
 
             def warn_writeback() -> None:
@@ -2319,6 +2342,32 @@ class WorkflowService:
                 warnings=warnings,
             )
         return result
+
+    def _rebuild_compiler_after_apply(
+        self,
+        warnings: List[Dict[str, str]],
+    ) -> None:
+        """重建发布目录，失败时关闭陈旧编译入口并形成提交后警告。"""
+
+        if self._compiler_rebuilder is None:
+            return
+        try:
+            rebuilt_compiler = self._compiler_rebuilder()
+        except Exception:  # noqa: BLE001 - 主事务已提交，只能关闭目录
+            # 应用图已经提交，目录刷新失败时撤销编译入口，禁止继续用陈旧
+            # 指纹签发父候选；下次进程启动会从持久图重建完整代际。
+            self.compiler = None
+            warnings.append(
+                {
+                    "code": "template_catalog_rebuild_pending",
+                    "message": (
+                        "工作流已应用，但模板目录重建失败；"
+                        "创作编译已关闭，重启后将自动恢复。"
+                    ),
+                }
+            )
+        else:
+            self.compiler = rebuilt_compiler
 
     def list_events(
         self,

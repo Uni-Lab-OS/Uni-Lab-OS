@@ -89,6 +89,23 @@ def composite_parent(*, value: float) -> ParentResult:
 '''
 
 
+def _disabled_source() -> str:
+    """返回仅用于分层展示、不递归展开子图的已禁用复合调用源码。"""
+
+    return f'''from {CHILD_MODULE} import {CHILD_SYMBOL}
+from unilabos.workflow.authoring import workflow
+
+
+@workflow(
+    workflow_uuid="{PARENT_WORKFLOW_UUID}",
+    displayname="Composite display-only parent",
+)
+def composite_parent(*, value: float) -> None:
+    # unilab:node_uuid={INVOCATION_UUID} disabled=true
+    result = {CHILD_SYMBOL}(value=value)
+'''
+
+
 def _source_with_surrounding_actions() -> str:
     """返回把已发布工作流调用放在两个普通动作之间的作者源码。
 
@@ -404,6 +421,33 @@ def test_absolute_published_workflow_call_is_a_canonical_fixed_point() -> None:
 
     engine = _engine()
     assert CHILD_MODULE not in sys.modules
+
+
+def test_disabled_published_workflow_call_stays_opaque_and_round_trips() -> None:
+    """禁用的展示型复合调用只保留已校验调用节点，不复制内部子图。
+
+    参数：无。返回：无；断言调用身份、禁用状态和规范源码固定点均保留，且候选
+    图不包含子工作流内部节点。异常：编译或断言失败时由 pytest 报告。
+    """
+
+    engine = _engine()
+    compiled = _compile(engine, _disabled_source(), _applied_parent_graph())
+
+    assert compiled.valid and compiled.graph is not None, compiled.diagnostics
+    assert [node["uuid"] for node in compiled.graph["nodes"]] == [INVOCATION_UUID]
+    invocation = compiled.graph["nodes"][0]
+    assert invocation["disabled"] is True
+    assert invocation["meta_data"]["unilab"]["composite"][
+        "child_workflow_uuid"
+    ] == CHILD_WORKFLOW_UUID
+    normalized = compiled.normalized_python_source
+    assert normalized is not None
+    assert f"# unilab:node_uuid={INVOCATION_UUID} disabled=true" in normalized
+
+    repeated = _compile(engine, normalized, compiled.graph)
+
+    assert repeated.valid and repeated.graph == compiled.graph, repeated.diagnostics
+    assert repeated.normalized_python_source == normalized
 
     compiled = _compile(engine, _source(), _applied_parent_graph())
 

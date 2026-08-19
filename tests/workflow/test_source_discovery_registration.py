@@ -110,12 +110,38 @@ def test_complete_discovery_plan_registers_atomically(
         WORKFLOW_A_UUID,
         WORKFLOW_B_UUID,
     ]
-    assert {
+    assert [
         row["source_uri"] for row in registration_service.list_registered_sources()
-    } == {
+    ] == [
         "package://alpha_lab/workflows/a.py",
         "package://alpha_lab/workflows/b.py",
-    }
+    ]
+
+
+def test_active_sources_preserve_non_uuid_manifest_order(
+    tmp_path: Path,
+    registration_service: WorkflowService,
+) -> None:
+    """激活顺序必须沿用 manifest，而不是退化为 SQLite 的 UUID 排序。"""
+
+    selected_root = tmp_path / "editable"
+    _write_package(
+        selected_root,
+        package_id="alpha_lab",
+        entries=(
+            (WORKFLOW_B_UUID, "alpha_lab/workflows/b.py"),
+            (WORKFLOW_A_UUID, "alpha_lab/workflows/a.py"),
+        ),
+    )
+
+    registration_service.replace_discovered_source_authorizations(
+        discover_editable_sources((selected_root,))
+    )
+
+    assert [
+        row["workflow_uuid"]
+        for row in registration_service.list_registered_sources()
+    ] == [WORKFLOW_B_UUID, WORKFLOW_A_UUID]
 
 
 def test_repeating_exact_discovery_plan_is_idempotent(
