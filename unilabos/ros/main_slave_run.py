@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, List
 import uuid
 
 import rclpy
+from rclpy._rclpy_pybind11 import InvalidHandle
 from unilabos_msgs.srv._serial_command import SerialCommand_Response
 
 from unilabos.app.register import register_devices_and_resources
@@ -31,6 +32,27 @@ from unilabos.ros.nodes.presets.host_node import HostNode
 from unilabos.utils import logger
 from unilabos.config.config import BasicConfig
 from unilabos.utils.type_check import TypeEncoder
+
+
+def _spin_executor_resiliently(executor: MultiThreadedExecutor) -> None:
+    """Keep the Edge executor alive across rclpy timer-destruction races.
+
+    Async device actions yield through short one-shot timers.  A different
+    worker in ``MultiThreadedExecutor`` can still hold such a timer in its
+    current wait set when the action worker destroys it.  rclpy then raises an
+    ``InvalidHandle`` while rebuilding the wait set.  The destroyed entity is
+    gone on the next iteration, so terminating the whole executor thread would
+    turn a harmless cleanup race into a permanently stalled Edge runtime.
+    """
+
+    while rclpy.ok():
+        try:
+            executor.spin_once()
+        except InvalidHandle as exc:
+            logger.warning(
+                "[ROS] executor skipped an entity destroyed by another worker: "
+                f"{exc}"
+            )
 
 
 def exit() -> None:
@@ -125,7 +147,10 @@ def main(
         # executor.add_node(lh_joint_pub)
 
     thread = threading.Thread(
-        target=executor.spin, daemon=True, name="host_executor_thread"
+        target=_spin_executor_resiliently,
+        args=(executor,),
+        daemon=True,
+        name="host_executor_thread",
     )
     thread.start()
 

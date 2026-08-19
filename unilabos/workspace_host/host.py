@@ -278,12 +278,12 @@ class WorkspaceHost:
             backend = self._start_backend(parameters)
             return self._start_edge() if edge_was_ready else backend
         if command == "os.start":
-            return self._start_edge()
+            return self._start_edge(parameters)
         if command == "os.stop":
             return self._stop_component("edge")
         if command == "os.restart":
             self._stop_component("edge")
-            return self._start_edge()
+            return self._start_edge(parameters)
         if command == "local.reset-state":
             return self._reset_local_state(parameters)
         if command == "plc.start":
@@ -727,7 +727,10 @@ class WorkspaceHost:
             self._publish_locked("backend.ready", {"generation": plan.generation})
             return self._snapshot_locked()
 
-    def _start_edge(self) -> dict[str, object]:
+    def _start_edge(
+        self,
+        parameters: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         """启动边缘运行时（Edge Runtime）并等待其就绪文件。
 
         Returns:
@@ -737,10 +740,14 @@ class WorkspaceHost:
             WorkspaceHostError: Backend、Edge 进程或 Edge 就绪等待失败。
         """
 
+        parameters = parameters or {}
         with self._lock:
             if self._components["edge"]["phase"] == "ready":
                 return self._snapshot_locked()
             backend = dict(self._components["backend"])
+            runtime_mode = _optional_text(parameters.get("runtimeMode")) or (
+                _optional_text(self._configuration.get("runtimeMode"))
+            )
             backend_metadata = backend.get("metadata")
             if isinstance(backend_metadata, dict):
                 backend["metadata"] = {
@@ -751,7 +758,11 @@ class WorkspaceHost:
             self._start_backend({})
             with self._lock:
                 backend = dict(self._components["backend"])
-        plan = resolve_edge_launch(self.paths, backend)
+        plan = resolve_edge_launch(
+            self.paths,
+            backend,
+            runtime_mode=runtime_mode,
+        )
         self._spawn(plan)
         ready_file = Path(str(plan.metadata["readyFilePath"]))
         deadline = time.monotonic() + _startup_readiness_timeout(

@@ -95,12 +95,12 @@ def test_windows_dll_path_filter_excludes_inaccessible_directory(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="验证 Windows Conda ROS 2 环境")
-def test_os_launch_defaults_to_rviz_and_workspace_ros_logs(
+def test_os_launch_disables_rviz_and_keeps_workspace_ros_logs(
     workspace: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """证明边缘运行时（Edge Runtime）默认启用 RViz，且 ROS 2 日志不写入用户主目录。
+    """证明边缘运行时（Edge Runtime）默认禁用 RViz，且 ROS 2 日志不写入用户主目录。
 
     Args:
         workspace: 当前用例的最小可启动工作区。
@@ -134,7 +134,7 @@ def test_os_launch_defaults_to_rviz_and_workspace_ros_logs(
     )
 
     visual_index = edge.command.index("--visual")
-    assert edge.command[visual_index + 1] == "rviz"
+    assert edge.command[visual_index + 1] == "disable"
 
     for plan in (backend, edge):
         ros_log_dir = Path(plan.environment["ROS_LOG_DIR"])

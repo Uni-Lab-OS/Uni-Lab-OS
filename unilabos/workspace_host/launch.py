@@ -193,7 +193,10 @@ def resolve_backend_launch(
 
 
 def resolve_edge_launch(
-    paths: WorkspacePaths, backend: dict[str, object]
+    paths: WorkspacePaths,
+    backend: dict[str, object],
+    *,
+    runtime_mode: str | None = None,
 ) -> LaunchPlan:
     """从 Backend 元数据解析共享配置的 Edge 启动计划。
 
@@ -215,7 +218,11 @@ def resolve_edge_launch(
     runtime_directory = paths.runtime / "edge" / generation
     runtime_directory.mkdir(parents=True, exist_ok=False)
     ready_file = runtime_directory / "ready.json"
-    mode = str(metadata.get("runtimeMode") or "normal")
+    mode = runtime_mode or str(metadata.get("runtimeMode") or "normal")
+    if mode in {"simulation", "simulate"}:
+        mode = "dry-run"
+    if mode not in {"normal", "dry-run"}:
+        raise WorkspaceHostError("runtime_mode_invalid", f"无效启动模式：{mode}")
     external_devices_only = metadata.get("externalDevicesOnly", True)
     if not isinstance(external_devices_only, bool):
         raise WorkspaceHostError(
@@ -334,7 +341,7 @@ def resolve_edge_launch(
         "real" if mode == "normal" else "simulate",
         *(("--external_devices_only",) if external_devices_only else ()),
         "--visual",
-        "rviz",
+        "disable",
         "--ros_discovery_server",
         "off",
     )
@@ -524,9 +531,45 @@ def _with_conda_ros_environment(
     Explicit caller overrides remain authoritative.
     """
 
-    if platform != "win32":
-        return environment
     conda_prefix = (prefix or Path(sys.prefix)).resolve()
+    if platform != "win32":
+        if platform not in {"darwin", "linux"}:
+            return environment
+        if not (conda_prefix / "conda-meta").is_dir():
+            return environment
+        if not (
+            (conda_prefix / "local_setup.bash").is_file()
+            and (conda_prefix / "share" / "ament_index").is_dir()
+        ):
+            return environment
+
+        python_executable = executable or sys.executable
+        environment.setdefault("CONDA_PREFIX", str(conda_prefix))
+        environment.setdefault("CONDA_DEFAULT_ENV", conda_prefix.name)
+        environment.setdefault("AMENT_PREFIX_PATH", str(conda_prefix))
+        environment.setdefault("CMAKE_PREFIX_PATH", str(conda_prefix))
+        environment.setdefault("AMENT_PYTHON_EXECUTABLE", python_executable)
+        environment.setdefault("ROS_PYTHON_VERSION", str(sys.version_info.major))
+        environment.setdefault("ROS_VERSION", "2")
+        environment["PYTHONHOME"] = ""
+
+        bin_directory = str(conda_prefix / "bin")
+        existing_path = environment.get("PATH", "")
+        path_entries = [
+            bin_directory,
+            *(part for part in existing_path.split(os.pathsep) if part),
+        ]
+        seen: set[str] = set()
+        preserved: list[str] = []
+        for part in path_entries:
+            key = part.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            preserved.append(part)
+        environment["PATH"] = os.pathsep.join(preserved)
+        return environment
+
     library = conda_prefix / "Library"
     if not (conda_prefix / "conda-meta").is_dir():
         return environment

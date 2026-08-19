@@ -97,6 +97,43 @@ def test_detached_windows_runtime_restores_conda_ros_activation(tmp_path: Path) 
     assert result["PATH"].split(os.pathsep)[0] == str(library / "bin")
 
 
+def test_detached_posix_runtime_restores_conda_ros_activation(tmp_path: Path) -> None:
+    """GUI 启动的 macOS/Linux Host 也必须恢复当前 Conda ROS 前缀。"""
+
+    prefix = tmp_path / "ptlc-unilab"
+    (prefix / "conda-meta").mkdir(parents=True)
+    (prefix / "share" / "ament_index").mkdir(parents=True)
+    (prefix / "local_setup.bash").write_text("# fixture\n")
+    (prefix / "bin").mkdir()
+    environment = {"PATH": "/usr/bin:/bin"}
+
+    result = _with_conda_ros_environment(
+        environment,
+        platform="darwin",
+        prefix=prefix,
+        executable=str(prefix / "bin" / "python"),
+    )
+
+    assert result["CONDA_PREFIX"] == str(prefix.resolve())
+    assert result["CONDA_DEFAULT_ENV"] == "ptlc-unilab"
+    assert result["AMENT_PREFIX_PATH"] == str(prefix.resolve())
+    assert result["CMAKE_PREFIX_PATH"] == str(prefix.resolve())
+    assert result["AMENT_PYTHON_EXECUTABLE"] == str(prefix / "bin" / "python")
+    assert result["PATH"].split(os.pathsep)[0] == str(prefix / "bin")
+
+
+def test_os_start_forwards_explicit_runtime_mode_to_edge() -> None:
+    """CLI 的 OS 启动模式必须到达 Edge，而不能被 Backend 旧元数据吞掉。"""
+
+    host = object.__new__(WorkspaceHost)
+    calls: list[dict[str, object]] = []
+    host._start_edge = lambda parameters=None: calls.append(parameters or {}) or {}  # type: ignore[method-assign]
+
+    host._dispatch("os.start", {"runtimeMode": "normal"})
+
+    assert calls == [{"runtimeMode": "normal"}]
+
+
 def test_workspace_client_executes_and_normalizes_one_host_operation(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -641,6 +678,38 @@ def test_dry_run_edge_disables_device_auto_connect_in_detached_runtime_graph(
         "url": "opc.tcp://plc-sim:4855/xuse_sim",
         "auto_connect": False,
     }
+
+
+def test_edge_runtime_mode_override_wins_over_backend_generation(
+    workspace: Path,
+) -> None:
+    """只重启 OS 时应使用新模式，不要求重启常驻 Workspace Backend。"""
+
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    ensure_local_token(paths)
+    paths.environment.write_text(json.dumps({
+        "schemaVersion": 1,
+        "graphPath": "deployment/graphs/graph.json",
+        "runtimeMode": "dry-run",
+        "domainMode": "local",
+    }))
+    backend = resolve_backend_launch(
+        paths, backend_port=48_133, hostlink_port=48_134
+    )
+
+    edge = resolve_edge_launch(
+        paths,
+        {"address": backend.address, "metadata": backend.metadata},
+        runtime_mode="normal",
+    )
+
+    assert edge.metadata["runtimeMode"] == "normal"
+    assert _argument_value(edge.command, "--action_mode") == "real"
+    assert _argument_value(edge.command, "--visual") == "disable"
+    assert Path(_argument_value(edge.command, "--graph")) == Path(
+        str(backend.metadata["validatedGraphPath"])
+    )
 
 
 def test_authority_switch_preflights_before_restart_and_persists_mode(

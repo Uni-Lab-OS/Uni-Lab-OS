@@ -335,3 +335,29 @@ def test_backend_ros_runtime_does_not_start_hostlink_microbackend(
     main_slave_run._attach_hostlink_runtime(object())
 
     assert calls == []
+
+
+def test_ros_executor_recovers_from_destroyed_timer_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rclpy._rclpy_pybind11 import InvalidHandle
+    from unilabos.ros import main_slave_run
+
+    class FakeExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def spin_once(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise InvalidHandle(
+                    "cannot use Destroyable because destruction was requested"
+                )
+
+    executor = FakeExecutor()
+    ok_values = iter((True, True, False))
+    monkeypatch.setattr(main_slave_run.rclpy, "ok", lambda: next(ok_values))
+
+    main_slave_run._spin_executor_resiliently(executor)
+
+    assert executor.calls == 2
