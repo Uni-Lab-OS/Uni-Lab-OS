@@ -351,6 +351,12 @@ class WorkflowService:
         # 源码（Workflow Source）；SQLite 注册行仅保留跨启动历史身份。
         self._active_sources_lock = threading.RLock()
         self._active_source_workflow_uuids: frozenset[str] = frozenset()
+        # 依赖关系来自与 Registry Snapshot 同代的静态 Package Catalog，只用于
+        # managed-local 冷启动按子到父分层激活；交互 Apply 仍保持原有单项语义。
+        self._active_source_dependencies: dict[str, frozenset[str]] = {}
+        # 冷启动单线程批次提交期间暂缓逐项目录重建；这是服务内部生命周期状态，
+        # 不暴露到公共 Apply API，避免调用方绕开每次交互应用后的目录一致性刷新。
+        self._workspace_activation_batch = False
         # ``_catalog_generation_tracker`` 隐藏本进程目录编译基线、变化判定和源码
         # 观测签名组合；工作流服务只在编译事务接缝提交已验证指纹。
         self._catalog_generation_tracker = CatalogAuthoringGenerationTracker()
@@ -1220,6 +1226,16 @@ class WorkflowService:
         incoming_workflow_uuids = frozenset(
             {registration.workflow_uuid for registration in plan.registrations}
         )
+        source_dependencies: dict[str, frozenset[str]] = {}
+        for registration in plan.registrations:
+            dependencies = registration.dependency_workflow_uuids
+            if (
+                not isinstance(dependencies, tuple)
+                or any(not isinstance(item, str) for item in dependencies)
+                or not set(dependencies).issubset(incoming_workflow_uuids)
+            ):
+                raise WorkflowError("invalid_input")
+            source_dependencies[registration.workflow_uuid] = frozenset(dependencies)
         # ``registration_rows`` 是交给 SQLite 写模型的完整、不可变批次。
         registration_rows = tuple(
             {
@@ -1256,6 +1272,7 @@ class WorkflowService:
                 # 在所有相关创作锁释放前一次发布，撤权返回后不得再有旧操作读写路径。
                 with self._active_sources_lock:
                     self._active_source_workflow_uuids = incoming_workflow_uuids
+                    self._active_source_dependencies = source_dependencies
             return registered
 
     def replace_active_editable_source_authorization(
@@ -1339,48 +1356,133 @@ class WorkflowService:
                 preserve_author_source=preserve_author_source,
             )
 
-    def activate_registered_sources_to_fixed_point(self) -> None:
+    def activate_registered_sources_to_fixed_point(
+        self,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
         """恢复并应用工作区源码，直到组合工作流依赖达到固定点。
 
-        参数：无。返回：无；先让全部活动来源形成候选或稳定诊断，再逐轮应用
-        当前有效候选。应用子工作流会刷新发布目录并重编译持有
-        ``composite_child_unapplied`` 的父来源，后续轮次继续应用这些新候选。
-        没有候选时停止；缺失、循环或无效来源保留真实诊断，不被伪装成成功。
-        单个候选的稳定业务失败会撤销该候选并成为该工作流的持久诊断，其他来源
-        仍继续推进；未知基础设施异常原样传播，禁止静默发布损坏的工作区。
+        参数：``progress_callback`` 在开始和每个源码完成真实编译后接收
+        ``(loaded, total)``。返回：无；使用同代 Package Catalog 的静态组合依赖把来源按
+        子到父分层，每层只编译一次、批量提交候选并只重建一次模板目录。循环层
+        保留逐项刷新语义，让编译器发布稳定递归诊断。缺失或无效来源保留真实
+        诊断；单个候选的稳定业务失败被隔离，未知基础设施异常继续失败关闭。
         """
 
-        self.recover_registered_sources(preserve_author_source=True)
         registrations = self.list_registered_sources()
-        while True:
-            applied_in_pass = False
-            for registration in registrations:
-                workflow_uuid = str(registration["workflow_uuid"])
-                record = self._store.get_authoring_record(workflow_uuid)
-                candidate = record.get("candidate")
-                if not isinstance(candidate, dict):
-                    continue
-                candidate_hash = candidate.get("candidate_hash")
-                if not isinstance(candidate_hash, str) or not candidate_hash:
-                    raise WorkflowError("candidate_invalid")
-                try:
-                    result = self.apply_authoring(
-                        workflow_uuid,
-                        candidate_hash=candidate_hash,
-                        preserve_author_source=True,
+        total = len(registrations)
+        loaded = 0
+        if progress_callback is not None:
+            progress_callback(loaded, total)
+        registrations_by_uuid = {
+            str(registration["workflow_uuid"]): registration
+            for registration in registrations
+        }
+        for workflow_uuids, cyclic in self._workspace_activation_layers(
+            tuple(registrations_by_uuid)
+        ):
+            for workflow_uuid in workflow_uuids:
+                self.reconcile_registered_source(
+                    workflow_uuid,
+                    force_compile=True,
+                    preserve_author_source=True,
+                )
+                loaded += 1
+                if progress_callback is not None:
+                    progress_callback(loaded, total)
+
+            deferred_results: list[Mapping[str, Any]] = []
+            previous_batch_state = self._workspace_activation_batch
+            self._workspace_activation_batch = not cyclic
+            try:
+                for workflow_uuid in workflow_uuids:
+                    record = self._store.get_authoring_record(workflow_uuid)
+                    candidate = record.get("candidate")
+                    if not isinstance(candidate, dict):
+                        continue
+                    candidate_hash = candidate.get("candidate_hash")
+                    if not isinstance(candidate_hash, str) or not candidate_hash:
+                        raise WorkflowError("candidate_invalid")
+                    try:
+                        result = self.apply_authoring(
+                            workflow_uuid,
+                            candidate_hash=candidate_hash,
+                            preserve_author_source=True,
+                        )
+                    except WorkflowError as error:
+                        if error.code not in _ISOLATED_WORKSPACE_ACTIVATION_ERRORS:
+                            raise
+                        self._record_workspace_activation_failure(
+                            workflow_uuid,
+                            error=error,
+                        )
+                        continue
+                    if cyclic:
+                        self._require_workspace_activation_apply_complete(result)
+                    else:
+                        deferred_results.append(result)
+            finally:
+                self._workspace_activation_batch = previous_batch_state
+
+            if not deferred_results:
+                continue
+            self._rebuild_workspace_activation_catalog()
+            for result in deferred_results:
+                self._require_workspace_activation_apply_complete(result)
+
+    def _workspace_activation_layers(
+        self,
+        workflow_uuids: tuple[str, ...],
+    ) -> tuple[tuple[tuple[str, ...], bool], ...]:
+        """把活动来源稳定划分为子到父的启动层。
+
+        参数：``workflow_uuids`` 保留注册表稳定顺序。返回：每项包含同层 UUID
+        及是否为循环残量；只有循环残量允许退回逐项目录刷新。异常：活动依赖
+        快照缺失时按无内部依赖处理，兼容不含工作流的旧计划。
+        """
+
+        with self._active_sources_lock:
+            dependencies = dict(self._active_source_dependencies)
+        remaining = set(workflow_uuids)
+        layers: list[tuple[tuple[str, ...], bool]] = []
+        while remaining:
+            layer = tuple(
+                workflow_uuid
+                for workflow_uuid in workflow_uuids
+                if workflow_uuid in remaining
+                and not (dependencies.get(workflow_uuid, frozenset()) & remaining)
+            )
+            if not layer:
+                layers.append(
+                    (
+                        tuple(
+                            workflow_uuid
+                            for workflow_uuid in workflow_uuids
+                            if workflow_uuid in remaining
+                        ),
+                        True,
                     )
-                    self._require_workspace_activation_apply_complete(result)
-                except WorkflowError as error:
-                    if error.code not in _ISOLATED_WORKSPACE_ACTIVATION_ERRORS:
-                        raise
-                    self._record_workspace_activation_failure(
-                        workflow_uuid,
-                        error=error,
-                    )
-                    continue
-                applied_in_pass = True
-            if not applied_in_pass:
-                return
+                )
+                break
+            layers.append((layer, False))
+            remaining.difference_update(layer)
+        return tuple(layers)
+
+    def _rebuild_workspace_activation_catalog(self) -> None:
+        """在一层候选全部提交后原子发布一次新模板目录。
+
+        参数：无。返回：无；没有目录重建器时保留既有编译器。异常：重建失败时
+        关闭陈旧编译入口并抛稳定目录不可用错误，禁止组合根误报 ready。
+        """
+
+        if self._compiler_rebuilder is None:
+            return
+        try:
+            self.compiler = self._compiler_rebuilder()
+        except Exception:
+            self.compiler = None
+            raise WorkflowError("template_catalog_unavailable") from None
 
     def _require_workspace_activation_apply_complete(
         self,
@@ -1562,12 +1664,11 @@ class WorkflowService:
             )
             record = self._store.get_authoring_record(workflow_uuid)
             applied_source = record.get("applied_source")
-            if (
-                candidate is not None
-                and candidate["changeset"]["kind"] == "source_only"
-                and applied_source is not None
-                and applied_source["workflow_revision"] == workflow["revision"]
-                and applied_source["source_hash"] == source["draft_hash"]
+            if self._source_only_candidate_is_already_applied(
+                candidate=candidate,
+                applied_source=applied_source,
+                workflow_revision=workflow["revision"],
+                draft_hash=source["draft_hash"],
             ):
                 # 恢复到已应用的精确作者字节且重新编译证明图未变时，没有待
                 # Apply 的新事实；清空旧无效草稿派生状态即可回到 applied。
@@ -1768,6 +1869,15 @@ class WorkflowService:
                     applied_graph=applied_graph,
                     draft_python_source=source["python_source"],
                 )
+                if self._source_only_candidate_is_already_applied(
+                    candidate=candidate,
+                    applied_source=applied_source,
+                    workflow_revision=workflow["revision"],
+                    draft_hash=source["draft_hash"],
+                ):
+                    # 当前目录已再次证明同一作者源码不改变应用图；若继续签发
+                    # 候选，每次重启都会无意义提升修订并触发全目录级联编译。
+                    candidate = None
             if force_compile and actual_hash == record["observed_draft_hash"]:
                 # 同一源码代际只在进程内已知目录指纹变化时标记为目录变化；
                 # 冷启动没有旧代际证据，只能记录为恢复编译。
@@ -2011,7 +2121,10 @@ class WorkflowService:
                 raise WorkflowError("candidate_invalid") from None
 
             warnings: List[Dict[str, str]] = []
-            if self._compiler_rebuilder is not None:
+            if (
+                self._compiler_rebuilder is not None
+                and not self._workspace_activation_batch
+            ):
                 try:
                     rebuilt_compiler = self._compiler_rebuilder()
                 except Exception:  # noqa: BLE001 - 主事务已提交，只能关闭目录
@@ -2172,17 +2285,18 @@ class WorkflowService:
                 },
                 "authoring": authoring,
             }
-        refresh_catalog_dependent_authoring(
-            registrations=self.list_registered_sources(),
-            load_authoring_record=self._store.get_authoring_record,
-            reconcile_source=partial(
-                self.reconcile_registered_source,
-                force_compile=True,
-                preserve_author_source=preserve_author_source,
-            ),
-            mutated_workflow_uuid=workflow_uuid,
-            warnings=warnings,
-        )
+        if not self._workspace_activation_batch:
+            refresh_catalog_dependent_authoring(
+                registrations=self.list_registered_sources(),
+                load_authoring_record=self._store.get_authoring_record,
+                reconcile_source=partial(
+                    self.reconcile_registered_source,
+                    force_compile=True,
+                    preserve_author_source=preserve_author_source,
+                ),
+                mutated_workflow_uuid=workflow_uuid,
+                warnings=warnings,
+            )
         return result
 
     def list_events(
@@ -2408,6 +2522,29 @@ class WorkflowService:
         if not isinstance(value, str) or _HASH_TOKEN.fullmatch(value) is None:
             raise WorkflowError("template_catalog_unavailable")
         return value
+
+    @staticmethod
+    def _source_only_candidate_is_already_applied(
+        *,
+        candidate: Optional[Dict[str, Any]],
+        applied_source: Any,
+        workflow_revision: int,
+        draft_hash: str,
+    ) -> bool:
+        """判断当前目录重编译是否只重新证明了既有应用事实。
+
+        参数：候选版本（Candidate）、已应用源码、当前工作流修订和作者源码哈希。
+        返回：候选不改变图，且同一作者字节已绑定当前修订时为 ``True``。
+        异常：无；持久派生字段形状异常只按不匹配处理。
+        """
+
+        return (
+            isinstance(candidate, dict)
+            and candidate.get("changeset", {}).get("kind") == "source_only"
+            and isinstance(applied_source, dict)
+            and applied_source.get("workflow_revision") == workflow_revision
+            and applied_source.get("source_hash") == draft_hash
+        )
 
     def _issue_candidate(
         self,

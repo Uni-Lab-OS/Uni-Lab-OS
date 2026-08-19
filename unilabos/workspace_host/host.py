@@ -49,7 +49,9 @@ from .model import (
 from .reset_safety import LocalResetInspectionError, inspect_local_reset_blockers
 
 _STOP_TIMEOUT_SECONDS = 10.0
-_READINESS_TIMEOUT_SECONDS = 90.0
+# 工作区更新可能触发一次完整工作流依赖激活。Backend 会很早开放 health，但
+# Workspace Host 只把 readiness 当成完整可用；统一总预算避免每个探针各等一轮。
+_READINESS_TIMEOUT_SECONDS = 600.0
 _MAX_BODY_BYTES = 1024 * 1024
 _SUPERVISED_COMPONENTS = frozenset({"backend", "edge", "plc"})
 
@@ -886,7 +888,8 @@ class WorkspaceHost:
     def _wait_backend_ready(self, plan: LaunchPlan) -> dict[str, object]:
         if not plan.address:
             raise WorkspaceHostError("backend_start_failed", "Backend 地址缺失")
-        probes = [("/api/v1/health", _health_ready)]
+        deadline = time.monotonic() + self.readiness_timeout
+        probes = [("/api/v1/readiness", _readiness_ready)]
         if plan.metadata.get("domainMode") != "backend":
             probes.extend(
                 [
@@ -900,11 +903,12 @@ class WorkspaceHost:
                 ]
             )
         for path, accepts in probes:
-            self._wait_backend_payload(plan, path, accepts)
+            self._wait_backend_payload(plan, path, accepts, deadline=deadline)
         payload = self._wait_backend_payload(
             plan,
             "/api/v1/workspace/package-mounts",
             _package_mounts_ready,
+            deadline=deadline,
         )
         data = payload.get("data")
         assert isinstance(data, dict)
@@ -915,8 +919,9 @@ class WorkspaceHost:
         plan: LaunchPlan,
         path: str,
         accepts: Callable[[dict[str, object]], bool],
+        *,
+        deadline: float,
     ) -> dict[str, object]:
-        deadline = time.monotonic() + self.readiness_timeout
         while time.monotonic() < deadline:
             with self._lock:
                 process = self._processes.get(plan.component)
@@ -925,23 +930,78 @@ class WorkspaceHost:
                         "backend_start_failed",
                         f"Backend 在 {path} 就绪前退出",
                     )
+            payload: object = None
+            status: int | None = None
             try:
                 with urlopen(f"{plan.address}{path}", timeout=1.0) as response:
                     payload = json.loads(response.read())
-                if (
-                    response.status == 200
-                    and isinstance(payload, dict)
-                    and accepts(payload)
-                ):
-                    return payload
+                    status = response.status
+            except HTTPError as response_error:
+                status = response_error.code
+                try:
+                    payload = json.loads(response_error.read())
+                except (OSError, ValueError):
+                    payload = None
             except (OSError, ValueError, URLError):
-                pass
+                payload = None
+            if isinstance(payload, dict):
+                if path == "/api/v1/readiness":
+                    self._record_backend_readiness_progress(plan, payload)
+                if status == 200 and accepts(payload):
+                    return payload
             time.sleep(0.2)
         self._stop_component(plan.component)
         raise WorkspaceHostError(
             "backend_readiness_failed",
             f"等待 Backend 就绪超时：{path}",
         )
+
+    def _record_backend_readiness_progress(
+        self,
+        plan: LaunchPlan,
+        payload: dict[str, object],
+    ) -> None:
+        """把 Backend 启动期 readiness 进度投影进 Host 权威快照。"""
+
+        progress = payload.get("workflowProgress")
+        if not isinstance(progress, dict):
+            return
+        loaded = progress.get("loaded")
+        total = progress.get("total")
+        if (
+            not isinstance(loaded, int)
+            or isinstance(loaded, bool)
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or loaded < 0
+            or total < 0
+            or loaded > total
+        ):
+            return
+        normalized = {"loaded": loaded, "total": total}
+        runtime_phase = payload.get("phase")
+        with self._lock:
+            component = self._components.get(plan.component)
+            if (
+                component is None
+                or component.get("generation") != plan.generation
+            ):
+                return
+            metadata = component.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                return
+            if (
+                metadata.get("workflowProgress") == normalized
+                and metadata.get("workflowRuntimePhase") == runtime_phase
+            ):
+                return
+            metadata["workflowProgress"] = normalized
+            if isinstance(runtime_phase, str):
+                metadata["workflowRuntimePhase"] = runtime_phase
+            self._publish_locked(
+                "backend.progress",
+                {**normalized, "phase": runtime_phase},
+            )
 
     def _stop_component(self, name: str) -> dict[str, object]:
         with self._lock:
@@ -1909,7 +1969,7 @@ class WorkspaceHost:
         if not isinstance(address, str) or not address:
             return name == "renderer"
         path = (
-            "/api/v1/health"
+            "/api/v1/readiness"
             if name == "backend"
             else "/" if name == "renderer" else "/api/state"
         )
@@ -2029,8 +2089,8 @@ def _required_text(payload: dict[str, object], field: str) -> str:
     return value
 
 
-def _health_ready(payload: dict[str, object]) -> bool:
-    return payload.get("status") == "ok"
+def _readiness_ready(payload: dict[str, object]) -> bool:
+    return payload.get("status") == "ready"
 
 
 def _successful_envelope(payload: dict[str, object]) -> bool:
