@@ -500,11 +500,18 @@ def workflow_source_plan_from_catalog(
         root_identity = directory_identity(package_root)
     except StableFileAccessError as error:
         raise ValueError("工作流源码包目录身份无效") from error
+    workflow_uuids_by_import = {
+        (definition.module, definition.symbol): str(
+            definition.details["workflow_uuid"]
+        )
+        for definition in catalog.definitions.workflows
+    }
     registrations = tuple(
         _workflow_source_registration(
             definition=definition,
             catalog=catalog,
             package_root=package_root,
+            workflow_uuids_by_import=workflow_uuids_by_import,
         )
         for definition in catalog.definitions.workflows
     )
@@ -519,6 +526,7 @@ def _workflow_source_registration(
     definition: PackageDefinition,
     catalog: PackageCatalog,
     package_root: Path,
+    workflow_uuids_by_import: Mapping[tuple[str, str], str],
 ) -> EditableSourceRegistration:
     """把一个冻结工作流目录定义转换为源码登记身份。
 
@@ -555,6 +563,29 @@ def _workflow_source_registration(
         raise ValueError("工作流目录声明文件不在规范导入包内")
     # ``relative_path`` 是相对实际 Python 包根的稳定源码位置。
     relative_path = PurePosixPath(*declaring_path.parts[1:]).as_posix()
+    action_references = definition.details.get("action_references")
+    dependency_workflow_uuids = tuple(
+        sorted(
+            {
+                dependency_uuid
+                for reference in (
+                    action_references
+                    if isinstance(action_references, tuple)
+                    else ()
+                )
+                if isinstance(reference, Mapping)
+                and reference.get("kind") == "workflow"
+                and isinstance(reference.get("module"), str)
+                and isinstance(reference.get("symbol"), str)
+                and (
+                    dependency_uuid := workflow_uuids_by_import.get(
+                        (str(reference["module"]), str(reference["symbol"]))
+                    )
+                )
+                is not None
+            }
+        )
+    )
     return EditableSourceRegistration(
         workflow_uuid=workflow_uuid,
         package_id=catalog.import_package,
@@ -566,6 +597,7 @@ def _workflow_source_registration(
         module=definition.module,
         symbol=definition.symbol,
         definition_content_hash=definition.content_hash,
+        dependency_workflow_uuids=dependency_workflow_uuids,
     )
 
 

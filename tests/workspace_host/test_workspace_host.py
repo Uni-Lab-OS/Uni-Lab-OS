@@ -1036,7 +1036,7 @@ def test_operation_is_recoverable_idempotent_and_audited(
             generation=generation,
             log_path=paths.logs / "backend.log",
             address=f"http://127.0.0.1:{ready_port}",
-            ready_url=f"http://127.0.0.1:{ready_port}/api/v1/health",
+            ready_url=f"http://127.0.0.1:{ready_port}/api/v1/readiness",
             metadata={"runtimeMode": "normal"},
         )
 
@@ -1084,6 +1084,84 @@ def test_operation_is_recoverable_idempotent_and_audited(
             pass
         server.shutdown()
         server.server_close()
+        host.close()
+        ready_server.shutdown()
+        ready_server.server_close()
+
+
+def test_backend_readiness_falls_back_only_when_endpoint_is_absent(
+    workspace: Path,
+) -> None:
+    """旧 Backend 明确没有 readiness 时仍用完整旧探针证明可用。
+
+    参数：``workspace`` 提供隔离 Host 状态。返回：无；断言启动等待和重启接管
+    都只在 readiness 返回 404 后回退 health。异常：兼容路径退化时测试失败。
+    """
+
+    ready_server = ThreadingHTTPServer(("127.0.0.1", 0), _LegacyReadyHandler)
+    threading.Thread(target=ready_server.serve_forever, daemon=True).start()
+    address = f"http://127.0.0.1:{int(ready_server.server_address[1])}"
+    paths = WorkspacePaths.resolve(workspace)
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=2.0)
+    plan = LaunchPlan(
+        component="backend",
+        command=(),
+        cwd=workspace,
+        environment={},
+        generation="legacy-backend",
+        log_path=paths.logs / "legacy-backend.log",
+        address=address,
+        ready_url=f"{address}/api/v1/health",
+        metadata={"runtimeMode": "normal", "domainMode": "local"},
+    )
+    host._processes["backend"] = _RunningProcess()
+    try:
+        package_mounts = host._wait_backend_ready(plan)
+        assert package_mounts["schemaVersion"] == "workspace-package-mounts/v1"
+        assert WorkspaceHost._component_is_ready(
+            "backend",
+            {"address": address},
+        )
+    finally:
+        host._processes.pop("backend", None)
+        host.close()
+        ready_server.shutdown()
+        ready_server.server_close()
+
+
+def test_backend_failed_readiness_stops_without_waiting_for_timeout(
+    workspace: Path,
+) -> None:
+    """Backend 明确报告 failed 时 Host 必须立即失败而不是耗尽总超时。
+
+    参数：``workspace`` 提供隔离 Host 状态。返回：无；断言稳定错误和进程所有权
+    被撤销。异常：失败状态仍被当作 starting 轮询时测试超时或断言失败。
+    """
+
+    ready_server = ThreadingHTTPServer(("127.0.0.1", 0), _FailedReadyHandler)
+    threading.Thread(target=ready_server.serve_forever, daemon=True).start()
+    address = f"http://127.0.0.1:{int(ready_server.server_address[1])}"
+    paths = WorkspacePaths.resolve(workspace)
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=10.0)
+    plan = LaunchPlan(
+        component="backend",
+        command=(),
+        cwd=workspace,
+        environment={},
+        generation="failed-backend",
+        log_path=paths.logs / "failed-backend.log",
+        address=address,
+        ready_url=f"{address}/api/v1/readiness",
+        metadata={"runtimeMode": "normal", "domainMode": "local"},
+    )
+    host._processes["backend"] = _RunningProcess()
+    try:
+        with pytest.raises(WorkspaceHostError) as caught:
+            host._wait_backend_ready(plan)
+        assert caught.value.code == "backend_readiness_failed"
+        assert "backend" not in host._processes
+    finally:
+        host._processes.pop("backend", None)
         host.close()
         ready_server.shutdown()
         ready_server.server_close()
@@ -1243,7 +1321,7 @@ def test_host_restart_adopts_a_ready_backend_without_stopping_it(
             generation="adopted-generation",
             log_path=paths.logs / "adopted.log",
             address=f"http://127.0.0.1:{ready_port}",
-            ready_url=f"http://127.0.0.1:{ready_port}/api/v1/health",
+            ready_url=f"http://127.0.0.1:{ready_port}/api/v1/readiness",
             metadata={"runtimeMode": "normal"},
         )
 
@@ -1303,7 +1381,7 @@ def test_backend_crash_is_supervised_into_a_new_process_generation(
             generation=f"backend-generation-{launches}",
             log_path=paths.logs / f"backend-{launches}.log",
             address=f"http://127.0.0.1:{ready_port}",
-            ready_url=f"http://127.0.0.1:{ready_port}/api/v1/health",
+            ready_url=f"http://127.0.0.1:{ready_port}/api/v1/readiness",
             metadata={
                 "runtimeMode": "normal",
                 "domainMode": "local",
@@ -1415,7 +1493,13 @@ def _argument_value(command: tuple[str, ...], name: str) -> str:
 
 class _ReadyHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path == "/api/v1/health":
+        if self.path == "/api/v1/readiness":
+            payload: object = {
+                "status": "ready",
+                "phase": "ready",
+                "workflowProgress": {"loaded": 1, "total": 1},
+            }
+        elif self.path == "/api/v1/health":
             payload: object = {"status": "ok"}
         elif self.path.startswith("/api/v1/workflow-node-templates?"):
             payload = {
@@ -1453,6 +1537,40 @@ class _ReadyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
+
+
+class _LegacyReadyHandler(_ReadyHandler):
+    def do_GET(self) -> None:
+        if self.path == "/api/v1/readiness":
+            self.send_response(404)
+            self.end_headers()
+            return
+        super().do_GET()
+
+
+class _FailedReadyHandler(_ReadyHandler):
+    def do_GET(self) -> None:
+        if self.path == "/api/v1/readiness":
+            body = json.dumps(
+                {
+                    "status": "failed",
+                    "phase": "failed",
+                    "workflowProgress": {"loaded": 1, "total": 2},
+                    "error": {"code": "workflow_runtime_start_failed"},
+                }
+            ).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+
+class _RunningProcess:
+    def poll(self) -> None:
+        return None
 
 
 class _BackendWithoutEdgeHandler(_ReadyHandler):

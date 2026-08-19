@@ -197,6 +197,92 @@ def test_catalog_generation_change_recompiles_unchanged_workspace_source(
     )
 
 
+def test_workspace_activation_reuses_fresh_compilation_for_apply(
+    tmp_path: Path,
+) -> None:
+    """启动激活的 Apply 不得重编译同一启动事务刚签发的候选。
+
+    参数：``tmp_path`` 隔离两个登记来源与 SQLite。返回：无；激活
+    每个来源只编译一次。异常：如果 Apply 仍二次编译，编译调用
+    断言保持 RED。
+    """
+
+    package_root = tmp_path / "workspace"
+    _write_parent_before_child_package(package_root)
+    compiler = MutableCatalogCompiler()
+    service = composition.compose_workflow_runtime(
+        tmp_path / "runtime",
+        compiler=compiler,
+        editable_package_roots=(package_root,),
+        start_source_monitor=False,
+    )
+
+    compiler.compile_calls.clear()
+    progress: list[tuple[int, int]] = []
+    service.activate_registered_sources_to_fixed_point(
+        progress_callback=lambda loaded, total: progress.append((loaded, total))
+    )
+
+    assert [workflow_uuid for workflow_uuid, _ in compiler.compile_calls] == [
+        PARENT_WORKFLOW_UUID,
+        CHILD_WORKFLOW_UUID,
+    ]
+    assert service.get_authoring(PARENT_WORKFLOW_UUID)["state"] == "applied"
+    assert service.get_authoring(CHILD_WORKFLOW_UUID)["state"] == "applied"
+    assert progress == [(0, 2), (1, 2), (2, 2)]
+
+
+def test_workspace_activation_reuse_still_rechecks_source_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动候选复用仍必须在提交前拒绝已改变的作者源码。
+
+    参数：``tmp_path`` 隔离来源与 SQLite；``monkeypatch`` 在候选
+    编译完成后、Apply 取锁前修改文件。返回：无；断言仍以稳定的
+    ``draft_hash_conflict`` 关闭失败。异常：若复用路径跳过源码权威
+    复核，冲突断言保持 RED。
+    """
+
+    package_root = tmp_path / "workspace"
+    _write_parent_before_child_package(package_root)
+    service = composition.compose_workflow_runtime(
+        tmp_path / "runtime",
+        compiler=MutableCatalogCompiler(),
+        editable_package_roots=(package_root,),
+        start_source_monitor=False,
+    )
+    parent_source = package_root / "cold_start_lab/workflows/single_sample.py"
+    original_apply = service.apply_authoring
+    mutated = False
+
+    def mutate_before_apply(
+        workflow_uuid: str,
+        *,
+        candidate_hash: str,
+        preserve_author_source: bool = False,
+    ) -> dict[str, Any]:
+        nonlocal mutated
+        if workflow_uuid == PARENT_WORKFLOW_UUID and not mutated:
+            mutated = True
+            parent_source.write_text(
+                parent_source.read_text(encoding="utf-8") + "# changed\n",
+                encoding="utf-8",
+            )
+        return original_apply(
+            workflow_uuid,
+            candidate_hash=candidate_hash,
+            preserve_author_source=preserve_author_source,
+        )
+
+    monkeypatch.setattr(service, "apply_authoring", mutate_before_apply)
+
+    with pytest.raises(WorkflowConflict) as captured:
+        service.activate_registered_sources_to_fixed_point()
+
+    assert captured.value.code == "draft_hash_conflict"
+
+
 def test_workspace_activation_isolates_invalid_candidate_and_keeps_progressing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -350,15 +436,15 @@ def test_workspace_activation_fails_closed_after_catalog_rebuild_warning(
     assert captured.value.code == "template_catalog_unavailable"
 
 
-def test_workspace_activation_fails_closed_after_dependent_refresh_warning(
+def test_workspace_activation_fails_closed_when_batch_catalog_rebuild_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """自动应用提交后的父/子依赖重编译失败不得被 warning 隔离成 ready。
+    """批量自动应用后的目录重建失败不得被隔离成工作区 ready。
 
-    参数：``tmp_path`` 隔离来源与 SQLite；``monkeypatch`` 让首次恢复保持原状，
-    再只在已提交 Apply 的依赖刷新阶段注入失败。返回：无；固定点把真实刷新
-    warning 升级为目录不可用。异常：若 Apply 结果 warning 未被检查则保持 RED。
+    参数：``tmp_path`` 隔离来源与 SQLite；``monkeypatch`` 在候选批量提交后的
+    唯一目录发布接缝注入失败。返回：无；固定点传播稳定目录不可用错误。
+    异常：若目录重建失败被吞掉并误报 ready，本测试保持 RED。
     """
 
     package_root = tmp_path / "workspace"
@@ -369,30 +455,13 @@ def test_workspace_activation_fails_closed_after_dependent_refresh_warning(
         editable_package_roots=(package_root,),
         start_source_monitor=False,
     )
-    original_reconcile = service.reconcile_registered_source
+    def fail_catalog_rebuild() -> None:
+        raise WorkflowError("template_catalog_unavailable")
 
-    def skip_recovery(*, preserve_author_source: bool = False) -> None:
-        del preserve_author_source
-
-    def fail_dependent_refresh(
-        workflow_uuid: str,
-        *,
-        force_compile: bool = False,
-        preserve_author_source: bool = False,
-    ) -> dict[str, Any]:
-        if workflow_uuid == CHILD_WORKFLOW_UUID and force_compile:
-            raise RuntimeError("依赖来源无法按新目录重编译")
-        return original_reconcile(
-            workflow_uuid,
-            force_compile=force_compile,
-            preserve_author_source=preserve_author_source,
-        )
-
-    monkeypatch.setattr(service, "recover_registered_sources", skip_recovery)
     monkeypatch.setattr(
         service,
-        "reconcile_registered_source",
-        fail_dependent_refresh,
+        "_rebuild_workspace_activation_catalog",
+        fail_catalog_rebuild,
     )
 
     with pytest.raises(WorkflowError) as captured:
