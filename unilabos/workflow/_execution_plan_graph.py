@@ -237,6 +237,7 @@ class ExecutionPlanGraphNormalizer:
                         handle_uuid=self._mapped_handle(
                             target, "target_handle_uuid", handles
                         ),
+                        handles=handles,
                         binding=binding,
                     )
 
@@ -326,6 +327,7 @@ class ExecutionPlanGraphNormalizer:
                         binding_overrides=binding_overrides,
                         node_uuid=str(edge.get("target_node_uuid") or ""),
                         handle_uuid=str(edge.get("target_handle_uuid") or ""),
+                        handles=handles,
                         binding=invocation_bindings[input_handle_uuid],
                     )
                 elif len(providers) != 1:
@@ -386,9 +388,24 @@ class ExecutionPlanGraphNormalizer:
         binding_overrides: dict[str, dict[str, dict[str, str]]],
         node_uuid: str,
         handle_uuid: str,
+        handles: Mapping[str, Mapping[str, Any]],
         binding: Mapping[str, Any],
     ) -> None:
-        """把一个顶层工作流输入绑定投影到下一层边界或叶动作。"""
+        """把一个顶层工作流输入绑定投影到下一层边界或叶动作。
+
+        ``ready`` 是编排连接点，不是设备动作参数。组合调用的物料透传会同时
+        产生完成依赖边与顶层输入绑定；前者必须保留先后关系，后者若写进
+        ``ready`` 则会以额外字段污染最终动作参数并被规范 Schema 拒绝。
+        """
+
+        handle = handles.get(handle_uuid)
+        if not isinstance(handle, Mapping):
+            raise ExecutionPlanBuildError(
+                "composite_boundary_mapping_invalid",
+                "组合工作流输入绑定引用快照外连接点",
+            )
+        if str(handle.get("handle_key") or "").strip().lower() == "ready":
+            return
 
         parameter = str(binding.get("parameter") or "")
         if not parameter:
@@ -555,6 +572,10 @@ class ExecutionPlanGraphNormalizer:
                 "composite_boundary_mapping_invalid",
                 "组合工作流静态透传引用快照外连接点",
             )
+        # ``ready`` 只承载 DAG 顺序，不能成为执行器收到的动作参数。真正的
+        # 上游完成关系由 rewired dependency-only 边表达。
+        if str(handle.get("handle_key") or "").strip().lower() == "ready":
+            return
         data_key = final_target_data_key(handle_data_key(handle))
         if not data_key:
             raise ExecutionPlanBuildError(

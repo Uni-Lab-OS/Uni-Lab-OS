@@ -857,3 +857,33 @@ def test_nested_composite_workflow_input_binds_leaf_job() -> None:
 
     assert prepared.resolved_input == {"value": 9}
     assert prepared.jobs[0]["param"] == {"value": 9}
+
+
+def test_composite_ready_target_does_not_leak_into_action_params() -> None:
+    """顶层物料绑定映射到 ready 时只保留顺序语义，不污染动作参数。"""
+
+    for invocation in (_composite_node(), _composite_node(static_value=7)):
+        if not invocation["param"]:
+            invocation["meta_data"]["unilab"]["input_bindings"] = {
+                INVOCATION_TARGET: {"parameter": "value"}
+            }
+        invocation["meta_data"]["unilab"]["composite"]["target_mappings"] = {
+            INVOCATION_TARGET: [
+                {
+                    "workflow_node_uuid": INTERNAL_UUID,
+                    "target_handle_uuid": INTERNAL_READY_TARGET,
+                }
+            ]
+        }
+        leaf = _node(INTERNAL_UUID, INTERNAL_TEMPLATE)
+
+        _edges, params, bindings = (
+            ExecutionPlanGraphNormalizer().flatten_composite_edges(
+                nodes={INVOCATION_UUID: invocation, INTERNAL_UUID: leaf},
+                edges=[],
+                handles={handle["uuid"]: handle for handle in _handles()},
+            )
+        )
+
+        assert params == {}
+        assert bindings == {}
