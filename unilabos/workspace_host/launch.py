@@ -226,7 +226,6 @@ def resolve_edge_launch(
     runtime_directory = paths.runtime / "edge" / generation
     runtime_directory.mkdir(parents=True, exist_ok=False)
     ready_file = runtime_directory / "ready.json"
-    baseline_file = runtime_directory / "runtime-baseline.json"
     mode = str(metadata.get("runtimeMode") or "normal")
     external_devices_only = metadata.get("externalDevicesOnly", True)
     if not isinstance(external_devices_only, bool):
@@ -295,7 +294,6 @@ def resolve_edge_launch(
             "UNILABOS_WORKBENCH_RUNTIME_MODE": mode,
             "UNILABOS_WORKBENCH_PROCESS_ROLE": "edge_runtime",
             "UNILABOS_EDGE_READY_FILE": str(ready_file),
-            "UNILABOS_WORKBENCH_BASELINE_FILE": str(baseline_file),
             # Isolate DDS discovery per Workspace.  Leaving Edge on domain 0
             # makes HostNode discover devices from unrelated laboratories
             # running on the same machine and then attempt to register their
@@ -316,8 +314,6 @@ def resolve_edge_launch(
         _write_dry_run_edge_graph(
             Path(str(metadata["validatedGraphPath"])), edge_graph
         )
-    edge_graph_fingerprint = _sha256(edge_graph)
-    environment["UNILABOS_WORKBENCH_GRAPH_FINGERPRINT"] = edge_graph_fingerprint
     command = (
         sys.executable,
         "-m",
@@ -366,8 +362,6 @@ def resolve_edge_launch(
             "protocolStatePath": str(state_db),
             "runtimeDirectory": str(runtime_directory),
             "readyFilePath": str(ready_file),
-            "baselineFilePath": str(baseline_file),
-            "graphFingerprint": edge_graph_fingerprint,
         },
     )
 

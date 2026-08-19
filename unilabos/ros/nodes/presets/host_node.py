@@ -95,10 +95,7 @@ from unilabos.ros.nodes.presets.controller_node import ControllerNode
 from unilabos.utils import logger
 from unilabos.utils.exception import DeviceClassInvalid
 from unilabos.utils.log import warning
-from unilabos.utils.type_check import (
-    device_result_declares_failure,
-    serialize_result_info,
-)
+from unilabos.utils.type_check import serialize_result_info
 from unilabos.config.config import BasicConfig
 
 if TYPE_CHECKING:
@@ -1520,7 +1517,7 @@ class HostNode(BaseROS2DeviceNode):
                                 )
                                 return_info["samples"] = unilabos_samples
                         suc = return_info.get("suc", False)
-                        if not suc or device_result_declares_failure(return_info):
+                        if not suc:
                             status = "failed"
                     except json.JSONDecodeError:
                         status = "failed"
