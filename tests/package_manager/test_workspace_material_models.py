@@ -197,6 +197,71 @@ class VirtualDevice:
     assert catalog.read_asset(virtual_model["path"]).content == b"<robot/>"
 
 
+def test_workspace_model_catalog_projects_named_model_reference_selector(
+    tmp_path: Path,
+) -> None:
+    """命名引用可以在共享 GLB 上附加模板自己的只读子树选择器。"""
+
+    root = tmp_path / "workspace"
+    package = root / "factory_lab"
+    declaration = package / "devices.py"
+    model_entry = package / "models" / "factory.glb"
+    model_entry.parent.mkdir(parents=True)
+    package.joinpath("__init__.py").write_text("", encoding="utf-8")
+    declaration.write_text(
+        '''from unilabos.registry.decorators import device
+
+
+@device(
+    id="factory_scene",
+    model={"format": "glb", "entry": "models/factory.glb"},
+)
+class FactoryScene:
+    pass
+
+
+@device(
+    id="station_a",
+    model={
+        "$ref": "factory_scene",
+        "selector": {
+            "kind": "gltf_subtree",
+            "node_index": 7,
+            "node_path": "CELL/STATION_A",
+            "root_transform": "reset_translation",
+            "exclude_node_paths": ["CELL/STATION_A/MOVABLE_ITEM"],
+        },
+    },
+)
+class StationA:
+    pass
+''',
+        encoding="utf-8",
+    )
+    model_entry.write_bytes(b"glTF")
+    root.joinpath("pyproject.toml").write_text(
+        '[project]\nname = "factory-lab"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    plan = compile_workspace_startup(WorkspaceSource(root))
+    package_catalog = compile_package_source(plan.source, startup_plan=plan)
+
+    catalog = compile_workspace_material_models(plan, package_catalog)
+
+    shared = catalog.models_by_template["community.factory_lab.factory_scene"]
+    selected = catalog.models_by_template["community.factory_lab.station_a"]
+    assert selected["path"] == shared["path"]
+    assert selected["format"] == "glb"
+    assert selected["selector"] == {
+        "kind": "gltf_subtree",
+        "node_index": 7,
+        "node_path": "CELL/STATION_A",
+        "root_transform": "reset_translation",
+        "exclude_node_paths": ["CELL/STATION_A/MOVABLE_ITEM"],
+    }
+    assert "selector" not in shared
+
+
 def test_workspace_model_catalog_rejects_assets_outside_declared_model_root(
     tmp_path: Path,
 ) -> None:

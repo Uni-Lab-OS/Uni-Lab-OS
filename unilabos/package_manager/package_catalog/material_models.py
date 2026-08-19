@@ -126,6 +126,7 @@ def compile_workspace_material_models(
     models_by_template: dict[str, Mapping[str, Any]] = {}
     model_definitions: dict[str, Mapping[str, Any]] = {}
     model_references: dict[str, str] = {}
+    model_reference_overlays: dict[str, Mapping[str, Any]] = {}
     allowed_roots: set[PurePosixPath] = set()
     for raw_definition in definitions:
         if not isinstance(raw_definition, Mapping):
@@ -143,12 +144,27 @@ def compile_workspace_material_models(
             raise ValueError(f"工作区模型资源模板身份重复: {template_id}")
         model_definitions[template_id] = raw_definition
         if model_reference is not None:
-            if entry is not None or model_format is not None or set(model) != {"$ref"}:
-                raise ValueError("工作区命名模型引用不能同时声明其他模型字段")
+            if entry is not None or model_format is not None:
+                raise ValueError("工作区命名模型引用不能同时声明模型入口或格式")
+            unsupported = set(model) - {"$ref", "selector"}
+            if unsupported:
+                raise ValueError(
+                    "工作区命名模型引用只允许附加 selector: "
+                    + ", ".join(sorted(str(key) for key in unsupported))
+                )
             model_references[template_id] = _required_text(
                 model_reference,
                 "工作区命名模型引用",
             )
+            if model.get("selector") is not None:
+                model_reference_overlays[template_id] = MappingProxyType(
+                    {
+                        "selector": _json_value(
+                            model["selector"],
+                            "model.selector",
+                        )
+                    }
+                )
             continue
         declaration_file = _workspace_declaration_file(startup_plan, raw_definition)
         if declaration_file is None:
@@ -173,6 +189,7 @@ def compile_workspace_material_models(
             "rotation",
             "scale",
             "model_origin",
+            "selector",
         ):
             if model.get(key) is not None:
                 projected_model[key] = _json_value(model[key], f"model.{key}")
@@ -206,6 +223,9 @@ def compile_workspace_material_models(
             projected = project_named_reference(target_id)
         finally:
             resolving.remove(template_id)
+        overlay = model_reference_overlays.get(template_id)
+        if overlay:
+            projected = MappingProxyType({**dict(projected), **dict(overlay)})
         models_by_template[template_id] = projected
         return projected
 
