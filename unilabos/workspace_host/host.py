@@ -889,7 +889,20 @@ class WorkspaceHost:
         if not plan.address:
             raise WorkspaceHostError("backend_start_failed", "Backend 地址缺失")
         deadline = time.monotonic() + self.readiness_timeout
-        probes = [("/api/v1/readiness", _readiness_ready)]
+        readiness_payload = self._wait_backend_payload(
+            plan,
+            "/api/v1/readiness",
+            _readiness_ready,
+            deadline=deadline,
+            allow_not_found=True,
+        )
+        # 旧 Backend 没有独立 readiness 端点时，退回原有的完整探针组合；只在
+        # 明确 404 时兼容，不能把新 Backend 的 starting/failed 误当成 ready。
+        probes = (
+            [("/api/v1/health", _health_ready)]
+            if readiness_payload is None
+            else []
+        )
         if plan.metadata.get("domainMode") != "backend":
             probes.extend(
                 [
@@ -910,6 +923,7 @@ class WorkspaceHost:
             _package_mounts_ready,
             deadline=deadline,
         )
+        assert payload is not None
         data = payload.get("data")
         assert isinstance(data, dict)
         return data
@@ -921,7 +935,8 @@ class WorkspaceHost:
         accepts: Callable[[dict[str, object]], bool],
         *,
         deadline: float,
-    ) -> dict[str, object]:
+        allow_not_found: bool = False,
+    ) -> dict[str, object] | None:
         while time.monotonic() < deadline:
             with self._lock:
                 process = self._processes.get(plan.component)
@@ -944,9 +959,17 @@ class WorkspaceHost:
                     payload = None
             except (OSError, ValueError, URLError):
                 payload = None
+            if allow_not_found and status == HTTPStatus.NOT_FOUND:
+                return None
             if isinstance(payload, dict):
                 if path == "/api/v1/readiness":
                     self._record_backend_readiness_progress(plan, payload)
+                    if payload.get("status") == "failed":
+                        self._stop_component(plan.component)
+                        raise WorkspaceHostError(
+                            "backend_readiness_failed",
+                            "Backend 工作流运行时初始化失败；请查看 backend.log",
+                        )
                 if status == 200 and accepts(payload):
                     return payload
             time.sleep(0.2)
@@ -1968,17 +1991,36 @@ class WorkspaceHost:
         address = component.get("address")
         if not isinstance(address, str) or not address:
             return name == "renderer"
-        path = (
-            "/api/v1/readiness"
-            if name == "backend"
-            else "/" if name == "renderer" else "/api/state"
-        )
-        try:
-            with urlopen(f"{address}{path}", timeout=0.5) as response:
-                response.read()
-            return response.status == 200
-        except (OSError, URLError):
-            return False
+        if name != "backend":
+            path = "/" if name == "renderer" else "/api/state"
+            try:
+                with urlopen(f"{address}{path}", timeout=0.5) as response:
+                    response.read()
+                return response.status == 200
+            except (OSError, URLError):
+                return False
+        for path, accepts in (
+            ("/api/v1/readiness", _readiness_ready),
+            ("/api/v1/health", _health_ready),
+        ):
+            try:
+                with urlopen(f"{address}{path}", timeout=0.5) as response:
+                    payload = json.loads(response.read())
+                return (
+                    response.status == 200
+                    and isinstance(payload, dict)
+                    and accepts(payload)
+                )
+            except HTTPError as response_error:
+                if (
+                    path == "/api/v1/readiness"
+                    and response_error.code == HTTPStatus.NOT_FOUND
+                ):
+                    continue
+                return False
+            except (OSError, ValueError, URLError):
+                return False
+        return False
 
 
 def _handler_type(host: WorkspaceHost) -> type[BaseHTTPRequestHandler]:
@@ -2091,6 +2133,10 @@ def _required_text(payload: dict[str, object], field: str) -> str:
 
 def _readiness_ready(payload: dict[str, object]) -> bool:
     return payload.get("status") == "ready"
+
+
+def _health_ready(payload: dict[str, object]) -> bool:
+    return payload.get("status") == "ok"
 
 
 def _successful_envelope(payload: dict[str, object]) -> bool:

@@ -136,12 +136,19 @@ async def workflow_runtime_starting_handler(
 
     with _workflow_runtime_lock:
         phase = workflow_runtime_phase
+    failed = phase == "failed"
     return JSONResponse(
         status_code=503,
         content={
-            "status": "starting",
+            "status": "failed" if failed else "starting",
             "phase": phase,
-            "error": {"code": "workflow_runtime_not_ready"},
+            "error": {
+                "code": (
+                    "workflow_runtime_start_failed"
+                    if failed
+                    else "workflow_runtime_not_ready"
+                )
+            },
         },
         headers={"Retry-After": "1"},
     )
@@ -584,9 +591,9 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     try:
         initialize_deferred_workflow_runtime()
     except Exception:
-        server.should_exit = True
-        server_thread.join(timeout=5)
-        raise
+        # readiness 已原子发布 failed；继续保留 health、诊断、设备等无关接口，
+        # 由需要完整工作流合同的 Workspace Host 决定是否终止托管进程。
+        pass
 
     # info("[Web] Server started, monitoring for restart requests...")
 

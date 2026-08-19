@@ -357,6 +357,9 @@ class WorkflowService:
         # 冷启动单线程批次提交期间暂缓逐项目录重建；这是服务内部生命周期状态，
         # 不暴露到公共 Apply API，避免调用方绕开每次交互应用后的目录一致性刷新。
         self._workspace_activation_batch = False
+        # 自动激活候选由当前线程刚刚编译并持久化；线程本地授权让
+        # Apply 复用这个编译事实，同时保持交互 Apply 的独立重编译复核。
+        self._workspace_activation_context = threading.local()
         # ``_catalog_generation_tracker`` 隐藏本进程目录编译基线、变化判定和源码
         # 观测签名组合；工作流服务只在编译事务接缝提交已验证指纹。
         self._catalog_generation_tracker = CatalogAuthoringGenerationTracker()
@@ -1405,10 +1408,9 @@ class WorkflowService:
                     if not isinstance(candidate_hash, str) or not candidate_hash:
                         raise WorkflowError("candidate_invalid")
                     try:
-                        result = self.apply_authoring(
+                        result = self._apply_workspace_activation_candidate(
                             workflow_uuid,
                             candidate_hash=candidate_hash,
-                            preserve_author_source=True,
                         )
                     except WorkflowError as error:
                         if error.code not in _ISOLATED_WORKSPACE_ACTIVATION_ERRORS:
@@ -1430,6 +1432,38 @@ class WorkflowService:
             self._rebuild_workspace_activation_catalog()
             for result in deferred_results:
                 self._require_workspace_activation_apply_complete(result)
+
+    def _apply_workspace_activation_candidate(
+        self,
+        workflow_uuid: str,
+        *,
+        candidate_hash: str,
+    ) -> Dict[str, Any]:
+        """应用同一启动线程刚签发的候选并复用其编译结果。
+
+        参数：``workflow_uuid`` 与 ``candidate_hash`` 精确标识待应用候选。
+        返回：与公共 Apply 相同的结果。异常：公共 Apply 的所有权威冲突和
+        持久化错误均原样传播；授权只在当前线程的本次调用期间有效。
+        """
+
+        key = (workflow_uuid, candidate_hash)
+        previous = getattr(
+            self._workspace_activation_context,
+            "prevalidated_candidate",
+            None,
+        )
+        self._workspace_activation_context.prevalidated_candidate = key
+        try:
+            return self.apply_authoring(
+                workflow_uuid,
+                candidate_hash=candidate_hash,
+                preserve_author_source=True,
+            )
+        finally:
+            if previous is None:
+                del self._workspace_activation_context.prevalidated_candidate
+            else:
+                self._workspace_activation_context.prevalidated_candidate = previous
 
     def _workspace_activation_layers(
         self,
@@ -2024,48 +2058,54 @@ class WorkflowService:
             if self._catalog_fingerprint() != expected_catalog_fingerprint:
                 raise WorkflowConflict("template_catalog_conflict")
 
-            applied_graph = self.get_graph(workflow_uuid)
-            compilation = self._compile(
-                workflow=workflow,
-                graph=applied_graph,
-                registration=registration,
-                python_source=source["python_source"],
+            prevalidated_candidate = getattr(
+                self._workspace_activation_context,
+                "prevalidated_candidate",
+                None,
             )
-            if preserve_author_source:
-                compilation = self._preserve_author_source_compilation(
-                    compilation=compilation,
+            if prevalidated_candidate != (workflow_uuid, candidate_hash):
+                applied_graph = self.get_graph(workflow_uuid)
+                compilation = self._compile(
                     workflow=workflow,
                     graph=applied_graph,
+                    registration=registration,
                     python_source=source["python_source"],
                 )
-            if not self._normalize_candidate_diagnostics(
-                compilation,
-                python_source=source["python_source"],
-            ):
-                raise WorkflowError("candidate_invalid")
-            if not compilation.valid:
-                if any(
-                    str(item.get("severity", "")).lower() == "error"
-                    for item in compilation.diagnostics
+                if preserve_author_source:
+                    compilation = self._preserve_author_source_compilation(
+                        compilation=compilation,
+                        workflow=workflow,
+                        graph=applied_graph,
+                        python_source=source["python_source"],
+                    )
+                if not self._normalize_candidate_diagnostics(
+                    compilation,
+                    python_source=source["python_source"],
                 ):
-                    raise WorkflowError("draft_invalid")
-                raise WorkflowError("candidate_invalid")
-            revalidated = self._issue_candidate(
-                workflow_revision=workflow["revision"],
-                draft_hash=source["draft_hash"],
-                compilation=compilation,
-                applied_graph=applied_graph,
-                draft_python_source=source["python_source"],
-            )
-            if revalidated is None:
-                raise WorkflowError("candidate_invalid")
-            if (
-                revalidated["template_catalog_fingerprint"]
-                != expected_catalog_fingerprint
-            ):
-                raise WorkflowConflict("template_catalog_conflict")
-            if revalidated["candidate_hash"] != candidate_hash:
-                raise WorkflowConflict("candidate_hash_conflict")
+                    raise WorkflowError("candidate_invalid")
+                if not compilation.valid:
+                    if any(
+                        str(item.get("severity", "")).lower() == "error"
+                        for item in compilation.diagnostics
+                    ):
+                        raise WorkflowError("draft_invalid")
+                    raise WorkflowError("candidate_invalid")
+                revalidated = self._issue_candidate(
+                    workflow_revision=workflow["revision"],
+                    draft_hash=source["draft_hash"],
+                    compilation=compilation,
+                    applied_graph=applied_graph,
+                    draft_python_source=source["python_source"],
+                )
+                if revalidated is None:
+                    raise WorkflowError("candidate_invalid")
+                if (
+                    revalidated["template_catalog_fingerprint"]
+                    != expected_catalog_fingerprint
+                ):
+                    raise WorkflowConflict("template_catalog_conflict")
+                if revalidated["candidate_hash"] != candidate_hash:
+                    raise WorkflowConflict("candidate_hash_conflict")
 
             def validate_authoring_authorities(
                 linearized_draft_hash: str,
