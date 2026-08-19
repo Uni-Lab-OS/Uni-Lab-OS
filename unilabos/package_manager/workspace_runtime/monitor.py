@@ -33,6 +33,7 @@ _IGNORED_DIRECTORIES = frozenset(
         "migration",
         "node_modules",
         "unilabos_data",
+        "var",
         "venv",
     )
 )

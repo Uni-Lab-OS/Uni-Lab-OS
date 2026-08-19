@@ -126,6 +126,8 @@ def test_monitor_excludes_runtime_build_and_environment_outputs_but_keeps_assets
         workspace_root / "e2e-artifacts" / "acceptance.png",
         workspace_root / "migration" / "historical-source.yaml",
         workspace_root / "node_modules" / "index.js",
+        workspace_root / "eit_ptlc" / "var" / "recordings" / "chunk_000001.ptc",
+        workspace_root / "eit_ptlc" / "var" / "recordings" / "index.db-wal",
     )
     for ignored_file in ignored_files:
         ignored_file.parent.mkdir(parents=True, exist_ok=True)
