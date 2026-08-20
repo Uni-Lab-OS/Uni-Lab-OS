@@ -764,6 +764,9 @@ def test_authority_switch_back_to_local_preserves_backend_publication_target(
         encoding="utf-8",
     )
     host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    host._assert_authority_idle = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: None
+    )
 
     snapshot = host._dispatch(
         "authority.switch",
@@ -774,6 +777,48 @@ def test_authority_switch_back_to_local_preserves_backend_publication_target(
     assert snapshot["configuration"]["backendUrl"] == "http://127.0.0.1:8080"
     persisted = json.loads(paths.environment.read_text(encoding="utf-8"))
     assert persisted["backendUrl"] == "http://127.0.0.1:8080"
+    host.close()
+
+
+def test_force_authority_switch_skips_target_preflight_but_keeps_committed_mode(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    calls: list[str] = []
+    host._preflight_backend_authority = (  # type: ignore[method-assign]
+        lambda *_args: calls.append("preflight")
+    )
+    host._assert_authority_idle = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: calls.append("idle")
+    )
+    host._components["backend"].update({
+        "phase": "ready",
+        "address": "http://127.0.0.1:18003",
+    })
+    host._stop_component = (  # type: ignore[method-assign]
+        lambda name: calls.append(f"stop:{name}") or {}
+    )
+
+    def fail_backend_start(_parameters: dict[str, object]) -> object:
+        raise RuntimeError("target unavailable")
+
+    host._start_backend = fail_backend_start  # type: ignore[method-assign]
+
+    snapshot = host._dispatch(
+        "authority.switch",
+        {
+            "mode": "backend",
+            "backendUrl": "http://127.0.0.1:8080",
+            "bootstrap": False,
+            "force": True,
+        },
+    )
+
+    assert "preflight" not in calls
+    assert calls[:2] == ["idle", "stop:backend"]
+    assert snapshot["configuration"]["domainMode"] == "backend"
     host.close()
 
 

@@ -119,6 +119,9 @@ class WorkspaceReleasePublisher:
                 "WorkspaceRelease 回读校验失败",
                 details={"diagnostics": list(verification.diagnostics)},
             )
+        finalize = getattr(self.target, "finalize", None)
+        if callable(finalize):
+            finalize(plan, result)
         receipt = {
             "schemaVersion": "unilab-workspace-deployment/v1",
             "releaseId": release.release_id,
@@ -283,7 +286,7 @@ def _embed_release_material_shapes(
         template["model"] = model
 
 class ExistingBackendDeploymentTarget:
-    """First-stage Adapter for a dedicated/clean existing Go Backend."""
+    """Replace Workspace-owned definitions through existing Backend APIs."""
 
     def __init__(
         self,
@@ -293,6 +296,7 @@ class ExistingBackendDeploymentTarget:
         session: requests.Session | None = None,
         timeout: float = 30.0,
         before_workflows: Callable[[], None] | None = None,
+        replace_existing: bool = False,
     ) -> None:
         self.target_api = _api_base(target_address)
         self.target_address = self.target_api.removesuffix("/api/v1")
@@ -304,15 +308,37 @@ class ExistingBackendDeploymentTarget:
         self.session = session or requests.Session()
         self.timeout = timeout
         self.before_workflows = before_workflows
+        self.replace_existing = replace_existing
+        self._previous_workflow_ids: tuple[str, ...] = ()
+        self._previous_managed_materials: dict[str, Mapping[str, Any]] = {}
 
     def plan(self, release: WorkspaceRelease) -> DeploymentPlan:
         material_nodes = _material_nodes(release.material_graph)
-        if self._paged("/materials", with_children="true"):
+        materials = self._all_target_materials()
+        workflows = self._paged("/workflows")
+        if self.replace_existing:
+            active_count = self._active_workflow_task_count()
+            if active_count:
+                raise WorkspaceHostError(
+                    "release_target_busy",
+                    f"目标 Backend 仍有 {active_count} 个活动任务；"
+                    "任务结束后才能替换定义",
+                    details={"activeTaskCount": active_count},
+                )
+            self._previous_workflow_ids = tuple(
+                _required_identity(item, "workflow") for item in workflows
+            )
+            self._previous_managed_materials = {
+                _required_identity(item, "material"): item
+                for item in materials
+                if _mapping_or_empty(item.get("meta_data")).get("unilab_release")
+            }
+        elif materials:
             raise WorkspaceHostError(
                 "release_target_not_clean",
                 "首阶段发布只允许专用空 Backend；目标已存在 Material",
             )
-        if self._paged("/workflows"):
+        if not self.replace_existing and workflows:
             raise WorkspaceHostError(
                 "release_target_not_clean",
                 "首阶段发布只允许专用空 Backend；目标已存在 Workflow",
@@ -330,6 +356,29 @@ class ExistingBackendDeploymentTarget:
             material_count=len(material_nodes),
             workflow_count=len(release.workflows),
         )
+
+    def _active_workflow_task_count(self) -> int:
+        total = 0
+        for status in ("pending", "admission_blocked", "running", "canceling"):
+            payload = self._request(
+                "GET",
+                "/workflow-tasks",
+                params={"page": 1, "page_size": 1, "status": status},
+            )
+            total += int(payload.get("total") or 0)
+        return total
+
+    def _all_target_materials(self) -> list[dict[str, Any]]:
+        flattened: list[dict[str, Any]] = []
+
+        def append(item: Mapping[str, Any]) -> None:
+            flattened.append(dict(item))
+            for child in _mapping_list(item.get("children")):
+                append(child)
+
+        for root in self._paged("/materials", with_children="true"):
+            append(root)
+        return flattened
 
     def inspect(self) -> dict[str, Any]:
         """Return destructive-reset preflight counts for the target."""
@@ -435,6 +484,41 @@ class ExistingBackendDeploymentTarget:
             material_template_names=prepared.material_template_names,
         )
 
+    def finalize(self, plan: DeploymentPlan, result: DeploymentResult) -> None:
+        """Archive superseded definitions only after the new release verifies."""
+
+        if not self.replace_existing:
+            return
+        current_workflow_ids = set(result.workflow_identities.values())
+        for workflow_uuid in self._previous_workflow_ids:
+            if workflow_uuid not in current_workflow_ids:
+                self._request("DELETE", f"/workflows/{workflow_uuid}")
+
+        current_material_ids = set(result.material_identities.values())
+        for material_uuid in sorted(
+            set(self._previous_managed_materials) - current_material_ids
+        ):
+            detail = self._request("GET", f"/materials/{material_uuid}")
+            metadata = deepcopy(_mapping_or_empty(detail.get("meta_data")))
+            release_metadata = deepcopy(
+                _mapping_or_empty(metadata.get("unilab_release"))
+            )
+            release_metadata["retired"] = True
+            release_metadata["retired_by_release_id"] = plan.release.release_id
+            metadata["unilab_release"] = release_metadata
+            self._request(
+                "PUT",
+                f"/materials/{material_uuid}",
+                json={
+                    "meta_data": metadata,
+                    "expected_revision": int(detail.get("revision") or 0),
+                    "idempotency_key": (
+                        f"unilab-release/{plan.release.release_id}/"
+                        f"{material_uuid}/retire"
+                    ),
+                },
+            )
+
     def _apply_materials(
         self,
         release: WorkspaceRelease,
@@ -458,15 +542,81 @@ class ExistingBackendDeploymentTarget:
                     )
         pending = dict(node_by_uuid)
         identities: dict[str, str] = {}
-        targets_by_barcode: dict[str, Mapping[str, Any]] = {}
+        target_materials = (
+            self._all_target_materials() if self.replace_existing else []
+        )
+        targets_by_barcode: dict[str, Mapping[str, Any]] = {
+            str(item.get("barcode") or ""): item
+            for item in target_materials
+            if str(item.get("barcode") or "")
+        }
+        targets_by_source_uuid: dict[str, Mapping[str, Any]] = {}
+        for item in target_materials:
+            release_metadata = _mapping_or_empty(
+                _mapping_or_empty(item.get("meta_data")).get("unilab_release")
+            )
+            source_uuid = str(release_metadata.get("source_material_uuid") or "")
+            if source_uuid:
+                targets_by_source_uuid[source_uuid] = item
         while pending:
             progressed = False
             for local_uuid, node in list(pending.items()):
                 material = _mapping(node.get("material"), "material")
                 barcode = str(material.get("barcode") or "").strip()
-                existing = targets_by_barcode.get(barcode)
+                existing = targets_by_source_uuid.get(local_uuid) or (
+                    targets_by_barcode.get(barcode) if barcode else None
+                )
                 if existing is not None:
-                    identities[local_uuid] = _required_identity(existing, "material")
+                    target_uuid = _required_identity(existing, "material")
+                    detail = self._request("GET", f"/materials/{target_uuid}")
+                    local_template_uuid = str(
+                        material.get("resource_template_uuid") or ""
+                    )
+                    template_name = material_template_names.get(
+                        local_uuid,
+                        source_template_names.get(local_template_uuid, ""),
+                    )
+                    target_template_uuid = target_templates.get(
+                        str(template_name or "")
+                    )
+                    if str(detail.get("resource_template_uuid") or "") != str(
+                        target_template_uuid or ""
+                    ):
+                        raise WorkspaceHostError(
+                            "release_material_template_change_unsafe",
+                            f"Material {local_uuid} 已有运行状态，不能在同步时更换资源模板",
+                        )
+                    metadata = deepcopy(_mapping_or_empty(detail.get("meta_data")))
+                    metadata.update(
+                        deepcopy(_mapping_or_empty(material.get("meta_data")))
+                    )
+                    metadata["unilab_release"] = {
+                        "release_id": release.release_id,
+                        "source_material_uuid": local_uuid,
+                        "source_workspace": release.source_workspace,
+                        "retired": False,
+                    }
+                    updated = self._request(
+                        "PUT",
+                        f"/materials/{target_uuid}",
+                        json={
+                            "name": material.get("name"),
+                            "description": material.get("description"),
+                            "meta_data": metadata,
+                            "config": deepcopy(
+                                _mapping_or_empty(material.get("config"))
+                            ),
+                            "expected_revision": int(detail.get("revision") or 0),
+                            "idempotency_key": (
+                                f"unilab-release/{release.release_id}/"
+                                f"{local_uuid}/definition"
+                            ),
+                        },
+                    )
+                    identities[local_uuid] = target_uuid
+                    targets_by_source_uuid[local_uuid] = updated
+                    if barcode:
+                        targets_by_barcode[barcode] = updated
                     del pending[local_uuid]
                     progressed = True
                     continue
@@ -489,6 +639,7 @@ class ExistingBackendDeploymentTarget:
                     "release_id": release.release_id,
                     "source_material_uuid": local_uuid,
                     "source_workspace": release.source_workspace,
+                    "retired": False,
                 }
                 body: dict[str, Any] = {
                     "resource_template_uuid": target_template_uuid,
@@ -990,6 +1141,7 @@ def create_existing_backend_publisher(
     session: requests.Session | None = None,
     timeout: float = 30.0,
     before_workflows: Callable[[], None] | None = None,
+    replace_existing: bool = False,
 ) -> WorkspaceReleasePublisher:
     """Create the first-stage existing-Backend Adapter composition."""
 
@@ -1006,6 +1158,7 @@ def create_existing_backend_publisher(
         session=shared_session,
         timeout=timeout,
         before_workflows=before_workflows,
+        replace_existing=replace_existing,
     )
     return WorkspaceReleasePublisher(
         builder,

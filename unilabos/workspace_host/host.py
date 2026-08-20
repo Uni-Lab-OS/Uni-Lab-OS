@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from unilabos.app.edge_control.addressing import (
@@ -52,6 +52,12 @@ _STOP_TIMEOUT_SECONDS = 10.0
 _READINESS_TIMEOUT_SECONDS = 90.0
 _MAX_BODY_BYTES = 1024 * 1024
 _SUPERVISED_COMPONENTS = frozenset({"backend", "edge", "plc"})
+_ACTIVE_WORKFLOW_TASK_STATUSES = (
+    "pending",
+    "admission_blocked",
+    "running",
+    "canceling",
+)
 
 
 class WorkspaceHost:
@@ -1037,6 +1043,11 @@ class WorkspaceHost:
                 "domain_mode_invalid", "Authority mode 必须是 local 或 backend"
             )
         backend_url = _optional_text(parameters.get("backendUrl"))
+        force = parameters.get("force", False)
+        if not isinstance(force, bool):
+            raise WorkspaceHostError(
+                "authority_parameters_invalid", "Authority force 必须是 boolean"
+            )
         with self._lock:
             previous = dict(self._configuration)
             current_mode = str(previous.get("domainMode") or "local")
@@ -1049,13 +1060,6 @@ class WorkspaceHost:
             scheduler_url = self._normalize_scheduler_url(
                 parameters.get("schedulerUrl", current_scheduler_url)
             )
-            if scheduler_url:
-                self._preflight_backend_authority(
-                    backend_url,
-                    scheduler_url,
-                )
-            else:
-                self._preflight_backend_authority(backend_url)
         else:
             # Authority mode and publication target are separate concerns.  A
             # user must be able to return to Local, keep authoring against the
@@ -1069,6 +1073,26 @@ class WorkspaceHost:
             and current_scheduler_url == scheduler_url
         ):
             return self.snapshot()
+        current_authority_url = (
+            current_url
+            if current_mode == "backend"
+            else _optional_text(self._components["backend"].get("address"))
+        )
+        if current_authority_url:
+            current_credential = self.token
+            if current_mode == "backend":
+                current_credential = (
+                    os.environ.get("UNILAB_BACKEND_API_KEY") or self.token
+                )
+            self._assert_authority_idle(
+                current_authority_url,
+                credential=current_credential,
+            )
+        if mode == "backend" and not force:
+            if scheduler_url:
+                self._preflight_backend_authority(backend_url, scheduler_url)
+            else:
+                self._preflight_backend_authority(backend_url)
         if current_mode == "backend" and mode == "backend":
             raise WorkspaceHostError(
                 "authority_transition_invalid",
@@ -1078,7 +1102,12 @@ class WorkspaceHost:
         # Local -> Backend 切换先用用户此刻正在查看的 Local Backend
         # Projection 初始化目标。模板或实例失败时尚未停止任何
         # 本地进程，所以当前 Authority 与画布保持完整。
-        if current_mode == "local" and mode == "backend" and bootstrap:
+        if (
+            current_mode == "local"
+            and mode == "backend"
+            and bootstrap
+            and not force
+        ):
             temporary_backend = not backend_ready
             if temporary_backend:
                 self._start_backend({})
@@ -1092,17 +1121,56 @@ class WorkspaceHost:
         updated["domainMode"] = mode
         updated["backendUrl"] = backend_url
         updated["schedulerUrl"] = scheduler_url
+        configuration_replaced = False
         try:
             if edge_ready:
                 self._stop_component("edge")
             if backend_ready:
                 self._stop_component("backend")
             self._replace_configuration(updated, "authority.switching")
-            if backend_ready:
-                self._start_backend({})
-            if edge_ready:
-                self._start_edge()
+            configuration_replaced = True
+            if force:
+                restart_failures: list[str] = []
+                if backend_ready:
+                    try:
+                        self._start_backend({})
+                    except BaseException as error:  # noqa: BLE001
+                        restart_failures.append(f"Workspace Backend: {error}")
+                if edge_ready:
+                    try:
+                        self._start_edge()
+                    except BaseException as error:  # noqa: BLE001
+                        restart_failures.append(f"OS: {error}")
+                if restart_failures:
+                    with self._lock:
+                        self._publish_locked(
+                            "authority.switched.degraded",
+                            {
+                                "mode": mode,
+                                "backendUrl": backend_url,
+                                "forced": True,
+                                "diagnostics": restart_failures,
+                            },
+                        )
+                        return self._snapshot_locked()
+            else:
+                if backend_ready:
+                    self._start_backend({})
+                if edge_ready:
+                    self._start_edge()
         except BaseException as error:  # noqa: BLE001 - rollback is the boundary.
+            if force and configuration_replaced:
+                with self._lock:
+                    self._publish_locked(
+                        "authority.switched.degraded",
+                        {
+                            "mode": mode,
+                            "backendUrl": backend_url,
+                            "forced": True,
+                            "diagnostics": [str(error)],
+                        },
+                    )
+                    return self._snapshot_locked()
             rollback_failures: list[str] = []
             try:
                 self._stop_component("edge")
@@ -1121,16 +1189,46 @@ class WorkspaceHost:
         with self._lock:
             self._publish_locked(
                 "authority.switched",
-                {"mode": mode, "backendUrl": backend_url},
+                {"mode": mode, "backendUrl": backend_url, "forced": force},
             )
             return self._snapshot_locked()
+
+    def _assert_authority_idle(self, address: str, *, credential: str) -> None:
+        """Fail closed while the current authority owns any active task."""
+
+        active_count = 0
+        api = self._normalize_backend_url(address)
+        for status in _ACTIVE_WORKFLOW_TASK_STATUSES:
+            query = urlencode({"page": 1, "page_size": 1, "status": status})
+            request = Request(
+                f"{api}/api/v1/workflow-tasks?{query}",
+                headers={"Authorization": f"Bearer {credential}"},
+            )
+            try:
+                with urlopen(request, timeout=3.0) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except (OSError, URLError, ValueError) as error:
+                raise WorkspaceHostError(
+                    "authority_task_state_unavailable",
+                    "无法确认当前环境是否存在活动任务；为避免任务失去原调度权威，"
+                    "本次切换已取消",
+                ) from error
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            if isinstance(data, dict):
+                active_count += int(data.get("total") or 0)
+        if active_count:
+            raise WorkspaceHostError(
+                "authority_tasks_active",
+                f"当前环境仍有 {active_count} 个活动任务；任务结束后才能切换运行权威",
+                details={"activeTaskCount": active_count},
+            )
 
     def _publish_release(self, parameters: dict[str, object]) -> dict[str, object]:
         """Publish the visible Local generation and optionally activate Backend Authority."""
 
         unknown = sorted(set(parameters) - {
             "backendUrl", "schedulerUrl", "activate", "verify", "resetTarget",
-            "confirmation"
+            "replaceTarget", "confirmation"
         })
         if unknown:
             raise WorkspaceHostError(
@@ -1147,6 +1245,12 @@ class WorkspaceHost:
         )
         activate = bool(parameters.get("activate", False))
         reset_target = parameters.get("resetTarget", False) is True
+        replace_target = parameters.get("replaceTarget", False) is True
+        if reset_target and replace_target:
+            raise WorkspaceHostError(
+                "release_parameters_invalid",
+                "replaceTarget 与 resetTarget 不能同时使用",
+            )
         if reset_target and parameters.get("confirmation") != "CLEAR_BACKEND":
             raise WorkspaceHostError(
                 "release_target_reset_confirmation_required",
@@ -1211,6 +1315,7 @@ class WorkspaceHost:
                 deployment_directory=self.paths.root / "deployments",
                 timeout=self.readiness_timeout,
                 before_workflows=stage_device_authority if activate else None,
+                replace_existing=replace_target,
             )
             prepared_release = None
             with self._lock:

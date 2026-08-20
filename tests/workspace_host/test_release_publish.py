@@ -48,6 +48,104 @@ def test_release_target_inspection_returns_service_origin() -> None:
     assert inspection["targetAddress"] == "http://127.0.0.1:8080"
 
 
+def test_replace_plan_rejects_target_with_active_tasks() -> None:
+    target = ExistingBackendDeploymentTarget(
+        "http://127.0.0.1:8080",
+        "test-token",
+        replace_existing=True,
+    )
+    target._all_target_materials = lambda: []  # type: ignore[method-assign]
+    target._paged = lambda *_args, **_kwargs: []  # type: ignore[method-assign]
+    target._active_workflow_task_count = lambda: 2  # type: ignore[method-assign]
+
+    with pytest.raises(WorkspaceHostError) as caught:
+        target.plan(_release())
+
+    assert caught.value.code == "release_target_busy"
+    assert caught.value.details == {"activeTaskCount": 2}
+
+
+def test_replace_updates_material_definition_without_runtime_facts() -> None:
+    target = ExistingBackendDeploymentTarget(
+        "http://127.0.0.1:8080",
+        "test-token",
+        replace_existing=True,
+    )
+    existing = {
+        "uuid": "target-material",
+        "barcode": "M-01",
+        "resource_template_uuid": "target-template",
+        "meta_data": {
+            "runtime_observation": "keep",
+            "unilab_release": {"source_material_uuid": "source-material"},
+        },
+    }
+    target._all_target_materials = lambda: [existing]  # type: ignore[method-assign]
+    updates: list[dict[str, object]] = []
+
+    def request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        if method == "GET":
+            return {
+                **existing,
+                "revision": 7,
+                "data": {"quantity": 3},
+                "relative_position": {"x": 10},
+                "current_site_uuid": "runtime-site",
+            }
+        body = dict(kwargs["json"])  # type: ignore[arg-type]
+        updates.append(body)
+        return {**existing, **body}
+
+    target._request = request  # type: ignore[method-assign]
+    release = WorkspaceRelease(
+        release_id="sha256:replace-material",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={
+            "nodes": [{
+                "material": {
+                    "uuid": "source-material",
+                    "resource_template_uuid": "source-template",
+                    "barcode": "M-01",
+                    "name": "updated definition",
+                    "description": "static description",
+                    "meta_data": {"definition": "updated"},
+                    "config": {"speed": 2},
+                    "data": {"quantity": 999},
+                },
+                "relative_position": {"x": 999},
+                "current_site_uuid": "source-site",
+            }]
+        },
+        workflows=(),
+    )
+
+    identities = target._apply_materials(
+        release,
+        {"source-template": "device.pump"},
+        {"device.pump": "target-template"},
+        {},
+    )
+
+    assert identities == {"source-material": "target-material"}
+    assert len(updates) == 1
+    assert updates[0]["config"] == {"speed": 2}
+    assert updates[0]["meta_data"] == {
+        "runtime_observation": "keep",
+        "definition": "updated",
+        "unilab_release": {
+            "release_id": "sha256:replace-material",
+            "source_material_uuid": "source-material",
+            "source_workspace": "/workspace",
+            "retired": False,
+        },
+    }
+    for runtime_field in (
+        "data", "parent_uuid", "relative_position", "site_placement"
+    ):
+        assert runtime_field not in updates[0]
+
+
 def test_release_embeds_compiled_material_shape_into_template_model() -> None:
     templates = [{
         "name": "community.example.beaker",
@@ -159,6 +257,12 @@ def test_publish_runs_plan_apply_verify_and_records_only_verified_release(
                 workflow_identities={},
             )
 
+        def finalize(
+            self, plan: DeploymentPlan, result: DeploymentResult
+        ) -> None:
+            assert result.release_id == plan.release.release_id
+            calls.append("finalize")
+
     class Verifier:
         def verify(
             self,
@@ -183,7 +287,7 @@ def test_publish_runs_plan_apply_verify_and_records_only_verified_release(
 
     receipt = publisher.publish()
 
-    assert calls == ["build", "plan", "apply", "verify"]
+    assert calls == ["build", "plan", "apply", "verify", "finalize"]
     assert receipt["verified"] is True
     assert receipt["releaseId"] == release.release_id
     assert (tmp_path / "sha256-release-1.json").is_file()
@@ -2012,11 +2116,16 @@ def test_workspace_host_release_publish_registers_edge_before_workflow_import(
         {"phase": "ready", "address": "http://127.0.0.1:18003"}
     )
     host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
-    host._switch_authority = lambda values, **_kwargs: {  # type: ignore[method-assign]
-        "domainMode": values["mode"]
-    }
     started_edges: list[bool] = []
     host._start_edge = lambda: started_edges.append(True) or {}  # type: ignore[method-assign]
+
+    def switch_authority(
+        values: dict[str, object], **_kwargs: object
+    ) -> dict[str, object]:
+        host._start_edge()
+        return {"domainMode": values["mode"]}
+
+    host._switch_authority = switch_authority  # type: ignore[method-assign]
     captured: dict[str, object] = {}
 
     class Publisher:
@@ -2074,18 +2183,27 @@ def test_workspace_host_release_publish_restores_idle_edge_after_import_failure(
     )
     host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
     lifecycle: list[str] = []
-    host._switch_authority = lambda values, **_kwargs: (  # type: ignore[method-assign]
-        lifecycle.append(f"switch:{values['mode']}")
-        or {"domainMode": values["mode"]}
-    )
     host._start_edge = lambda: lifecycle.append("start:edge") or {}  # type: ignore[method-assign]
     host._stop_component = lambda name: lifecycle.append(f"stop:{name}") or {}  # type: ignore[method-assign]
+
+    def switch_authority(
+        values: dict[str, object], **_kwargs: object
+    ) -> dict[str, object]:
+        mode = str(values["mode"])
+        lifecycle.append(f"switch:{mode}")
+        if mode == "backend":
+            host._start_edge()
+        return {"domainMode": mode}
+
+    host._switch_authority = switch_authority  # type: ignore[method-assign]
 
     class Publisher:
         def __init__(self, before_workflows: object) -> None:
             self.before_workflows = before_workflows
 
-        def publish(self) -> dict[str, object]:
+        def publish(
+            self, _release: WorkspaceRelease | None = None
+        ) -> dict[str, object]:
             assert callable(self.before_workflows)
             self.before_workflows()
             lifecycle.append("import:workflow")
