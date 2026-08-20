@@ -592,6 +592,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
         execution_kind: str = Query(default=""),
         status: str = Query(default=""),
         cleanup_status: str = Query(default=""),
+        projection: str = Query(default="full"),
     ) -> JSONResponse:
         """按 Backend 筛选合同分页返回工作流任务（WorkflowTask）。
 
@@ -607,6 +608,7 @@ def create_workflow_router(service: WorkflowService) -> APIRouter:
                 execution_kind=execution_kind,
                 status=status,
                 cleanup_status=cleanup_status,
+                projection=projection,
             )
         )
 

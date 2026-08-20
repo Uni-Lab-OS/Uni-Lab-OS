@@ -1022,6 +1022,7 @@ class WorkflowService:
         execution_kind: str = "",
         status: str = "",
         cleanup_status: str = "",
+        projection: str = "full",
     ) -> Dict[str, Any]:
         """按后端（Backend）查询合同分页读取工作流任务（WorkflowTask）。
 
@@ -1039,6 +1040,9 @@ class WorkflowService:
         status = status.strip().lower()
         execution_kind = execution_kind.strip().lower()
         cleanup_status = cleanup_status.strip().lower()
+        projection = projection.strip().lower()
+        if projection not in {"full", "summary"}:
+            raise WorkflowError("invalid_input")
         if execution_kind and execution_kind not in {
             "workflow",
             "ad_hoc_device_action",
@@ -1069,6 +1073,7 @@ class WorkflowService:
             execution_kind=execution_kind,
             status=status,
             cleanup_status=cleanup_status,
+            projection=projection,
         )
 
     def list_workflow_node_jobs(self, task_uuid: str) -> List[Dict[str, Any]]:

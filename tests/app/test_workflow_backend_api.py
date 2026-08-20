@@ -119,6 +119,26 @@ def test_workflow_definition_task_snapshot_and_soft_delete_match_backend(tmp_pat
     assert "output" not in task
     assert "status" not in task["workflow_snapshot"]["nodes"][0]
 
+    summary_response = client.get(
+        f"/api/v1/workflow-tasks?workflow_uuid={workflow_uuid}"
+        "&page=1&page_size=1&projection=summary"
+    )
+    assert summary_response.status_code == 200
+    summary_task = summary_response.json()["data"]["items"][0]
+    assert summary_task["uuid"] == task["uuid"]
+    assert summary_task["status"] == "pending"
+    assert summary_task["workflow_snapshot"] == {}
+    assert summary_task["execution_plan"] == {}
+
+    full_list_response = client.get(
+        f"/api/v1/workflow-tasks?workflow_uuid={workflow_uuid}"
+        "&page=1&page_size=1"
+    )
+    assert full_list_response.status_code == 200
+    full_list_task = full_list_response.json()["data"]["items"][0]
+    assert full_list_task["workflow_snapshot"]["nodes"][0]["name"] == "approval"
+    assert full_list_task["execution_plan"]["nodes"]
+
     deleted = client.delete(f"/api/v1/workflows/{workflow_uuid}")
     assert deleted.status_code == 200
     assert deleted.json() == {"code": 0}

@@ -1428,6 +1428,7 @@ class WorkflowStore:
         execution_kind: str = "",
         status: str = "",
         cleanup_status: str = "",
+        projection: str = "full",
     ) -> Dict[str, Any]:
         """按 Backend 查询合同分页读取工作流任务（WorkflowTask）。
 
@@ -1449,6 +1450,15 @@ class WorkflowStore:
                 values.append(value)
         where = " AND ".join(clauses)
         offset = (page - 1) * page_size
+        selected_columns = "*" if projection == "full" else """
+            uuid, create_time, update_time, description, meta_data,
+            workflow_uuid, execution_kind, status,
+            '{}' AS workflow_snapshot, '{}' AS execution_plan,
+            run_mode, target_node_uuid, control_status, cleanup_status,
+            trace_context, input, output, error_info, timeout_at,
+            attention_reason, terminal_ghost_detected_at,
+            reconciliation_resume_control_status, started_at, finished_at
+        """
         with self._lock:
             total = self._conn.execute(
                 f"SELECT COUNT(*) FROM workflow_task WHERE {where}",
@@ -1456,7 +1466,7 @@ class WorkflowStore:
             ).fetchone()[0]
             rows = self._conn.execute(
                 f"""
-                SELECT * FROM workflow_task WHERE {where}
+                SELECT {selected_columns} FROM workflow_task WHERE {where}
                 ORDER BY create_time DESC, uuid
                 LIMIT ? OFFSET ?
                 """,
