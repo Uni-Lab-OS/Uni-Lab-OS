@@ -180,7 +180,7 @@ def resolve_backend_launch(
         generation=generation,
         log_path=paths.logs / f"{generation}-backend.log",
         address=backend_address,
-        ready_url=f"{backend_address}/api/v1/health",
+        ready_url=f"{backend_address}/api/v1/readiness",
         metadata={
             "graphPath": str(graph),
             "graphFingerprint": _sha256(graph),
