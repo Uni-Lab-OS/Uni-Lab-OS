@@ -131,6 +131,7 @@ def compose_workflow_runtime(
     material_resolver: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
     scheduler: Optional[Any] = None,
     start_source_monitor: bool = True,
+    workflow_activation_progress: Callable[[int, int], None] | None = None,
 ) -> WorkflowService:
     """装配工作区唯一的工作流权威、启动恢复和草稿监视。
 
@@ -142,7 +143,8 @@ def compose_workflow_runtime(
     ``material_resolver`` 按稳定 UUID 读取本地物料权威摘要；``scheduler`` 是仅在
     本地调度模式装配的现有调度器（EdgeScheduler）；``start_source_monitor``
     仅供非工作区遗留入口保留逐源码监视，工作区必须传 ``False`` 并由统一文件
-    世代监视器拥有刷新。
+    世代监视器拥有刷新；``workflow_activation_progress`` 报告已完成真实编译的
+    工作流源码数量和总数，不参与运行时组合身份。
     返回：完成来源注册与启动恢复后发布的进程唯一工作流服务（WorkflowService）。
     异常：同时提供授权目录与预编译计划，或运行期间
     切换数据库、编译器、授权目录或来源计划时关闭式失败。
@@ -188,6 +190,9 @@ def compose_workflow_runtime(
                 )
             if bool(start_source_monitor) != _source_monitor_enabled:
                 raise RuntimeError("工作流权威运行期间不能切换源码监视所有权")
+            if workflow_activation_progress is not None:
+                total = len(_service.list_registered_sources())
+                workflow_activation_progress(total, total)
             return _service
         # ``workflow_store`` 是本地标准工作流任务（WorkflowTask）/工作流节点作业
         # （WorkflowNodeJob）写模型；执行桥与应用服务必须共享同一实例。
@@ -219,7 +224,12 @@ def compose_workflow_runtime(
             if editable_source_discovery_plan is not None:
                 # managed-local 工作区把同代 PackageCatalog 当作激活权威；OS
                 # 只有在子到父的组合依赖全部推进到固定点后才能发布 ready。
-                new_service.activate_registered_sources_to_fixed_point()
+                if workflow_activation_progress is None:
+                    new_service.activate_registered_sources_to_fixed_point()
+                else:
+                    new_service.activate_registered_sources_to_fixed_point(
+                        progress_callback=workflow_activation_progress,
+                    )
             else:
                 # 遗留显式目录入口继续保留候选/人工应用语义。
                 new_service.recover_registered_sources()
@@ -302,6 +312,7 @@ def compose_local_workflow_template_runtime(
     editable_package_roots: Iterable[str | Path] = (),
     editable_source_discovery_plan: Optional[EditableSourceDiscoveryPlan] = None,
     start_source_monitor: bool = True,
+    workflow_activation_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[WorkflowService, RegistryTemplateProjection]:
     """装配本地模板权威、F02 创作编译器与工作流服务。
 
@@ -312,7 +323,8 @@ def compose_local_workflow_template_runtime(
     ``editable_package_roots`` 是本次进程唯一授权的工作流源码（Workflow
     Source）目录 tuple；``editable_source_discovery_plan`` 是与注册表快照
     （Registry Snapshot）同代的预编译来源计划，存在时禁止再读
-    ``package.yaml``；``start_source_monitor`` 仅允许遗留入口启动逐源码监视。
+    ``package.yaml``；``start_source_monitor`` 仅允许遗留入口启动逐源码监视；
+    ``workflow_activation_progress`` 报告工作流源码真实编译进度。
     返回：共享同一已发布目录代际的工作流服务
     （WorkflowService）与模板投影（Template Projection）。异常：注册表快照构造、
     本地模板身份同步或模板投影失败时统一抛出
@@ -332,6 +344,7 @@ def compose_local_workflow_template_runtime(
                 editable_package_roots=editable_package_roots,
                 editable_source_discovery_plan=editable_source_discovery_plan,
                 start_source_monitor=start_source_monitor,
+                workflow_activation_progress=workflow_activation_progress,
             )
             return service, _template_projection
         if _service is not None:
@@ -470,6 +483,7 @@ def compose_local_workflow_template_runtime(
                 material_resolver=resolve_material_identity,
                 scheduler=scheduler,
                 start_source_monitor=start_source_monitor,
+                workflow_activation_progress=workflow_activation_progress,
             )
         except BaseException:
             projection.close()

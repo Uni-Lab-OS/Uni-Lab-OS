@@ -21,6 +21,8 @@ from .model import (
     read_json,
 )
 
+_OPERATION_TIMEOUT_SECONDS = 630.0
+
 
 class WorkspaceHostClient:
     """Discover and call one Workspace Host without owning its processes."""
@@ -106,7 +108,12 @@ class WorkspaceHostClient:
     def operation(self, operation_id: str, *, timeout: float = 2.0) -> dict[str, Any]:
         return self._request("GET", f"/v1/operations/{operation_id}", timeout=timeout)
 
-    def wait(self, operation_id: str, *, timeout: float = 120.0) -> dict[str, Any]:
+    def wait(
+        self,
+        operation_id: str,
+        *,
+        timeout: float = _OPERATION_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         latest: dict[str, Any] | None = None
         while time.monotonic() < deadline:
@@ -127,7 +134,7 @@ class WorkspaceHostClient:
         parameters: dict[str, object] | None = None,
         operation_id: str | None = None,
         expected_revision: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = _OPERATION_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Submit and await one idempotent Host operation.
 

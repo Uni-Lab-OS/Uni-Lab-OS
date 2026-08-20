@@ -51,6 +51,7 @@ class EditableSourceRegistration:
     module: str | None = None
     symbol: str | None = None
     definition_content_hash: str | None = None
+    dependency_workflow_uuids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
