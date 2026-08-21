@@ -58,7 +58,6 @@ def _task_snapshot(
     material_uuid: str | None = MATERIAL_UUID,
     disable_first_consumer: bool = False,
     implicit_passthrough: bool = False,
-    custody_policy: str | None = "task_exclusive",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """构造冻结任务快照与工作流节点作业（WorkflowNodeJob）列表。
 
@@ -79,8 +78,6 @@ def _task_snapshot(
         "slot_range": None,
         "flow_role": "primary_sample",
     }
-    if custody_policy is not None:
-        source_selector["custody_policy"] = custody_policy
     # ``snapshot_nodes`` 是已应用工作流图的不可变节点顺序；物料来源节点只提供
     # 任务物料绑定（TaskMaterialBinding），两个 ILab 节点才是可派发动作。
     snapshot_nodes = [
@@ -331,20 +328,6 @@ def test_create_new_material_source_fails_closed_before_scheduling() -> None:
         _task_snapshot(mode="create_new", material_uuid=None)
 
     assert caught.value.code == "unsupported_material_source_mode"
-
-
-def test_legacy_material_source_defaults_to_task_exclusive_in_execution_plan() -> None:
-    """升级前物料来源必须在冻结执行计划中恢复原独占语义。
-
-    参数：无。返回：无；断言缺少 ``custody_policy`` 的既有工作流图不会被解释
-    为共享来源，而是显式写入 ``task_exclusive``。异常：计划构建失败或默认值
-    漂移均由测试失败暴露。
-    """
-
-    task_snapshot, _jobs = _task_snapshot(custody_policy=None)
-
-    source = task_snapshot["execution_plan"]["nodes"][0]
-    assert source["param"]["custody_policy"] == "task_exclusive"
 
 
 def test_automatic_existing_source_freezes_selector_without_inventory_lookup() -> None:

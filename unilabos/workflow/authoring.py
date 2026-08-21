@@ -11,9 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 
 from unilabos.workflow.material_source import (
-    MATERIAL_CUSTODY_POLICY_LABELS_ZH,
     MATERIAL_FLOW_ROLE_LABELS_ZH,
-    MaterialCustodyPolicy,
     MaterialFlowRole,
 )
 
@@ -154,7 +152,6 @@ def material_source(
     site: str | None,
     slot_range: list[str] | None,
     flow_role: MaterialFlowRole,
-    custody_policy: MaterialCustodyPolicy = MaterialCustodyPolicy.TASK_EXCLUSIVE,
 ) -> Any:
     """声明只供创作编译的物料来源（MaterialSource）。
 
@@ -162,31 +159,18 @@ def material_source(
     （ResourceTemplate）符号；``mode`` 是 ``existing | create_new``；
     ``mount`` 是 ``resource_ref`` 声明；``material_uuid`` 是可选固定物料
     （Material）身份；``site`` 是库位（Site）选择，``slot_range`` 是库位
-    （Slot）范围；``flow_role`` 是工作流局部物料流角色，
-    ``custody_policy`` 是物料保管策略（MaterialCustodyPolicy）；旧调用缺省时
-    显式迁移为 ``TASK_EXCLUSIVE``，保持升级前的安全占用语义。
-    本标记没有返回值，被
+    （Slot）范围；
+    ``flow_role`` 是工作流局部物料流角色。本标记没有返回值，被
     执行时抛出 ``RuntimeError``，防止越过创作编译边界读写物料权威。
     """
 
-    del (
-        resource_template,
-        mode,
-        mount,
-        material_uuid,
-        site,
-        slot_range,
-        flow_role,
-        custody_policy,
-    )
+    del resource_template, mode, mount, material_uuid, site, slot_range, flow_role
     raise RuntimeError("工作流创作 material_source() 只能由静态编译器解析")
 
 
 __all__ = [
     "DeviceSelector",
-    "MATERIAL_CUSTODY_POLICY_LABELS_ZH",
     "MATERIAL_FLOW_ROLE_LABELS_ZH",
-    "MaterialCustodyPolicy",
     "MaterialFlowRole",
     "device",
     "group",

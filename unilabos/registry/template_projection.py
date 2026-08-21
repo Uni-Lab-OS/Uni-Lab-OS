@@ -602,10 +602,6 @@ class RegistryTemplateProjection:
                             "consumable",
                         ],
                     },
-                    "custody_policy": {
-                        "type": "string",
-                        "enum": ["task_exclusive", "shared_source"],
-                    },
                 },
                 "required": [
                     "mode",
@@ -615,7 +611,6 @@ class RegistryTemplateProjection:
                     "site",
                     "slot_range",
                     "flow_role",
-                    "custody_policy",
                 ],
                 "additionalProperties": False,
             },

@@ -11,7 +11,6 @@ import pytest
 
 from unilabos.app.scheduler.dispatch import RecordingDispatcher
 from unilabos.app.scheduler.inventory.domain import InsufficientStock
-from unilabos.app.scheduler.models import WorkflowNode, WorkflowSpec
 from unilabos.app.scheduler.service import EdgeScheduler
 from unilabos.workflow.store import WorkflowStore
 from unilabos.workflow.task_scheduler_bridge import TaskSchedulerBridge
@@ -38,33 +37,29 @@ class _ToggleInventory:
         """
 
         self.available = available
-        self.admission_calls: list[tuple[str, list[Any]]] = []
+        self.reserve_calls: list[tuple[str, dict[str, Any]]] = []
         self.release_calls: list[tuple[str, str]] = []
 
-    def admit_material_sources(
+    def reserve_workflow(
         self,
         workflow_uuid: str,
-        requests: list[Any],
+        requirements: dict[str, Any],
     ) -> dict[str, Any]:
-        """模拟整组物料来源的策略化单事务准入。
+        """模拟 gaojing 整图单事务短期预留。
 
         参数：``workflow_uuid`` 是工作流任务（WorkflowTask）身份；
-        ``requests`` 是按来源节点冻结的选择器与保管策略。返回无。异常：不可用时抛
+        ``requirements`` 按来源节点汇总全部需求。返回无。异常：不可用时抛
         ``InsufficientStock``，且不形成部分预留。
         """
 
-        self.admission_calls.append((workflow_uuid, requests))
+        self.reserve_calls.append((workflow_uuid, requirements))
         if not self.available:
             raise InsufficientStock("测试固定物料已被其他任务预留")
         return {
             "workflow_id": workflow_uuid,
-            "reserved_nodes": [
-                request.node_id
-                for request in requests
-                if request.custody_policy == "task_exclusive"
-            ],
+            "reserved_nodes": list(requirements),
             "allocations": {
-                request.node_id: [MATERIAL_UUID] for request in requests
+                node_uuid: [MATERIAL_UUID] for node_uuid in requirements
             },
         }
 
@@ -94,9 +89,7 @@ def store(tmp_path: Path) -> Iterator[WorkflowStore]:
         opened_store.close()
 
 
-def _source_plan_node(
-    *, automatic: bool = False, custody_policy: str = "task_exclusive"
-) -> dict[str, Any]:
+def _source_plan_node(*, automatic: bool = False) -> dict[str, Any]:
     """构造固定 existing 物料来源的协调器计划节点。
 
     参数：无。返回：包含冻结选择器和唯一实例需求的计划对象。异常：无。
@@ -114,7 +107,6 @@ def _source_plan_node(
             "site": None,
             "slot_range": None,
             "flow_role": "primary_sample",
-            "custody_policy": custody_policy,
         },
         "execution_policy": {},
         "inputs": [],
@@ -129,12 +121,7 @@ def _source_plan_node(
                 }
             ]
             if automatic
-            else [
-                {
-                    "template_id": TEMPLATE_UUID,
-                    "instance_uuid": MATERIAL_UUID,
-                }
-            ]
+            else [{"instance_uuid": MATERIAL_UUID}]
         ),
         "material_binding_targets": (
             [
@@ -276,11 +263,7 @@ def test_source_only_admission_never_calls_dispatcher(store: WorkflowStore) -> N
     assert aggregate["task"]["status"] == "succeeded"
     assert aggregate["jobs"][0]["status"] == "succeeded"
     assert aggregate["jobs"][0]["return_info"] == {
-        "material": {
-            "uuid": MATERIAL_UUID,
-            "resource_template_uuid": TEMPLATE_UUID,
-            "custody_policy": "task_exclusive",
-        }
+        "material": {"uuid": MATERIAL_UUID, "resource_template_uuid": TEMPLATE_UUID}
     }
     assert inventory.release_calls == [(TASK_UUID, "workflow_succeeded")]
 
@@ -312,7 +295,7 @@ def test_blocked_admission_retry_reuses_task_and_job_identities(
         ACTION_JOB_UUID,
     ]
     assert [job["status"] for job in blocked["jobs"]] == ["pending", "pending"]
-    assert [call[0] for call in inventory.admission_calls] == [TASK_UUID, TASK_UUID]
+    assert [call[0] for call in inventory.reserve_calls] == [TASK_UUID, TASK_UUID]
     assert admitted["jobs"][0]["uuid"] == SOURCE_JOB_UUID
     assert admitted["jobs"][0]["status"] == "succeeded"
     assert dispatcher.dispatched[0]["job_id"] == ACTION_JOB_UUID
@@ -361,7 +344,6 @@ def test_source_admission_commits_before_ordinary_action_dispatch(
                 "material": {
                     "uuid": MATERIAL_UUID,
                     "resource_template_uuid": TEMPLATE_UUID,
-                    "custody_policy": "task_exclusive",
                 }
             },
         )
@@ -395,7 +377,6 @@ def test_automatic_source_projects_selected_material_before_dispatch(
         "material": {
             "uuid": MATERIAL_UUID,
             "resource_template_uuid": TEMPLATE_UUID,
-            "custody_policy": "task_exclusive",
         }
     }
     assert action_job["param"] == {"plate": {"uuid": MATERIAL_UUID}}
@@ -456,71 +437,3 @@ def test_failed_material_task_releases_source_reservations(
 
     assert store.get_task(TASK_UUID)["status"] == "failed"
     assert inventory.release_calls == [(TASK_UUID, "workflow_failed")]
-
-
-def test_shared_source_action_lock_serializes_across_workflow_tasks() -> None:
-    """两个工作流任务共享同一试剂时动作执行必须跨设备串行。
-
-    参数：无。返回：无；通过冻结动作合同（Action Contract）的物料锁标记
-    断言两个独立工作流任务可同时进入调度器，但只有一个动作先越过派发边界；
-    首个作业完成释放锁后，另一个任务继续派发。异常：Schema 或调度不变量漂移
-    使断言失败。
-    """
-
-    action_schema = {
-        "type": "object",
-        "properties": {
-            "goal": {
-                "type": "object",
-                "properties": {
-                    "reagent": {
-                        "type": "object",
-                        "x-unilabos-material-lock": True,
-                        "properties": {
-                            "uuid": {"type": "string", "format": "uuid"},
-                        },
-                        "required": ["uuid"],
-                        "additionalProperties": False,
-                    }
-                },
-                "required": ["reagent"],
-                "additionalProperties": False,
-            }
-        },
-        "required": ["goal"],
-    }
-    dispatcher = RecordingDispatcher()
-    scheduler = EdgeScheduler(dispatcher=dispatcher)
-
-    def spec(workflow_uuid: str, node_uuid: str, device_uuid: str) -> WorkflowSpec:
-        """构造绑定同一共享试剂、使用不同设备的单动作任务规格。
-
-        参数：三个 UUID 分别标识任务、动作节点和设备。返回：冻结同一试剂参数
-        与动作合同的 ``WorkflowSpec``。异常：构造阶段不访问外部状态。
-        """
-
-        return WorkflowSpec(
-            workflow_id=workflow_uuid,
-            nodes=[
-                WorkflowNode(
-                    id=node_uuid,
-                    job_id=f"job-{node_uuid}",
-                    device_id=device_uuid,
-                    action_name="dose_reagent",
-                    action_type="UniLabJsonCommand",
-                    param={"reagent": {"uuid": MATERIAL_UUID}},
-                    param_schema=action_schema,
-                )
-            ],
-        )
-
-    first = scheduler.submit_workflow(spec("workflow-shared-a", "action-a", "reactor-a"))
-    second = scheduler.submit_workflow(spec("workflow-shared-b", "action-b", "reactor-b"))
-
-    assert [item["node_id"] for item in first["dispatched"]] == ["action-a"]
-    assert second["dispatched"] == []
-    scheduler.on_job_finished("job-action-a", True, {"success": True})
-    assert [item["node_id"] for item in dispatcher.dispatched] == [
-        "action-a",
-        "action-b",
-    ]

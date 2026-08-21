@@ -9,9 +9,7 @@ from typing import Any, Literal
 from unilabos.app.scheduler.inventory.domain import (
     InsufficientStock,
     MaterialRequirement,
-    MaterialSourceAdmissionRequest,
 )
-from unilabos.workflow.material_source import MaterialCustodyPolicy
 from unilabos.workflow.task_runtime_projection import TaskRuntimeProjection
 
 MaterialSourceResolutionStatus = Literal["not_required", "blocked", "admitted"]
@@ -103,7 +101,7 @@ class MaterialSourceResolutionCoordinator:
         ):
             raise MaterialSourceResolutionError("物料来源与解析作业集合不一致")
 
-        admission_requests: list[MaterialSourceAdmissionRequest] = []
+        requirements: dict[str, list[MaterialRequirement]] = {}
         selectors: dict[str, Mapping[str, Any]] = {}
         for node in source_nodes:
             node_uuid = str(node["uuid"])
@@ -112,46 +110,25 @@ class MaterialSourceResolutionCoordinator:
                 raw_requirements, (str, bytes)
             ):
                 raise MaterialSourceResolutionError("物料来源预留需求必须是数组")
-            requirements = [
+            requirements[node_uuid] = [
                 MaterialRequirement.from_dict(dict(requirement))
                 for requirement in raw_requirements
                 if isinstance(requirement, Mapping)
             ]
             if (
-                len(requirements) != len(raw_requirements)
-                or len(requirements) != 1
+                len(requirements[node_uuid]) != len(raw_requirements)
+                or not requirements[node_uuid]
             ):
-                raise MaterialSourceResolutionError("物料来源必须有且只有一个实例需求")
+                raise MaterialSourceResolutionError("物料来源预留需求不能为空")
             selector = node.get("param")
             if not isinstance(selector, Mapping):
                 raise MaterialSourceResolutionError("物料来源选择器必须是对象")
             selectors[node_uuid] = selector
-            resource_template_uuid = self._required_text(
-                selector.get("resource_template_uuid"),
-                field="material_source.resource_template_uuid",
-            )
-            custody_policy = self._required_text(
-                selector.get("custody_policy"),
-                field="material_source.custody_policy",
-            )
-            if custody_policy not in {member.value for member in MaterialCustodyPolicy}:
-                raise MaterialSourceResolutionError("物料来源保管策略不在规范闭集")
-            admission_requests.append(
-                MaterialSourceAdmissionRequest(
-                    node_id=node_uuid,
-                    resource_template_uuid=resource_template_uuid,
-                    custody_policy=custody_policy,
-                    requirement=requirements[0],
-                )
-            )
 
         try:
-            # 库存权威在一个 SQLite 事务内按保管策略完成整组来源准入；任一来源
-            # 不足整体回滚，同一任务/来源/attempt 重放保持稳定绑定。
-            reservation = self._inventory.admit_material_sources(
-                task_uuid,
-                admission_requests,
-            )
+            # gaojing ``reserve_workflow`` 在一个 SQLite 事务内完成整集合预留，
+            # 任一来源不足会整体回滚；同一任务/来源/attempt 重放保持幂等。
+            reservation = self._inventory.reserve_workflow(task_uuid, requirements)
         except InsufficientStock:
             self._projection.project_material_source_blocked(task_uuid)
             return MaterialSourceResolution(status="blocked")
@@ -188,10 +165,6 @@ class MaterialSourceResolutionCoordinator:
                 "resource_template_uuid": self._required_text(
                     selector.get("resource_template_uuid"),
                     field="material_source.resource_template_uuid",
-                ),
-                "custody_policy": self._required_text(
-                    selector.get("custody_policy"),
-                    field="material_source.custody_policy",
                 ),
             }
         self._projection.project_material_source_admission(task_uuid, bindings)

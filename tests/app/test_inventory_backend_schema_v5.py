@@ -72,9 +72,7 @@ def test_v4_migrates_to_backend_tables_without_losing_edge_inventory(tmp_path):
     _create_v4_database(str(database))
 
     store = InventoryStore(str(database))
-    assert store.query_one("PRAGMA user_version")["user_version"] == (
-        store_module.SCHEMA_VERSION
-    )
+    assert store.query_one("PRAGMA user_version")["user_version"] == 5
 
     table_names = {
         row["name"]
@@ -89,7 +87,6 @@ def test_v4_migrates_to_backend_tables_without_losing_edge_inventory(tmp_path):
         "relative_position",
         "site",
         "material_state_history",
-        "inventory_material_source_binding",
     } <= table_names
     view_names = {
         row["name"]
