@@ -4,11 +4,13 @@ Web服务器模块
 提供Web服务器功能，网页信息服务 + mqtt代替
 """
 
+import threading
 import webbrowser
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from unilabos.utils.fastapi.log_adapter import setup_fastapi_logging
 from unilabos.utils.log import info, error
@@ -34,6 +36,145 @@ resource_contract_routes_mounted = False
 workspace_material_asset_routes_mounted = False
 workspace_authoring_routes_mounted = False
 local_edge_control_routes_mounted = False
+workflow_runtime_required = False
+workflow_runtime_deferred = False
+workflow_runtime_catalog_required = False
+workflow_runtime_phase = "pending"
+workflow_runtime_error: str | None = None
+workflow_runtime_loaded = 0
+workflow_runtime_total = 0
+_workflow_runtime_values: dict[str, Any] = {}
+_workflow_runtime_lock = threading.RLock()
+
+
+class WorkflowRuntimeStarting(RuntimeError):
+    """工作流运行时尚未完成原子发布。"""
+
+
+class _DeferredWorkflowRuntimePort:
+    """把预挂载 HTTP 路由的属性访问延迟到运行时发布之后。"""
+
+    def __init__(self, value_name: str) -> None:
+        """绑定待发布值名称；参数是内部端口名，返回无。"""
+
+        self._value_name = value_name
+
+    def __getattr__(self, attribute: str) -> Any:
+        """转发到已发布端口；启动中访问抛稳定 503 异常。"""
+
+        with _workflow_runtime_lock:
+            value = _workflow_runtime_values.get(self._value_name)
+            phase = workflow_runtime_phase
+        if value is None:
+            raise WorkflowRuntimeStarting(
+                f"workflow runtime {self._value_name} is {phase}"
+            )
+        return getattr(value, attribute)
+
+
+def _set_workflow_runtime_phase(
+    phase: str,
+    *,
+    runtime_error: str | None = None,
+) -> None:
+    """原子推进启动阶段；参数是阶段与净化错误文本，返回无。"""
+
+    global workflow_runtime_phase, workflow_runtime_error
+    with _workflow_runtime_lock:
+        workflow_runtime_phase = phase
+        workflow_runtime_error = runtime_error
+
+
+def _report_workflow_activation_progress(loaded: int, total: int) -> None:
+    """原子发布工作流启动进度；参数是已完成编译数和总数，返回无。"""
+
+    if total < 0 or loaded < 0 or loaded > total:
+        raise ValueError("工作流启动进度无效")
+    global workflow_runtime_loaded, workflow_runtime_total
+    with _workflow_runtime_lock:
+        workflow_runtime_loaded = loaded
+        workflow_runtime_total = total
+
+
+def _reset_workflow_activation_progress() -> None:
+    """清空上一次启动留下的工作流计数。"""
+
+    _report_workflow_activation_progress(0, 0)
+
+
+def _publish_workflow_runtime(
+    *,
+    service: Any,
+    template_projection: Any | None,
+) -> None:
+    """一次发布工作流服务、模板投影和可信转换端口。"""
+
+    global workflow_runtime_phase, workflow_runtime_error
+    authoring_transform = getattr(service, "compiler", None)
+    if workflow_runtime_catalog_required and (
+        template_projection is None or authoring_transform is None
+    ):
+        raise RuntimeError("本地工作流模板目录未完整装配")
+    with _workflow_runtime_lock:
+        _workflow_runtime_values.update(
+            {
+                "service": service,
+                "template_projection": template_projection,
+                "authoring_transform": authoring_transform,
+            }
+        )
+        workflow_runtime_error = None
+        workflow_runtime_phase = "ready"
+
+
+@app.exception_handler(WorkflowRuntimeStarting)
+async def workflow_runtime_starting_handler(
+    _request: Request,
+    _error: WorkflowRuntimeStarting,
+) -> JSONResponse:
+    """启动中的工作流接口返回可重试的 HTTP 503，不伪装成业务失败。"""
+
+    with _workflow_runtime_lock:
+        phase = workflow_runtime_phase
+    failed = phase == "failed"
+    return JSONResponse(
+        status_code=503,
+        content={
+            "status": "failed" if failed else "starting",
+            "phase": phase,
+            "error": {
+                "code": (
+                    "workflow_runtime_start_failed"
+                    if failed
+                    else "workflow_runtime_not_ready"
+                )
+            },
+        },
+        headers={"Retry-After": "1"},
+    )
+
+
+@app.get("/api/v1/readiness", tags=["api"])
+def api_readiness() -> Response:
+    """返回完整 Backend 合同就绪性；与只证明进程存活的 health 分离。"""
+
+    with _workflow_runtime_lock:
+        required = workflow_runtime_required
+        phase = workflow_runtime_phase
+        runtime_error = workflow_runtime_error
+        loaded = workflow_runtime_loaded
+        total = workflow_runtime_total
+    ready = not required or phase == "ready"
+    payload: dict[str, Any] = {
+        "status": "ready" if ready else "starting",
+        "phase": "ready" if not required else phase,
+        "workflowRuntime": "disabled" if not required else phase,
+        "workflowProgress": {"loaded": loaded, "total": total},
+    }
+    if runtime_error is not None:
+        payload["status"] = "failed"
+        payload["error"] = {"code": "workflow_runtime_start_failed"}
+    return JSONResponse(status_code=200 if ready else 503, content=payload)
 
 # noinspection PyTypeChecker
 app.add_middleware(
@@ -83,10 +224,136 @@ async def log_requests(request: Request, call_next) -> Response:
     return response
 
 
-def setup_server() -> FastAPI:
+def _compose_configured_workflow_runtime() -> tuple[Any, Any | None]:
+    """按当前产品配置组合唯一工作流服务及可选模板投影。"""
+
+    from unilabos.app.runtime_storage import get_runtime_storage_directory
+    from unilabos.app.scheduler.integration import (
+        get_edge_scheduler,
+        get_inventory_service,
+    )
+    from unilabos.workflow.composition import (
+        compose_local_workflow_template_runtime,
+        compose_workflow_runtime,
+    )
+
+    workflow_runtime_directory = (
+        get_runtime_storage_directory() or BasicConfig.working_dir
+    )
+    template_projection = None
+    inventory_service = get_inventory_service()
+    edge_scheduler = get_edge_scheduler()
+    source_plan_arguments: dict[str, Any] = {}
+    if BasicConfig.workflow_source_discovery_plan is not None:
+        source_plan_arguments["editable_source_discovery_plan"] = (
+            BasicConfig.workflow_source_discovery_plan
+        )
+    source_plan_arguments["start_source_monitor"] = (
+        BasicConfig.workflow_source_discovery_plan is None
+    )
+    source_plan_arguments["workflow_activation_progress"] = (
+        _report_workflow_activation_progress
+    )
+    if inventory_service is not None and edge_scheduler is not None:
+        from unilabos.registry.registry import lab_registry
+
+        workflow_service, template_projection = (
+            compose_local_workflow_template_runtime(
+                workflow_runtime_directory,
+                inventory_store=inventory_service.store,
+                registry=lab_registry,
+                scheduler=edge_scheduler,
+                editable_package_roots=(
+                    BasicConfig.workflow_editable_package_roots
+                ),
+                **source_plan_arguments,
+            )
+        )
+    else:
+        workflow_service = compose_workflow_runtime(
+            workflow_runtime_directory,
+            editable_package_roots=(BasicConfig.workflow_editable_package_roots),
+            **source_plan_arguments,
+        )
+    return workflow_service, template_projection
+
+
+def _install_workflow_runtime_api(
+    *,
+    service: Any,
+    template_projection: Any | None,
+    authoring_transform: Any | None,
+) -> None:
+    """一次挂载 Workflow HTTP 合同；参数是三个同代运行时端口。"""
+
+    global workflow_routes_mounted
+    from unilabos.app.workflow_api import install_workflow_api
+
+    install_workflow_api(
+        app,
+        service,
+        template_snapshot_provider=template_projection,
+        authoring_transform=authoring_transform,
+    )
+    workflow_routes_mounted = True
+
+
+def _mount_deferred_workflow_runtime_api() -> None:
+    """在 Uvicorn 启动前挂载延迟端口，保证路由表之后不再动态改变。"""
+
+    global workflow_runtime_catalog_required
+    from unilabos.app.scheduler.integration import (
+        get_edge_scheduler,
+        get_inventory_service,
+    )
+
+    full_local_runtime = (
+        get_inventory_service() is not None and get_edge_scheduler() is not None
+    )
+    workflow_runtime_catalog_required = full_local_runtime
+    _install_workflow_runtime_api(
+        service=_DeferredWorkflowRuntimePort("service"),
+        template_projection=(
+            _DeferredWorkflowRuntimePort("template_projection")
+            if full_local_runtime
+            else None
+        ),
+        authoring_transform=(
+            _DeferredWorkflowRuntimePort("authoring_transform")
+            if full_local_runtime
+            else None
+        ),
+    )
+
+
+def initialize_deferred_workflow_runtime() -> None:
+    """完成重型工作流激活并原子发布给已经监听的 HTTP 路由。"""
+
+    if not workflow_runtime_required or not workflow_runtime_deferred:
+        return
+    _set_workflow_runtime_phase("activating_workflows")
+    try:
+        workflow_service, template_projection = (
+            _compose_configured_workflow_runtime()
+        )
+        _publish_workflow_runtime(
+            service=workflow_service,
+            template_projection=template_projection,
+        )
+    except Exception as runtime_exception:
+        _set_workflow_runtime_phase(
+            "failed",
+            runtime_error=str(runtime_exception),
+        )
+        error(f"[Web] 初始化 Backend Workflow 合同失败: {runtime_exception}")
+        raise
+
+
+def setup_server(*, defer_workflow_initialization: bool = False) -> FastAPI:
     """装配当前产品配置允许的 Web 路由和本地工作流运行时。
 
-    参数：无。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
+    参数：``defer_workflow_initialization`` 仅供真实服务器先开启存活接口再执行
+    重型工作流激活。返回：进程唯一 FastAPI 应用；重复调用复用已挂载路由。工作流
     源码（Workflow Source）授权形状或组合失败时关闭该合同路由，但不阻止无关
     Edge 路由继续装配，错误写入产品日志。
     异常：基础 FastAPI 路由装配错误原样传播；工作流本地组合错误在本函数内记录
@@ -95,6 +362,8 @@ def setup_server() -> FastAPI:
     global pages, resource_contract_routes_mounted, workflow_routes_mounted
     global workspace_material_asset_routes_mounted
     global local_edge_control_routes_mounted, workspace_authoring_routes_mounted
+    global workflow_runtime_deferred, workflow_runtime_required
+    global workflow_runtime_catalog_required
     from unilabos.app.control_plane import (
         should_mount_embedded_scheduler_routes,
         should_mount_workspace_authoring_routes,
@@ -155,73 +424,42 @@ def setup_server() -> FastAPI:
         and not workflow_routes_mounted
         and BasicConfig.working_dir
     ):
-        try:
-            from unilabos.app.runtime_storage import get_runtime_storage_directory
-            from unilabos.app.scheduler.integration import (
-                get_edge_scheduler,
-                get_inventory_service,
-            )
-            from unilabos.app.workflow_api import install_workflow_api
-            from unilabos.workflow.composition import (
-                compose_local_workflow_template_runtime,
-                compose_workflow_runtime,
-            )
-
-            workflow_runtime_directory = (
-                get_runtime_storage_directory() or BasicConfig.working_dir
-            )
-
-            # ``template_projection`` 只在本地调度与库存权威同时存在时建立；
-            # Backend-controlled 模式不能在 OS 再创建第二个生产模板写权威。
-            template_projection = None
-            inventory_service = get_inventory_service()
-            # ``edge_scheduler`` 是本地调度权威（Scheduler Authority）；只把同一
-            # 已装配实例交给工作流组合根，禁止重新创建第二个调度器。
-            edge_scheduler = get_edge_scheduler()
-            # ``source_plan_arguments`` 只在工作区运行时传入预编译工作流
-            # 源码（Workflow Source）计划，保持旧可编辑包组合接线兼容。
-            source_plan_arguments = {}
-            if BasicConfig.workflow_source_discovery_plan is not None:
-                source_plan_arguments["editable_source_discovery_plan"] = (
-                    BasicConfig.workflow_source_discovery_plan
-                )
-            # 工作区（Workspace）由统一文件世代监视器拥有刷新；逐工作流源码
-            # 监视器（Workflow Source Monitor）只保留给非工作区遗留入口。
-            source_plan_arguments["start_source_monitor"] = (
-                BasicConfig.workflow_source_discovery_plan is None
-            )
-            if inventory_service is not None and edge_scheduler is not None:
-                from unilabos.registry.registry import lab_registry
-
+        workflow_runtime_required = True
+        workflow_runtime_deferred = defer_workflow_initialization
+        _reset_workflow_activation_progress()
+        _set_workflow_runtime_phase("mounting_routes")
+        if defer_workflow_initialization:
+            _mount_deferred_workflow_runtime_api()
+        else:
+            try:
                 workflow_service, template_projection = (
-                    compose_local_workflow_template_runtime(
-                        workflow_runtime_directory,
-                        inventory_store=inventory_service.store,
-                        registry=lab_registry,
-                        scheduler=edge_scheduler,
-                        editable_package_roots=(
-                            BasicConfig.workflow_editable_package_roots
-                        ),
-                        **source_plan_arguments,
-                    )
+                    _compose_configured_workflow_runtime()
                 )
-            else:
-                workflow_service = compose_workflow_runtime(
-                    workflow_runtime_directory,
-                    editable_package_roots=(
-                        BasicConfig.workflow_editable_package_roots
-                    ),
-                    **source_plan_arguments,
+                workflow_runtime_catalog_required = template_projection is not None
+                _install_workflow_runtime_api(
+                    service=workflow_service,
+                    template_projection=template_projection,
+                    authoring_transform=workflow_service.compiler,
                 )
-            install_workflow_api(
-                app,
-                workflow_service,
-                template_snapshot_provider=template_projection,
-                authoring_transform=workflow_service.compiler,
-            )
-            workflow_routes_mounted = True
-        except Exception as e:  # noqa: BLE001 - unrelated Edge routes remain available
-            error(f"[Web] 挂载 Backend Workflow 合同失败: {str(e)}")
+                _publish_workflow_runtime(
+                    service=workflow_service,
+                    template_projection=template_projection,
+                )
+            except Exception as runtime_exception:  # noqa: BLE001
+                _set_workflow_runtime_phase(
+                    "failed",
+                    runtime_error=str(runtime_exception),
+                )
+                error(
+                    "[Web] 挂载 Backend Workflow 合同失败: "
+                    f"{runtime_exception}"
+                )
+    elif not embedded_scheduler_enabled or not BasicConfig.working_dir:
+        workflow_runtime_required = False
+        workflow_runtime_deferred = False
+        workflow_runtime_catalog_required = False
+        _reset_workflow_activation_progress()
+        _set_workflow_runtime_phase("disabled")
 
     # 正式 Backend 控制面只保留基础设备诊断路由，不导入本地 Scheduler 模块。
     if embedded_scheduler_enabled:
@@ -307,12 +545,12 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     Returns:
         bool: True if restart was requested, False otherwise
     """
-    import threading
     import time
     from uvicorn import Config, Server
 
-    # 设置服务器
-    setup_server()
+    # 先固定完整路由表，但把工作流冷启动留到监听端口之后执行；这样 health
+    # 证明进程存活，readiness 则持续公开真实激活阶段。
+    setup_server(defer_workflow_initialization=True)
 
     # 配置日志
     log_config = setup_fastapi_logging()
@@ -337,6 +575,25 @@ def start_server(host: str = "0.0.0.0", port: int = 8002, open_browser: bool = T
     # 启动服务器线程
     server_thread = threading.Thread(target=server.run, daemon=True, name="uvicorn_server")
     server_thread.start()
+
+    startup_deadline = time.monotonic() + 5.0
+    while (
+        server_thread.is_alive()
+        and not server.started
+        and time.monotonic() < startup_deadline
+    ):
+        time.sleep(0.01)
+    if not server.started:
+        server.should_exit = True
+        server_thread.join(timeout=5)
+        raise RuntimeError("FastAPI 监听端口启动失败")
+
+    try:
+        initialize_deferred_workflow_runtime()
+    except Exception:
+        # readiness 已原子发布 failed；继续保留 health、诊断、设备等无关接口，
+        # 由需要完整工作流合同的 Workspace Host 决定是否终止托管进程。
+        pass
 
     # info("[Web] Server started, monitoring for restart requests...")
 
