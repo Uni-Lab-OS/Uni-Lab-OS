@@ -344,6 +344,9 @@ def test_first_bootstrap_exposes_stable_device_material_and_ordered_sites() -> N
     assert [node["material"]["uuid"] for node in graph["nodes"]] == [
         MOUNT_MATERIAL_UUID
     ]
+    assert graph["nodes"][0]["material"]["meta_data"]["edge_local_id"] == (
+        "m2b_mount"
+    )
     sites = graph["nodes"][0]["sites"]
     assert [site["uuid"] for site in sites] == [
         FIRST_SITE_UUID,
