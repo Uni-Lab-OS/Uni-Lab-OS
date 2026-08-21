@@ -187,7 +187,6 @@ def graph_payload(
     automatic: bool = False,
     site_uuid: str | None = None,
     slot_uuids: list[str] | None = None,
-    custody_policy: str = "task_exclusive",
 ) -> dict[str, list[dict[str, Any]]]:
     """构造公开图接口使用的真实物料来源工作流图。
 
@@ -219,7 +218,6 @@ def graph_payload(
                     "site": site_uuid,
                     "slot_range": slot_uuids,
                     "flow_role": "primary_sample",
-                    "custody_policy": custody_policy,
                 },
                 "execution_policy": {},
                 "disabled": False,
@@ -276,7 +274,6 @@ def install_applied_graph(
     automatic: bool = False,
     site_uuid: str | None = None,
     slot_uuids: list[str] | None = None,
-    custody_policy: str = "task_exclusive",
 ) -> str:
     """投影模板并经公开 HTTP 保存真实已应用工作流图。
 
@@ -319,7 +316,6 @@ def install_applied_graph(
         automatic=automatic,
         site_uuid=site_uuid,
         slot_uuids=slot_uuids,
-        custody_policy=custody_policy,
     )
     # ``node_values``/``edge_values`` 先建立服务端拥有的执行器绑定；后续公开 PUT
     # 必须保留而不能接受浏览器篡改该保留元数据。

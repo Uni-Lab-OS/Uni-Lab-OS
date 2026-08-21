@@ -177,7 +177,6 @@ def test_material_source_admission_projects_typed_result_atomically(
     binding = {
         "uuid": "50000000-0000-4000-8000-000000000001",
         "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
-        "custody_policy": "task_exclusive",
     }
 
     projection.project_material_source_admission(
@@ -206,7 +205,6 @@ def test_paused_submission_accepts_succeeded_material_sources(
             NODE_UUIDS[0]: {
                 "uuid": "50000000-0000-4000-8000-000000000001",
                 "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
-                "custody_policy": "task_exclusive",
             }
         },
     )
@@ -237,7 +235,6 @@ def test_running_admission_replay_repairs_implicit_passthrough_binding(
     binding = {
         "uuid": "50000000-0000-4000-8000-000000000001",
         "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
-        "custody_policy": "shared_source",
     }
     plan = {
         "version": 1,
@@ -339,12 +336,10 @@ def test_multiple_material_sources_targeting_one_action_keep_all_bindings(
     binding_1 = {
         "uuid": "50000000-0000-4000-8000-000000000001",
         "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
-        "custody_policy": "shared_source",
     }
     binding_2 = {
         "uuid": "50000000-0000-4000-8000-000000000002",
         "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
-        "custody_policy": "task_exclusive",
     }
 
     _projection(store).project_material_source_admission(
@@ -377,7 +372,6 @@ def test_source_only_admission_completes_task_without_running_state(
             NODE_UUIDS[0]: {
                 "uuid": "50000000-0000-4000-8000-000000000001",
                 "resource_template_uuid": "60000000-0000-4000-8000-000000000001",
-                "custody_policy": "shared_source",
             }
         },
     )
