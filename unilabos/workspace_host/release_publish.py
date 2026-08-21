@@ -1663,17 +1663,19 @@ def _bind_backend_material_sources(
     target_templates: Mapping[str, str],
     target_site_resolver: Callable[[str, str], str] | None = None,
 ) -> dict[str, Any]:
-    """Translate Local inventory selectors into one Backend release snapshot.
+    """把本地库存选择器转换为一份 Backend 发布快照。
 
-    Backend allocates an existing Material with exact template equality.  A
-    release-only derived template is required when a Local Material owns Sites,
-    so keeping only the canonical ``resource_template_uuid`` makes that
-    material invisible to the allocator.  The release Adapter already has the
-    complete Local inventory graph and both identity maps; bind each resolvable
-    selector deterministically and carry the selected Material's actual target
-    template.  Selectors without current compatible inventory stay unbound so
-    the workflow remains valid authoring content and Backend run admission can
-    resolve it after the inventory changes.
+    ``graph`` 是待发布工作流图，``material_graph`` 提供本地物料与库位事实；
+    ``material_identities``、``material_template_names``、
+    ``source_template_names`` 和 ``target_templates`` 分别完成发布身份与模板映射，
+    ``target_site_resolver`` 可把本地库位（Site）转换为目标库位身份。返回图是深拷贝，
+    不修改调用方输入；映射缺失或图结构不合法时抛出 ``ReleasePublishError``。
+
+    Backend 只按精确模板分配既有物料。拥有库位（Site）的本地物料需要发布期派生模板，
+    因此这里用一个兼容候选确定目标模板。共享来源或显式选择冻结具体物料身份；未显式
+    指定实例的任务独占来源保持未绑定，由 Backend 在每条工作流任务（WorkflowTask）的
+    任务物料准入（TaskMaterialAdmission）中选择不同的空闲物料。当前没有兼容库存的
+    选择器也保持未绑定，使合法工作流在库存变化后仍可重新准入。
     """
 
     bound = deepcopy(dict(graph))
@@ -1739,6 +1741,11 @@ def _bind_backend_material_sources(
         )
         explicit_material_uuid = str(param.get("material_uuid") or "")
         explicit_site = str(param.get("site") or "").strip()
+        dynamic_task_exclusive = (
+            not explicit_material_uuid
+            and str(param.get("custody_policy") or "").strip().casefold()
+            == "task_exclusive"
+        )
 
         if explicit_material_uuid:
             candidates = [explicit_material_uuid]
@@ -1847,7 +1854,11 @@ def _bind_backend_material_sources(
                     "template_name": target_template_name,
                 },
             )
-        param["material_uuid"] = material_identities[selected]
+        param["material_uuid"] = (
+            None
+            if dynamic_task_exclusive
+            else material_identities[selected]
+        )
         param["resource_template_uuid"] = target_template_uuid
         if explicit_site:
             owner = site_owner.get(explicit_site)
@@ -1873,7 +1884,8 @@ def _bind_backend_material_sources(
             if target_site_resolver is not None:
                 param["site"] = target_site_resolver(owner[0], owner[2])
         node["param"] = param
-        selected_materials.add(selected)
+        if not dynamic_task_exclusive:
+            selected_materials.add(selected)
     return bound
 
 
