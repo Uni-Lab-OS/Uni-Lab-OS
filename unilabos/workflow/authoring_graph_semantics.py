@@ -149,6 +149,17 @@ def _semantic_entities(
             for field_name in ("description", "data_source", "data_key"):
                 semantic.setdefault(field_name, None)
         elif collection_name == "node_templates":
+            # Backend ``omitempty`` 会省略节点模板的可空展示/Schema 字段，而
+            # 编译器从目录重投影时显式返回 ``None``；二者没有作者语义差异。
+            for field_name in (
+                "description",
+                "class",
+                "schema",
+                "icon",
+                "header",
+                "footer",
+            ):
+                semantic.setdefault(field_name, None)
             # package 目录摘要证明模板来自哪个完整发布代际；同一模板的定义内容
             # 与调用合同已由其余 provenance/schema 字段固定，其他工作流发布导致
             # 的整包摘要变化不应让当前作者图失去 Python 往返固定点。

@@ -252,6 +252,57 @@ def test_shared_source_admits_two_tasks_without_task_reservation(
     ]
 
 
+def test_task_exclusive_source_skips_active_shared_material(
+    inventory: tuple[InventoryStore, InventoryService, dict[str, str]],
+) -> None:
+    """任务独占来源不得抢占已被活跃共享来源绑定的物料。"""
+
+    _store, service, identities = inventory
+    shared = MaterialSourceAdmissionRequest(
+        node_id="z-shared-pump",
+        resource_template_uuid=identities["template"],
+        custody_policy="shared_source",
+        requirement=MaterialRequirement(
+            template_id=identities["template"],
+            mount_uuid=identities["mount"],
+            site_uuid=SITE_A,
+        ),
+    )
+    exclusive = MaterialSourceAdmissionRequest(
+        node_id="a-moving-reagent",
+        resource_template_uuid=identities["template"],
+        custody_policy="task_exclusive",
+        requirement=MaterialRequirement(
+            template_id=identities["template"],
+            mount_uuid=identities["mount"],
+        ),
+    )
+
+    admitted = service.admit_material_sources(
+        "workflow-mixed",
+        [exclusive, shared],
+    )
+
+    assert admitted["allocations"] == {
+        "a-moving-reagent": [identities["second"]],
+        "z-shared-pump": [identities["first"]],
+    }
+    fixed_shared_material = MaterialSourceAdmissionRequest(
+        node_id="fixed-moving-reagent",
+        resource_template_uuid=identities["template"],
+        custody_policy="task_exclusive",
+        requirement=MaterialRequirement(
+            template_id=identities["template"],
+            instance_uuid=identities["first"],
+        ),
+    )
+    with pytest.raises(InsufficientStock, match="active shared source"):
+        service.admit_material_sources(
+            "workflow-fixed-exclusive",
+            [fixed_shared_material],
+        )
+
+
 def test_task_exclusive_source_blocks_second_task_until_release(
     inventory: tuple[InventoryStore, InventoryService, dict[str, str]],
 ) -> None:

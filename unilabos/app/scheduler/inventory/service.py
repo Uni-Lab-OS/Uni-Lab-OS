@@ -594,7 +594,17 @@ class InventoryService:
             raise CommandRejected("material source admission node_id must be non-empty and unique")
 
         with self._tx() as conn:
-            for request in sorted(requests, key=lambda item: item.node_id):
+            # 先冻结共享来源，再分配任务独占来源；这使准入结果
+            # 不受节点 UUID 字典序影响，并让独占分配稳定避开同一请求
+            # 集中的固定共享物料。
+            ordered_requests = sorted(
+                requests,
+                key=lambda item: (
+                    item.custody_policy != "shared_source",
+                    item.node_id,
+                ),
+            )
+            for request in ordered_requests:
                 self._validate_material_source_request(request)
                 selector_json = json.dumps(
                     request.requirement.to_dict(),
@@ -805,7 +815,14 @@ class InventoryService:
         amounts: Dict[str, Any] = {"lots": {}, "instances": []}
         for req in requirements:
             if req.is_instance_requirement():
-                inst = self._tx_resolve_instance(conn, req)
+                # 任务全程预留不得把已经被活跃共享来源绑定的实例
+                # 变为独占物料。共享来源故意保持 warehouse 状态，因此不能
+                # 只依赖实例状态排除这种跨策略冲突。
+                inst = self._tx_resolve_instance(
+                    conn,
+                    req,
+                    exclude_active_shared=True,
+                )
                 if inst["status"] != InstanceState.WAREHOUSE.value:
                     raise InsufficientStock(
                         f"instance {inst['edge_uuid']} not in warehouse (status={inst['status']})"
@@ -844,10 +861,16 @@ class InventoryService:
         return amounts
 
     @staticmethod
-    def _tx_resolve_instance(conn: sqlite3.Connection, req: MaterialRequirement) -> Dict[str, Any]:
+    def _tx_resolve_instance(
+        conn: sqlite3.Connection,
+        req: MaterialRequirement,
+        *,
+        exclude_active_shared: bool = False,
+    ) -> Dict[str, Any]:
         """在当前库存事务内解析并核对一个实例型物料需求。
 
-        参数：``conn`` 是外层写事务，``req`` 是固定 UUID、条码或库位选择器。
+        参数：``conn`` 是外层写事务，``req`` 是固定 UUID、条码或库位选择器；
+        ``exclude_active_shared`` 表示任务独占预留必须排除活跃共享来源。
         返回：兼容视图中的具体物料实例行。异常：混合选择器或固定实例模板不
         匹配抛 ``CommandRejected``，身份缺失抛 ``NotFound``，自动选择没有
         可用实例时由库位解析抛 ``InsufficientStock``。
@@ -869,7 +892,11 @@ class InventoryService:
                 (req.barcode, *_ACTIVE_STATES_TUPLE),
             ).fetchone()
         else:
-            return InventoryService._tx_select_site_instance(conn, req)
+            return InventoryService._tx_select_site_instance(
+                conn,
+                req,
+                exclude_active_shared=exclude_active_shared,
+            )
         if row is None:
             raise NotFound(f"instance {req.instance_uuid or req.barcode} not found")
         instance = dict(row)
@@ -877,18 +904,28 @@ class InventoryService:
             raise CommandRejected(
                 f"instance {instance['edge_uuid']} template does not match {req.template_id}"
             )
+        if exclude_active_shared and InventoryService._tx_has_active_shared_binding(
+            conn,
+            str(instance["edge_uuid"]),
+        ):
+            raise InsufficientStock(
+                f"instance {instance['edge_uuid']} has an active shared source binding"
+            )
         return instance
 
     @staticmethod
     def _tx_select_site_instance(
         conn: sqlite3.Connection,
         req: MaterialRequirement,
+        *,
+        exclude_active_shared: bool = False,
     ) -> Dict[str, Any]:
         """在当前占用事务内按挂载点与库位集合确定性选择一个实例。
 
         参数：``conn`` 是 ``BEGIN IMMEDIATE`` 写事务；``req`` 提供资源模板、
-        挂载物料及可选精确库位（Site）/库位（Slot）集合。返回：首个仍为
-        ``warehouse`` 的兼容物料实例。异常：选择器结构非法抛
+        挂载物料及可选精确库位（Site）/库位（Slot）集合；
+        ``exclude_active_shared`` 用于独占预留过滤已绑定的共享来源。返回：
+        首个仍为 ``warehouse`` 的兼容物料实例。异常：选择器结构非法抛
         ``CommandRejected``/``NotFound``，没有可用占用物料抛
         ``InsufficientStock``。
         """
@@ -950,6 +987,15 @@ class InventoryService:
             placeholders = ",".join("?" for _ in selected_sites)
             where.append(f"site.uuid IN ({placeholders})")
             values.extend(selected_sites)
+        if exclude_active_shared:
+            where.append(
+                "NOT EXISTS ("
+                "SELECT 1 FROM inventory_material_source_binding AS binding "
+                "WHERE binding.material_uuid=instance.edge_uuid "
+                "AND binding.custody_policy='shared_source' "
+                "AND binding.status='active'"
+                ")"
+            )
         row = conn.execute(
             "SELECT instance.* FROM site AS site "
             "JOIN material AS material ON material.uuid = site.occupied_material_uuid "
@@ -965,6 +1011,23 @@ class InventoryService:
                 f"no warehouse instance for template {req.template_id} in {scope}"
             )
         return dict(row)
+
+    @staticmethod
+    def _tx_has_active_shared_binding(
+        conn: sqlite3.Connection,
+        material_uuid: str,
+    ) -> bool:
+        """检查物料是否已被任意活跃共享来源绑定。"""
+
+        return (
+            conn.execute(
+                "SELECT 1 FROM inventory_material_source_binding "
+                "WHERE material_uuid=? AND custody_policy='shared_source' "
+                "AND status='active' LIMIT 1",
+                (material_uuid,),
+            ).fetchone()
+            is not None
+        )
 
     def _tx_candidate_lots(
         self, conn: sqlite3.Connection, req: MaterialRequirement

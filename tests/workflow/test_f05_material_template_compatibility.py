@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
-from unilabos.workflow.service import WorkflowError
 from unilabos.workflow.material_graph_validation import (
+    MaterialGraphValidationError,
     validate_material_graph_projection,
 )
+from unilabos.workflow.service import WorkflowError
 
 from .f05_material_graph_fixtures import (
     INCOMPATIBLE_TEMPLATE_UUID,
@@ -23,8 +25,11 @@ from .f05_material_graph_fixtures import (
     passthrough_chain_source,
     single_chain_source,
 )
-from .test_authoring_engine import WORKFLOW_UUID
-from .test_f05_material_source_authoring import PLATE_TEMPLATE_UUID
+from .test_authoring_engine import PREPARE_SAMPLE_TARGET, WORKFLOW_UUID
+from .test_f05_material_source_authoring import (
+    PLATE_TEMPLATE_UUID,
+    PREPARE_NODE_UUID,
+)
 
 
 def test_consumer_without_allowlist_accepts_material_source_guarantee() -> None:
@@ -237,3 +242,47 @@ def test_composite_same_name_output_inherits_connected_input_guarantee() -> None
     output["meta_data"]["unilab"]["implicit_passthrough"] = False
 
     validate_material_graph_projection(graph)
+
+
+def test_shared_source_cannot_enter_movement_inside_composite_workflow() -> None:
+    """共享来源不得通过复合工作流边界进入冻结子图移动动作。"""
+
+    result = compile_material_source_graph(
+        material_graph_engine(),
+        single_chain_source(),
+    )
+    assert result.valid and result.graph is not None, result.diagnostics
+    graph = result.graph
+    source = next(node for node in graph["nodes"] if node["type"] == "material_source")
+    source["param"]["custody_policy"] = "shared_source"
+    invocation = next(
+        node for node in graph["nodes"] if node["uuid"] == PREPARE_NODE_UUID
+    )
+    child_pick = deepcopy(invocation)
+    child_pick.update(
+        {
+            "uuid": "20000000-0000-4000-8000-000000000099",
+            "name": "pick",
+            "action_name": "pick",
+            "type": "ILab",
+            "parent_uuid": PREPARE_NODE_UUID,
+        }
+    )
+    graph["nodes"].append(child_pick)
+    invocation["type"] = "workflow"
+    invocation["action_name"] = None
+    invocation["meta_data"]["unilab"]["composite"] = {
+        "target_mappings": {
+            PREPARE_SAMPLE_TARGET: [
+                {
+                    "workflow_node_uuid": child_pick["uuid"],
+                    "target_handle_uuid": PREPARE_SAMPLE_TARGET,
+                }
+            ]
+        }
+    }
+
+    with pytest.raises(MaterialGraphValidationError) as caught:
+        validate_material_graph_projection(graph)
+
+    assert caught.value.code == "shared_source_movement_forbidden"

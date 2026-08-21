@@ -195,6 +195,17 @@ def _validate_shared_source_movement(
                     f"共享物料来源 {source_uuid} 不得进入移动动作 {action_name}；"
                     "请改用任务全程独占（task_exclusive）",
                 )
+            # 复合工作流（Composite Workflow）的外部输入与冻结子图
+            # 之间没有普通 Edge；``target_mappings`` 是跨边界的权威连接。
+            # 将它投影为只读到达项，使共享来源不能藏在复合调用
+            # 内部进入 pick/place/transfer_resource。
+            queue.extend(
+                _composite_material_target_arrivals(
+                    target_node,
+                    target_handle_uuid=str(_field(edge, "target_handle_uuid")),
+                    handles=handles,
+                )
+            )
             for next_edge in outgoing.get(target_uuid, ()):
                 source_handle = handles.get(
                     str(_field(next_edge, "source_handle_uuid"))
@@ -205,6 +216,62 @@ def _validate_shared_source_movement(
                     and _material_handle_data_key(source_handle) == identity_key
                 ):
                     queue.append(next_edge)
+
+
+def _composite_material_target_arrivals(
+    node: Any,
+    *,
+    target_handle_uuid: str,
+    handles: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """把复合工作流外部物料输入投影到冻结子图输入。
+
+    参数说明：``node`` 是可能的复合调用节点，``target_handle_uuid``
+    是当前物料到达的外部输入，``handles`` 是同代句柄目录。
+    返回：可由主遍历直接消费的内部目标到达项；结构不完整时
+    返回空集合，由其他创作合同校验报错。
+    """
+
+    meta_data = (
+        node.get("meta_data")
+        if isinstance(node, Mapping)
+        else getattr(node, "meta_data", None)
+    )
+    if not isinstance(meta_data, Mapping):
+        return []
+    unilab = meta_data.get("unilab")
+    if not isinstance(unilab, Mapping):
+        return []
+    composite = unilab.get("composite")
+    if not isinstance(composite, Mapping):
+        return []
+    target_mappings = composite.get("target_mappings")
+    if not isinstance(target_mappings, Mapping):
+        return []
+    raw_mappings = target_mappings.get(target_handle_uuid)
+    if not isinstance(raw_mappings, Sequence) or isinstance(raw_mappings, (str, bytes)):
+        return []
+    arrivals: list[dict[str, str]] = []
+    for mapping in raw_mappings:
+        if not isinstance(mapping, Mapping):
+            continue
+        node_uuid = mapping.get("workflow_node_uuid")
+        handle_uuid = mapping.get("target_handle_uuid")
+        handle = handles.get(str(handle_uuid or ""))
+        if (
+            not isinstance(node_uuid, str)
+            or not node_uuid
+            or handle is None
+            or not _is_resource_slot_handle(handle)
+        ):
+            continue
+        arrivals.append(
+            {
+                "target_node_uuid": node_uuid,
+                "target_handle_uuid": str(handle_uuid),
+            }
+        )
+    return arrivals
 
 
 def _material_handle_data_key(handle: Mapping[str, Any]) -> str:
