@@ -144,6 +144,10 @@ class ExecutionPlanBuilder:
             policy = dict(node.get("execution_policy") or {})
             # ``planned_param`` 是任务提交时冻结的动作输入，不是运行时回退视图。
             planned_param = dict(node.get("param") or {})
+            if kind == "material_source" and "custody_policy" not in planned_param:
+                # 升级前七字段来源按历史安全语义显式迁移为任务全程独占；冻结
+                # 计划从此只发布八字段合同，协调器无需猜测旧图版本。
+                planned_param["custody_policy"] = "task_exclusive"
             planned_param.update(composite_params.get(node_uuid, {}))
             # ``fixed_params`` 是固定的 ``existing`` 物料来源（MaterialSource）沿物料占位符链投影的实例引用。
             fixed_params = material_params.get(node_uuid, {})
@@ -280,7 +284,14 @@ class ExecutionPlanBuilder:
                     code="invalid_material_uuid",
                     message="物料来源 UUID 非法",
                 )
-                requirement = {"instance_uuid": material_uuid}
+                requirement = {
+                    "template_id": self._selector_uuid(
+                        selector.get("resource_template_uuid"),
+                        code="invalid_material_source_selector",
+                        message="物料来源资源模板 UUID 非法",
+                    ),
+                    "instance_uuid": material_uuid,
+                }
             else:
                 mount = selector.get("mount")
                 if not isinstance(mount, Mapping):

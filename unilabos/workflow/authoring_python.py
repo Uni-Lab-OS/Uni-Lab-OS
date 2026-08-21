@@ -190,7 +190,9 @@ def render_authoring_python(
         if any(_parallel_scope(node) is not None for node in group_nodes):
             marker_imports += ", parallel"
     if material_sources:
-        marker_imports += ", MaterialFlowRole, material_source, resource_ref"
+        marker_imports += (
+            ", MaterialCustodyPolicy, MaterialFlowRole, material_source, resource_ref"
+        )
     elif any(
         isinstance((node.get("meta_data") or {}).get("unilab"), Mapping)
         and bool((node.get("meta_data") or {})["unilab"].get("resource_refs"))

@@ -153,7 +153,10 @@ def test_short_term_reservation_requirement_belongs_to_source_job() -> None:
     }
 
     assert requirements_by_node[SOURCE_NODE_UUID] == [
-        {"instance_uuid": MATERIAL_UUID}
+        {
+            "template_id": "70000000-0000-4000-8000-000000000001",
+            "instance_uuid": MATERIAL_UUID,
+        }
     ]
     assert all(
         not requirements

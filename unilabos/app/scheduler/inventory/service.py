@@ -25,6 +25,7 @@ from unilabos.app.scheduler.inventory.domain import (
     InsufficientStock,
     InvariantViolation,
     MaterialRequirement,
+    MaterialSourceAdmissionRequest,
     NotFound,
     ReservationState,
     VersionConflict,
@@ -546,50 +547,249 @@ class InventoryService:
             for node_id, requirements in node_requirements.items():
                 if not requirements:
                     continue
-                existing = conn.execute(
-                    "SELECT * FROM inventory_reservation WHERE workflow_id = ? AND node_id = ? "
-                    "AND attempt = ?",
-                    (workflow_id, node_id, attempt),
-                ).fetchone()
-                if existing is not None and existing["status"] in (
-                    ReservationState.ACTIVE.value, ReservationState.CONSUMED.value,
-                ):
-                    existing_amounts = json.loads(existing["amounts_json"])
-                    allocations[node_id] = list(
-                        existing_amounts.get("instances", [])
-                    )
-                    continue  # 幂等重放
-                amounts = self._tx_allocate(conn, now, workflow_id, node_id, requirements,
-                                            actor, causation_id)
-                reservation_id = f"rsv-{uuid.uuid4().hex[:16]}"
-                if existing is not None:
-                    conn.execute(
-                        "UPDATE inventory_reservation SET status = ?, amounts_json = ?, "
-                        "version = version + 1 WHERE workflow_id = ? AND node_id = ? AND attempt = ?",
-                        (ReservationState.ACTIVE.value, json.dumps(amounts), workflow_id,
-                         node_id, attempt),
-                    )
-                    reservation_id = existing["reservation_id"]
-                else:
-                    conn.execute(
-                        "INSERT INTO inventory_reservation(reservation_id, workflow_id, node_id, "
-                        "attempt, status, amounts_json, created_at, version) VALUES (?,?,?,?,?,?,?,1)",
-                        (reservation_id, workflow_id, node_id, attempt,
-                         ReservationState.ACTIVE.value, json.dumps(amounts), now),
-                    )
-                created.append(node_id)
-                allocations[node_id] = list(amounts.get("instances", []))
-                self._emit(
-                    conn, now, "reservation", reservation_id, 1, "reservation.created",
-                    {"workflow_id": workflow_id, "node_id": node_id, "attempt": attempt,
-                     "amounts": amounts},
-                    causation_id=causation_id, actor=actor,
+                amounts, was_created = self._tx_reserve_node(
+                    conn,
+                    now,
+                    workflow_id,
+                    node_id,
+                    requirements,
+                    attempt,
+                    actor,
+                    causation_id,
                 )
+                if was_created:
+                    created.append(node_id)
+                allocations[node_id] = list(amounts.get("instances", []))
         return {
             "workflow_id": workflow_id,
             "reserved_nodes": created,
             "allocations": allocations,
         }
+
+    @_traced_operation("material_source.admit")
+    def admit_material_sources(
+        self,
+        workflow_id: str,
+        requests: List[MaterialSourceAdmissionRequest],
+        attempt: int = 1,
+        actor: str = "",
+        causation_id: str = "",
+    ) -> Dict[str, Any]:
+        """原子准入并冻结一个工作流任务的全部物料来源绑定。
+
+        参数：``workflow_id``/``attempt`` 标识任务尝试，``requests`` 是来源
+        选择器与保管策略，``actor``/``causation_id`` 进入账本追踪。返回：每个
+        来源节点的稳定物料分配，以及真正建立任务全程预留的节点。异常：策略、
+        模板或幂等输入不一致抛 ``CommandRejected``；任一来源不可用抛
+        ``InsufficientStock``，并由同一事务回滚整组新绑定与预留。
+        """
+
+        now = self._now_ms()
+        allocations: Dict[str, List[str]] = {}
+        reserved_nodes: List[str] = []
+        node_ids = [request.node_id for request in requests]
+        if not workflow_id or attempt < 1:
+            raise CommandRejected("material source admission needs workflow_id and attempt >= 1")
+        if any(not node_id for node_id in node_ids) or len(set(node_ids)) != len(node_ids):
+            raise CommandRejected("material source admission node_id must be non-empty and unique")
+
+        with self._tx() as conn:
+            for request in sorted(requests, key=lambda item: item.node_id):
+                self._validate_material_source_request(request)
+                selector_json = json.dumps(
+                    request.requirement.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                existing = conn.execute(
+                    "SELECT * FROM inventory_material_source_binding "
+                    "WHERE workflow_id=? AND node_id=? AND attempt=?",
+                    (workflow_id, request.node_id, attempt),
+                ).fetchone()
+                if existing is not None:
+                    binding = dict(existing)
+                    if binding["status"] != "active":
+                        raise CommandRejected(
+                            f"material source binding {request.node_id} is already released"
+                        )
+                    expected = (
+                        request.resource_template_uuid,
+                        request.custody_policy,
+                        selector_json,
+                    )
+                    actual = (
+                        binding["resource_template_uuid"],
+                        binding["custody_policy"],
+                        binding["selector_json"],
+                    )
+                    if actual != expected:
+                        raise CommandRejected(
+                            f"material source binding {request.node_id} changed during replay"
+                        )
+                    allocations[request.node_id] = [binding["material_uuid"]]
+                    continue
+
+                if request.custody_policy == "task_exclusive":
+                    amounts, was_created = self._tx_reserve_node(
+                        conn,
+                        now,
+                        workflow_id,
+                        request.node_id,
+                        [request.requirement],
+                        attempt,
+                        actor,
+                        causation_id,
+                    )
+                    material_uuids = list(amounts.get("instances", []))
+                    if was_created:
+                        reserved_nodes.append(request.node_id)
+                else:
+                    instance = self._tx_resolve_instance(conn, request.requirement)
+                    if instance["status"] != InstanceState.WAREHOUSE.value:
+                        raise InsufficientStock(
+                            f"shared source {instance['edge_uuid']} is not available"
+                        )
+                    material_uuids = [instance["edge_uuid"]]
+
+                if len(material_uuids) != 1:
+                    raise CommandRejected(
+                        f"material source {request.node_id} must bind exactly one material"
+                    )
+                material_uuid = material_uuids[0]
+                conn.execute(
+                    "INSERT INTO inventory_material_source_binding("
+                    "binding_id,workflow_id,node_id,attempt,material_uuid,"
+                    "resource_template_uuid,custody_policy,selector_json,status,created_at,version"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                    (
+                        f"msb-{uuid.uuid4().hex[:16]}",
+                        workflow_id,
+                        request.node_id,
+                        attempt,
+                        material_uuid,
+                        request.resource_template_uuid,
+                        request.custody_policy,
+                        selector_json,
+                        "active",
+                        now,
+                    ),
+                )
+                allocations[request.node_id] = [material_uuid]
+
+        return {
+            "workflow_id": workflow_id,
+            "reserved_nodes": reserved_nodes,
+            "allocations": allocations,
+        }
+
+    @staticmethod
+    def _validate_material_source_request(request: MaterialSourceAdmissionRequest) -> None:
+        """验证物料来源准入请求的精确线格式与单实例不变量。
+
+        参数：``request`` 是一个来源准入值对象。返回：验证成功不返回数据。
+        异常：来源身份、策略、模板或实例需求不满足规范时抛
+        ``CommandRejected``，禁止隐式降级为任务独占或数量型批次预留。
+        """
+
+        if not request.node_id or not request.resource_template_uuid:
+            raise CommandRejected("material source request needs node_id and resource template")
+        if request.custody_policy not in {"task_exclusive", "shared_source"}:
+            raise CommandRejected(
+                f"invalid material custody policy: {request.custody_policy}"
+            )
+        requirement = request.requirement
+        if not requirement.is_instance_requirement() or requirement.quantity > 0:
+            raise CommandRejected("material source request must select one material instance")
+        if requirement.template_id != request.resource_template_uuid:
+            raise CommandRejected("material source selector template does not match its contract")
+
+    def _tx_reserve_node(
+        self,
+        conn: sqlite3.Connection,
+        now: int,
+        workflow_id: str,
+        node_id: str,
+        requirements: List[MaterialRequirement],
+        attempt: int,
+        actor: str,
+        causation_id: str,
+    ) -> tuple[Dict[str, Any], bool]:
+        """在当前事务内幂等建立一个节点的任务全程物料预留。
+
+        参数：连接与时间戳由外层事务提供，其余参数描述任务节点、尝试次数和
+        物料需求。返回：``(amounts, created)``，其中 ``created`` 只在本次真正
+        建立或重新激活预留时为真。异常：分配不足及状态不变量由
+        ``_tx_allocate`` 原样抛出，外层事务统一回滚。
+        """
+
+        existing = conn.execute(
+            "SELECT * FROM inventory_reservation WHERE workflow_id = ? AND node_id = ? "
+            "AND attempt = ?",
+            (workflow_id, node_id, attempt),
+        ).fetchone()
+        if existing is not None and existing["status"] in (
+            ReservationState.ACTIVE.value,
+            ReservationState.CONSUMED.value,
+        ):
+            return json.loads(existing["amounts_json"]), False
+
+        amounts = self._tx_allocate(
+            conn,
+            now,
+            workflow_id,
+            node_id,
+            requirements,
+            actor,
+            causation_id,
+        )
+        reservation_id = f"rsv-{uuid.uuid4().hex[:16]}"
+        aggregate_version = 1
+        if existing is not None:
+            aggregate_version = int(existing["version"]) + 1
+            conn.execute(
+                "UPDATE inventory_reservation SET status = ?, amounts_json = ?, "
+                "version = version + 1 WHERE workflow_id = ? AND node_id = ? AND attempt = ?",
+                (
+                    ReservationState.ACTIVE.value,
+                    json.dumps(amounts),
+                    workflow_id,
+                    node_id,
+                    attempt,
+                ),
+            )
+            reservation_id = existing["reservation_id"]
+        else:
+            conn.execute(
+                "INSERT INTO inventory_reservation(reservation_id, workflow_id, node_id, "
+                "attempt, status, amounts_json, created_at, version) VALUES (?,?,?,?,?,?,?,1)",
+                (
+                    reservation_id,
+                    workflow_id,
+                    node_id,
+                    attempt,
+                    ReservationState.ACTIVE.value,
+                    json.dumps(amounts),
+                    now,
+                ),
+            )
+        self._emit(
+            conn,
+            now,
+            "reservation",
+            reservation_id,
+            aggregate_version,
+            "reservation.created",
+            {
+                "workflow_id": workflow_id,
+                "node_id": node_id,
+                "attempt": attempt,
+                "amounts": amounts,
+            },
+            causation_id=causation_id,
+            actor=actor,
+        )
+        return amounts, True
 
     def _tx_allocate(
         self,
@@ -645,6 +845,14 @@ class InventoryService:
 
     @staticmethod
     def _tx_resolve_instance(conn: sqlite3.Connection, req: MaterialRequirement) -> Dict[str, Any]:
+        """在当前库存事务内解析并核对一个实例型物料需求。
+
+        参数：``conn`` 是外层写事务，``req`` 是固定 UUID、条码或库位选择器。
+        返回：兼容视图中的具体物料实例行。异常：混合选择器或固定实例模板不
+        匹配抛 ``CommandRejected``，身份缺失抛 ``NotFound``，自动选择没有
+        可用实例时由库位解析抛 ``InsufficientStock``。
+        """
+
         selector_fields = bool(req.mount_uuid or req.site_uuid or req.slot_uuids)
         if (req.instance_uuid or req.barcode) and selector_fields:
             raise CommandRejected(
@@ -664,7 +872,12 @@ class InventoryService:
             return InventoryService._tx_select_site_instance(conn, req)
         if row is None:
             raise NotFound(f"instance {req.instance_uuid or req.barcode} not found")
-        return dict(row)
+        instance = dict(row)
+        if req.template_id and instance["template_id"] != req.template_id:
+            raise CommandRejected(
+                f"instance {instance['edge_uuid']} template does not match {req.template_id}"
+            )
+        return instance
 
     @staticmethod
     def _tx_select_site_instance(
@@ -964,7 +1177,25 @@ class InventoryService:
                     reason=reason, actor=actor, causation_id=causation_id,
                 )
                 released.append(rsv["node_id"])
-        return {"workflow_id": workflow_id, "released_nodes": released}
+        now = self._now_ms()
+        with self._tx() as conn:
+            binding_rows = conn.execute(
+                "SELECT node_id FROM inventory_material_source_binding "
+                "WHERE workflow_id=? AND status='active' ORDER BY node_id",
+                (workflow_id,),
+            ).fetchall()
+            released_bindings = [str(row["node_id"]) for row in binding_rows]
+            conn.execute(
+                "UPDATE inventory_material_source_binding SET status='released', "
+                "released_at=?, version=version+1 "
+                "WHERE workflow_id=? AND status='active'",
+                (now, workflow_id),
+            )
+        return {
+            "workflow_id": workflow_id,
+            "released_nodes": released,
+            "released_bindings": released_bindings,
+        }
 
     # ------------------------------------------------------------------
     # deploy / move / consume / discard / adjust / content
