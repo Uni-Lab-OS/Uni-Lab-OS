@@ -89,6 +89,7 @@ def _real_authoring_graph(*, explicit_executor: bool = True) -> dict[str, Any]:
         "site": None,
         "slot_range": None,
         "flow_role": "primary_sample",
+        "custody_policy": "task_exclusive",
     }
     return {
         "nodes": [

@@ -39,8 +39,8 @@ MATERIAL_FLOW_ROLE_LABELS_ZH = MappingProxyType(
 # 物料保管策略（MaterialCustodyPolicy）显示名与 Backend wire 值共用一个来源。
 MATERIAL_CUSTODY_POLICY_LABELS_ZH = MappingProxyType(
     {
-        MaterialCustodyPolicy.TASK_EXCLUSIVE.value: "任务全程独占",
-        MaterialCustodyPolicy.SHARED_SOURCE.value: "共享来源（动作期间互斥）",
+        MaterialCustodyPolicy.TASK_EXCLUSIVE.value: "Task 全程独占",
+        MaterialCustodyPolicy.SHARED_SOURCE.value: "动作期间共享",
     }
 )
 

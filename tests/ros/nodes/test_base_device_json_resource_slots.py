@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
+from pylabrobot.resources import Resource
 
 from unilabos.registry.placeholder_type import ResourceSlot
 from unilabos.resources.resource_tracker import JSON_UNILABOS_PARAM, PARAM_SAMPLE_UUIDS
 from unilabos.ros.nodes import base_device_node
 from unilabos.ros.nodes.base_device_node import BaseROS2DeviceNode
+from unilabos.utils.type_check import TypeEncoder
 
 
 class _Logger:
@@ -49,6 +52,12 @@ class _AsyncDriver:
         return self.received
 
 
+class _AsyncCommandDriver:
+    async def echo(self, value: str) -> dict[str, str]:
+        await asyncio.sleep(0)
+        return {"value": value}
+
+
 def test_json_command_resolves_uuid_only_resource_slot_before_driver_call() -> None:
     """规范 UUID-only 物料引用必须在调用驱动前解析为完整资源实例。"""
 
@@ -77,6 +86,45 @@ def test_json_command_resolves_uuid_only_resource_slot_before_driver_call() -> N
 
     assert observed_uuids == ["50000000-0000-4000-8000-000000000001"]
     assert result is resolved_resource
+
+
+def test_sync_json_command_waits_for_async_driver_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同步 JSON Action 遇到异步驱动方法时必须等待真实结果。"""
+
+    loop = asyncio.new_event_loop()
+    loop_started = threading.Event()
+
+    def run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop_started.set()
+        loop.run_forever()
+
+    loop_thread = threading.Thread(target=run_loop, daemon=True)
+    loop_thread.start()
+    assert loop_started.wait(timeout=2.0)
+    monkeypatch.setattr(base_device_node.ROS2DeviceNode, "_asyncio_loop", loop)
+
+    node = object.__new__(BaseROS2DeviceNode)
+    node.driver_instance = _AsyncCommandDriver()
+    node.resource_tracker = None
+    node._resolve_driver_method_name = lambda name: name
+    node.lab_logger = lambda: _Logger()
+    command = {
+        "function_name": "echo",
+        "function_args": {"value": "completed"},
+        JSON_UNILABOS_PARAM: {PARAM_SAMPLE_UUIDS: {}},
+    }
+
+    try:
+        result = node._execute_driver_command(json.dumps(command))
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2.0)
+        loop.close()
+
+    assert result == {"value": "completed"}
 
 
 def test_json_command_resolves_annotated_resource_slot_before_driver_call() -> None:
@@ -120,10 +168,13 @@ def test_json_command_maps_inventory_uuid_to_runtime_resource_alias(
         unilabos_uuid=inventory_uuid,
         children=[],
     )
-    runtime_resource = SimpleNamespace(
-        unilabos_uuid=runtime_uuid,
-        children=[],
+    runtime_resource = Resource(
+        name="local-runtime-beaker",
+        size_x=1.0,
+        size_y=1.0,
+        size_z=1.0,
     )
+    runtime_resource.unilabos_uuid = runtime_uuid
     tree_set = SimpleNamespace(
         trees=[
             SimpleNamespace(
@@ -169,6 +220,36 @@ def test_json_command_maps_inventory_uuid_to_runtime_resource_alias(
     converted = node._convert_resources_sync(inventory_uuid)
 
     assert converted == [runtime_resource]
+    assert runtime_resource.unilabos_uuid == runtime_uuid
+    assert runtime_resource.unilabos_reference_uuid == inventory_uuid
+    assert json.loads(
+        json.dumps({"resource": runtime_resource}, cls=TypeEncoder)
+    ) == {"resource": {"uuid": inventory_uuid}}
+
+
+def test_nested_json_action_preserves_authority_uuid_instead_of_resource_repr() -> None:
+    """设备动作再次调用 Host 时必须发送权威 UUID，不能退化为 PLR 字符串。"""
+
+    inventory_uuid = "50000000-0000-4000-8000-000000000131"
+    runtime_uuid = "50000000-0000-4000-8000-000000000132"
+    resource = Resource(
+        name="nested-transfer-beaker",
+        size_x=1.0,
+        size_y=1.0,
+        size_z=1.0,
+    )
+    resource.unilabos_uuid = runtime_uuid
+    resource.unilabos_reference_uuid = inventory_uuid
+
+    command = {
+        "function_name": "transfer_resource",
+        "function_args": {"resource": resource},
+        JSON_UNILABOS_PARAM: {PARAM_SAMPLE_UUIDS: {}},
+    }
+
+    encoded = json.loads(json.dumps(command, cls=TypeEncoder))
+
+    assert encoded["function_args"]["resource"] == {"uuid": inventory_uuid}
 
 
 def test_json_command_preserves_device_root_skipped_by_plr_projection(

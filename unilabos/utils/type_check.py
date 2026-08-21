@@ -10,6 +10,18 @@ from pylabrobot.resources import Resource
 from unilabos.registry.action_policy import SUCCESS_TYPE_NORMAL, SuccessType
 
 
+UNILABOS_REFERENCE_UUID_ATTR = "unilabos_reference_uuid"
+
+
+def resource_reference_uuid(obj) -> Optional[str]:
+    """返回资源跨动作边界时应使用的权威 UUID。"""
+
+    reference_uuid = getattr(obj, UNILABOS_REFERENCE_UUID_ATTR, None)
+    runtime_uuid = getattr(obj, "unilabos_uuid", None)
+    resolved = reference_uuid or runtime_uuid
+    return str(resolved) if resolved else None
+
+
 _DEVICE_FAILURE_STATES = frozenset({"FAILED", "CANCELED", "UNKNOWN", "REJECTED"})
 
 
@@ -47,6 +59,10 @@ class TypeEncoder(json.JSONEncoder):
     """自定义JSON编码器处理特殊类型"""
 
     def default(self, obj):
+        if isinstance(obj, Resource):
+            resource_uuid = resource_reference_uuid(obj)
+            if resource_uuid is not None:
+                return {"uuid": resource_uuid}
         try:
             return json_default(obj)
         except Exception:
@@ -74,9 +90,9 @@ class ResultInfoEncoder(json.JSONEncoder):
         if isinstance(obj, type):
             return json_default(obj)
         if isinstance(obj, Resource):
-            resource_uuid = getattr(obj, "unilabos_uuid", None)
+            resource_uuid = resource_reference_uuid(obj)
             if resource_uuid is not None:
-                return {"uuid": str(resource_uuid)}
+                return {"uuid": resource_uuid}
             return obj.serialize()
 
         try:

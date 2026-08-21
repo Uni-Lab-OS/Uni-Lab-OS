@@ -37,7 +37,8 @@ class SiteSelector:
     参数说明：``owner`` 指向拥有候选库位（Site）的物料占位符
     （ResourceSlot）输入；``occupant`` 可选指向待放入物料；
     ``show_occupied`` 决定是否展示已占用库位；``allow_occupied`` 决定这些库位
-    是否可选。该对象只服务编辑器和静态合同，不查询库存权威。
+    是否可选。该对象服务编辑器、静态合同和 Backend 调度门禁；自身不查询库存
+    权威，实际库位占用仍由 Backend 数据库事务判定。
     """
 
     owner: str

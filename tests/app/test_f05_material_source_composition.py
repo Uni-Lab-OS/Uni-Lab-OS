@@ -30,6 +30,7 @@ def _szlab_material_source_code() -> str:
 
     return f'''from lab.resources import plate_96
 from unilabos.workflow.authoring import (
+    MaterialCustodyPolicy,
     MaterialFlowRole,
     material_source,
     resource_ref,
@@ -49,6 +50,7 @@ def szlab_mount():
         site=None,
         slot_range=None,
         flow_role=MaterialFlowRole.PRIMARY_SAMPLE,
+        custody_policy=MaterialCustodyPolicy.TASK_EXCLUSIVE,
     )
     return workflow_output()
 '''
