@@ -695,6 +695,41 @@ def test_restart_recovers_pending_paused_step_task_without_dispatch(
         bridge.close()
 
 
+def test_cancel_marks_unrecoverable_restart_task_interrupted(
+    store: WorkflowStore,
+) -> None:
+    """重启后失去调度运行的物理作业可被明确终结，不再永久阻塞切换。"""
+
+    _seed_task(store, with_material=False)
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_task SET status = 'running' WHERE uuid = ?",
+            (TASK_UUID,),
+        )
+        connection.execute(
+            "UPDATE workflow_node_job SET status = 'running' WHERE uuid = ?",
+            (JOB_UUID,),
+        )
+    bridge = _bridge(store, EdgeScheduler(dispatcher=RecordingDispatcher()))
+    try:
+        assert bridge.recover_active_tasks() == []
+
+        aggregate = bridge.cancel(TASK_UUID)
+    finally:
+        bridge.close()
+
+    assert aggregate["task"]["status"] == "failed"
+    assert aggregate["task"]["attention_reason"] == "runtime_lost"
+    assert aggregate["task"]["cleanup_status"] == "requires_attention"
+    assert aggregate["task"]["error_info"] == [{
+        "code": "runtime_lost",
+        "message": "执行服务重启，原任务执行实例已失联",
+    }]
+    assert {job["status"] for job in aggregate["jobs"]} == {
+        "failed", "failed"
+    }
+
+
 def test_material_task_without_scheduler_inventory_fails_closed(
     store: WorkflowStore,
 ) -> None:

@@ -146,6 +146,63 @@ def test_replace_updates_material_definition_without_runtime_facts() -> None:
         assert runtime_field not in updates[0]
 
 
+def test_material_update_retries_reused_idempotency_key_with_fresh_key() -> None:
+    target = ExistingBackendDeploymentTarget(
+        "http://127.0.0.1:8080", "test-token", replace_existing=True
+    )
+    bodies: list[dict[str, object]] = []
+
+    def request(_method: str, _path: str, **kwargs: object) -> dict[str, object]:
+        body = dict(kwargs["json"])  # type: ignore[arg-type]
+        bodies.append(body)
+        if len(bodies) == 1:
+            raise WorkspaceHostError(
+                "release_transport_failed",
+                "Backend PUT material failed: HTTP 409",
+                details={
+                    "statusCode": 409,
+                    "backendError": (
+                        'idempotency_key "same-key" was already used by a '
+                        "different material mutation"
+                    ),
+                },
+            )
+        return {"uuid": "material-1"}
+
+    target._request = request  # type: ignore[method-assign]
+
+    result = target._request_with_conflict_overwrite(
+        "PUT", "/materials/material-1", json={"idempotency_key": "same-key"}
+    )
+
+    assert result == {"uuid": "material-1"}
+    assert bodies[0]["idempotency_key"] == "same-key"
+    assert str(bodies[1]["idempotency_key"]).startswith(
+        "same-key/overwrite-"
+    )
+    assert target.overwritten_idempotency_conflicts == 1
+
+
+def test_material_update_does_not_overwrite_other_conflicts() -> None:
+    target = ExistingBackendDeploymentTarget(
+        "http://127.0.0.1:8080", "test-token", replace_existing=True
+    )
+
+    def request(_method: str, _path: str, **_kwargs: object) -> dict[str, object]:
+        raise WorkspaceHostError(
+            "release_transport_failed",
+            "Backend PUT material failed: HTTP 409",
+            details={"statusCode": 409, "backendError": "revision conflict"},
+        )
+
+    target._request = request  # type: ignore[method-assign]
+
+    with pytest.raises(WorkspaceHostError, match="HTTP 409"):
+        target._request_with_conflict_overwrite(
+            "PUT", "/materials/material-1", json={"idempotency_key": "same-key"}
+        )
+
+
 def test_release_embeds_compiled_material_shape_into_template_model() -> None:
     templates = [{
         "name": "community.example.beaker",
@@ -2127,7 +2184,6 @@ def test_workspace_host_release_publish_stages_authority_without_manufacturing_e
     def switch_authority(
         values: dict[str, object], **_kwargs: object
     ) -> dict[str, object]:
-        host._start_edge()
         return {"domainMode": values["mode"]}
 
     host._switch_authority = switch_authority  # type: ignore[method-assign]
@@ -2195,8 +2251,6 @@ def test_workspace_host_release_publish_restores_idle_edge_after_import_failure(
     ) -> dict[str, object]:
         mode = str(values["mode"])
         lifecycle.append(f"switch:{mode}")
-        if mode == "backend":
-            host._start_edge()
         return {"domainMode": mode}
 
     host._switch_authority = switch_authority  # type: ignore[method-assign]

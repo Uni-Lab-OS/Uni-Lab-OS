@@ -253,6 +253,65 @@ class TaskRuntimeProjection:
             )
             return self._aggregate(connection, task_uuid)
 
+    def project_interrupted(self, task_uuid: str) -> dict[str, Any]:
+        """终结重启后没有对应调度运行的失联任务。"""
+
+        now = utc_now()
+        reason = {
+            "code": "runtime_lost",
+            "message": "执行服务重启，原任务执行实例已失联",
+        }
+        encoded_reason = _encode_json_field([reason], field_name="error_info")
+        with self._store.transaction() as connection:
+            task_row = self._task_row(connection, task_uuid)
+            job_rows = self._job_rows(connection, task_uuid)
+            if task_row["status"] != "running" or not any(
+                row["status"] in {"dispatched", "running"} for row in job_rows
+            ):
+                raise StoreConflict(f"任务不是可终结的失联运行：{task_uuid}")
+            for row in job_rows:
+                if row["status"] in _TERMINAL_JOB_STATES:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE workflow_node_job
+                    SET status = 'failed', error_info = ?, finished_at = ?,
+                        update_time = ?
+                    WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (encoded_reason, now, now, row["uuid"]),
+                )
+                WorkflowStore._append_runtime_event(
+                    connection,
+                    task_uuid=task_uuid,
+                    job_uuid=str(row["uuid"]),
+                    kind="job_transition",
+                    from_status=str(row["status"]),
+                    to_status="failed",
+                    now=now,
+                )
+            connection.execute(
+                """
+                UPDATE workflow_task
+                SET status = 'failed', control_status = 'paused',
+                    cleanup_status = 'requires_attention', error_info = ?,
+                    attention_reason = 'runtime_lost', finished_at = ?,
+                    update_time = ?
+                WHERE uuid = ? AND deleted_at IS NULL
+                """,
+                (encoded_reason, now, now, task_uuid),
+            )
+            WorkflowStore._append_runtime_event(
+                connection,
+                task_uuid=task_uuid,
+                kind="task_transition",
+                from_status="running",
+                to_status="failed",
+                now=now,
+            )
+            self._append_invalidation(connection, task_uuid=task_uuid, now=now)
+            return self._aggregate(connection, task_uuid)
+
     def project_material_source_blocked(self, task_uuid: str) -> dict[str, Any]:
         """验证并返回一次受阻的任务物料准入投影。
 

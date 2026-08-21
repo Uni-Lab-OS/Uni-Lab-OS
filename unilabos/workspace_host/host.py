@@ -1131,6 +1131,12 @@ class WorkspaceHost:
             raise WorkspaceHostError(
                 "authority_parameters_invalid", "Authority force 必须是 boolean"
             )
+        cancel_active_tasks = parameters.get("cancelActiveTasks", False)
+        if not isinstance(cancel_active_tasks, bool):
+            raise WorkspaceHostError(
+                "authority_parameters_invalid",
+                "cancelActiveTasks 必须是 boolean",
+            )
         with self._lock:
             previous = dict(self._configuration)
             current_mode = str(previous.get("domainMode") or "local")
@@ -1166,6 +1172,11 @@ class WorkspaceHost:
             if current_mode == "backend":
                 current_credential = (
                     os.environ.get("UNILAB_BACKEND_API_KEY") or self.token
+                )
+            if cancel_active_tasks:
+                self._cancel_active_authority_tasks(
+                    current_authority_url,
+                    credential=current_credential,
                 )
             self._assert_authority_idle(
                 current_authority_url,
@@ -1290,6 +1301,13 @@ class WorkspaceHost:
             try:
                 with urlopen(request, timeout=3.0) as response:
                     payload = json.loads(response.read().decode("utf-8"))
+            except HTTPError as error:
+                if status == "admission_blocked" and error.code == 400:
+                    continue
+                raise WorkspaceHostError(
+                    "authority_task_state_unavailable",
+                    "暂时无法确认当前环境中的任务状态，本次切换已取消",
+                ) from error
             except (OSError, URLError, ValueError) as error:
                 raise WorkspaceHostError(
                     "authority_task_state_unavailable",
@@ -1306,12 +1324,88 @@ class WorkspaceHost:
                 details={"activeTaskCount": active_count},
             )
 
+    def _cancel_active_authority_tasks(
+        self,
+        address: str,
+        *,
+        credential: str,
+    ) -> None:
+        """Cancel every active task in the current runtime before switching."""
+
+        api = self._normalize_backend_url(address)
+        task_ids: set[str] = set()
+        for status in _ACTIVE_WORKFLOW_TASK_STATUSES:
+            query = urlencode({"page": 1, "page_size": 100, "status": status})
+            request = Request(
+                f"{api}/api/v1/workflow-tasks?{query}",
+                headers={"Authorization": f"Bearer {credential}"},
+            )
+            try:
+                with urlopen(request, timeout=3.0) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except HTTPError as error:
+                if status == "admission_blocked" and error.code == 400:
+                    continue
+                raise WorkspaceHostError(
+                    "task_cancel_unavailable",
+                    "无法读取当前环境中的活动任务，未执行切换",
+                ) from error
+            except (OSError, URLError, ValueError) as error:
+                raise WorkspaceHostError(
+                    "task_cancel_unavailable",
+                    "无法读取当前环境中的活动任务，未执行切换",
+                ) from error
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            items = data.get("items", []) if isinstance(data, dict) else []
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict) and isinstance(item.get("uuid"), str):
+                    task_ids.add(item["uuid"])
+
+        for task_id in sorted(task_ids):
+            body = json.dumps({
+                "type": "cancel",
+                "idempotency_key": f"authority-switch-{uuid.uuid4()}",
+            }).encode("utf-8")
+            request = Request(
+                f"{api}/api/v1/workflow-tasks/{task_id}/commands",
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {credential}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                with urlopen(request, timeout=5.0):
+                    pass
+            except (HTTPError, OSError, URLError) as error:
+                raise WorkspaceHostError(
+                    "task_cancel_failed",
+                    f"任务 {task_id} 取消失败，未执行切换",
+                ) from error
+
+        deadline = time.monotonic() + 30.0
+        while task_ids and time.monotonic() < deadline:
+            try:
+                self._assert_authority_idle(api, credential=credential)
+                return
+            except WorkspaceHostError as error:
+                if error.code != "authority_tasks_active":
+                    raise
+            time.sleep(0.25)
+        if task_ids:
+            raise WorkspaceHostError(
+                "task_cancel_timeout",
+                "任务取消尚未完成，请稍后重试",
+            )
+
     def _publish_release(self, parameters: dict[str, object]) -> dict[str, object]:
         """Publish the visible Local generation and optionally activate Backend Authority."""
 
         unknown = sorted(set(parameters) - {
             "backendUrl", "schedulerUrl", "activate", "verify", "resetTarget",
-            "replaceTarget", "confirmation"
+            "replaceTarget", "cancelActiveTasks", "cancelTargetActiveTasks",
+            "confirmation"
         })
         if unknown:
             raise WorkspaceHostError(
@@ -1329,6 +1423,10 @@ class WorkspaceHost:
         activate = bool(parameters.get("activate", False))
         reset_target = parameters.get("resetTarget", False) is True
         replace_target = parameters.get("replaceTarget", False) is True
+        cancel_target_active_tasks = (
+            parameters.get("cancelTargetActiveTasks", False) is True
+        )
+        cancel_active_tasks = parameters.get("cancelActiveTasks", False) is True
         if reset_target and replace_target:
             raise WorkspaceHostError(
                 "release_parameters_invalid",
@@ -1392,6 +1490,7 @@ class WorkspaceHost:
                         "mode": "backend",
                         "backendUrl": backend_url,
                         "schedulerUrl": scheduler_url,
+                        "cancelActiveTasks": cancel_active_tasks,
                     },
                     bootstrap=False,
                 )
@@ -1412,6 +1511,7 @@ class WorkspaceHost:
                 timeout=self.readiness_timeout,
                 before_workflows=stage_device_authority if activate else None,
                 replace_existing=replace_target,
+                cancel_active_tasks=cancel_target_active_tasks,
             )
             prepared_release = None
             with self._lock:
@@ -1615,7 +1715,8 @@ class WorkspaceHost:
         except (OSError, URLError) as error:
             raise WorkspaceHostError(
                 "backend_authority_unavailable",
-                f"Backend Authority Edge 控制接口预检失败：{edge_path}：{error}",
+                "目标 Backend 或 Scheduler 未启动，或当前无法访问。"
+                "请确认服务已启动后重试；当前运行环境尚未切换。",
             ) from error
         if status == HTTPStatus.NOT_FOUND:
             raise WorkspaceHostError(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
@@ -141,6 +142,11 @@ class WorkspaceReleasePublisher:
                 "materialTemplates": dict(result.material_template_names or {}),
             },
         }
+        overwritten_conflicts = int(
+            getattr(self.target, "overwritten_idempotency_conflicts", 0) or 0
+        )
+        if overwritten_conflicts:
+            receipt["overwrittenConflicts"] = overwritten_conflicts
         filename = release.release_id.replace(":", "-", 1) + ".json"
         atomic_write_json(self.deployment_directory / filename, receipt)
         return receipt
@@ -297,6 +303,7 @@ class ExistingBackendDeploymentTarget:
         timeout: float = 30.0,
         before_workflows: Callable[[], None] | None = None,
         replace_existing: bool = False,
+        cancel_active_tasks: bool = False,
     ) -> None:
         self.target_api = _api_base(target_address)
         self.target_address = self.target_api.removesuffix("/api/v1")
@@ -309,14 +316,18 @@ class ExistingBackendDeploymentTarget:
         self.timeout = timeout
         self.before_workflows = before_workflows
         self.replace_existing = replace_existing
+        self.cancel_active_tasks = cancel_active_tasks
         self._previous_workflow_ids: tuple[str, ...] = ()
         self._previous_managed_materials: dict[str, Mapping[str, Any]] = {}
+        self.overwritten_idempotency_conflicts = 0
 
     def plan(self, release: WorkspaceRelease) -> DeploymentPlan:
         material_nodes = _material_nodes(release.material_graph)
         materials = self._all_target_materials()
         workflows = self._paged("/workflows")
         if self.replace_existing:
+            if self.cancel_active_tasks:
+                self._cancel_active_workflow_tasks()
             active_count = self._active_workflow_task_count()
             if active_count:
                 raise WorkspaceHostError(
@@ -360,13 +371,64 @@ class ExistingBackendDeploymentTarget:
     def _active_workflow_task_count(self) -> int:
         total = 0
         for status in ("pending", "admission_blocked", "running", "canceling"):
-            payload = self._request(
-                "GET",
-                "/workflow-tasks",
-                params={"page": 1, "page_size": 1, "status": status},
-            )
+            try:
+                payload = self._request(
+                    "GET",
+                    "/workflow-tasks",
+                    params={"page": 1, "page_size": 1, "status": status},
+                )
+            except WorkspaceHostError as error:
+                # Older Backend releases do not expose admission_blocked. Such
+                # a Backend cannot contain tasks in that state, so continue
+                # checking the statuses that version does support.
+                if status == "admission_blocked" and (
+                    "unsupported task status" in str(error)
+                ):
+                    continue
+                raise
             total += int(payload.get("total") or 0)
         return total
+
+    def _cancel_active_workflow_tasks(self) -> None:
+        task_ids: set[str] = set()
+        for status in ("pending", "admission_blocked", "running", "canceling"):
+            try:
+                payload = self._request(
+                    "GET",
+                    "/workflow-tasks",
+                    params={"page": 1, "page_size": 100, "status": status},
+                )
+            except WorkspaceHostError as error:
+                if status == "admission_blocked" and (
+                    "unsupported task status" in str(error)
+                ):
+                    continue
+                raise
+            for item in _mapping_list(payload.get("items")):
+                task_id = str(item.get("uuid") or "").strip()
+                if task_id:
+                    task_ids.add(task_id)
+
+        for task_id in sorted(task_ids):
+            self._request(
+                "POST",
+                f"/workflow-tasks/{task_id}/commands",
+                json={
+                    "type": "cancel",
+                    "idempotency_key": f"environment-switch-{uuid.uuid4()}",
+                },
+            )
+
+        deadline = time.monotonic() + 30.0
+        while task_ids and time.monotonic() < deadline:
+            if self._active_workflow_task_count() == 0:
+                return
+            time.sleep(0.25)
+        if task_ids:
+            raise WorkspaceHostError(
+                "task_cancel_timeout",
+                "目标 Backend 中的任务仍在取消，请稍后重试",
+            )
 
     def _all_target_materials(self) -> list[dict[str, Any]]:
         flattened: list[dict[str, Any]] = []
@@ -596,22 +658,23 @@ class ExistingBackendDeploymentTarget:
                         "source_workspace": release.source_workspace,
                         "retired": False,
                     }
-                    updated = self._request(
+                    update_body = {
+                        "name": material.get("name"),
+                        "description": material.get("description"),
+                        "meta_data": metadata,
+                        "config": deepcopy(
+                            _mapping_or_empty(material.get("config"))
+                        ),
+                        "expected_revision": int(detail.get("revision") or 0),
+                        "idempotency_key": (
+                            f"unilab-release/{release.release_id}/"
+                            f"{local_uuid}/definition"
+                        ),
+                    }
+                    updated = self._request_with_conflict_overwrite(
                         "PUT",
                         f"/materials/{target_uuid}",
-                        json={
-                            "name": material.get("name"),
-                            "description": material.get("description"),
-                            "meta_data": metadata,
-                            "config": deepcopy(
-                                _mapping_or_empty(material.get("config"))
-                            ),
-                            "expected_revision": int(detail.get("revision") or 0),
-                            "idempotency_key": (
-                                f"unilab-release/{release.release_id}/"
-                                f"{local_uuid}/definition"
-                            ),
-                        },
+                        json=update_body,
                     )
                     identities[local_uuid] = target_uuid
                     targets_by_source_uuid[local_uuid] = updated
@@ -1048,6 +1111,28 @@ class ExistingBackendDeploymentTarget:
         )
         return _release_response(response, f"Backend {method} {path}")
 
+    def _request_with_conflict_overwrite(
+        self, method: str, path: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Retry only a reused-idempotency-key conflict with a fresh key."""
+
+        try:
+            return self._request(method, path, **kwargs)
+        except WorkspaceHostError as error:
+            details = error.details if isinstance(error.details, Mapping) else {}
+            backend_error = str(details.get("backendError") or "")
+            if (
+                int(details.get("statusCode") or 0) != 409
+                or "idempotency_key" not in backend_error
+                or "already used by a different material mutation" not in backend_error
+            ):
+                raise
+            body = deepcopy(dict(kwargs.get("json") or {}))
+            original_key = str(body.get("idempotency_key") or "")
+            body["idempotency_key"] = f"{original_key}/overwrite-{uuid.uuid4()}"
+            self.overwritten_idempotency_conflicts += 1
+            return self._request(method, path, **{**kwargs, "json": body})
+
 
 class ExistingBackendReleaseVerifier:
     """Read back all three domain projections through public Backend APIs."""
@@ -1142,6 +1227,7 @@ def create_existing_backend_publisher(
     timeout: float = 30.0,
     before_workflows: Callable[[], None] | None = None,
     replace_existing: bool = False,
+    cancel_active_tasks: bool = False,
 ) -> WorkspaceReleasePublisher:
     """Create the first-stage existing-Backend Adapter composition."""
 
@@ -1159,6 +1245,7 @@ def create_existing_backend_publisher(
         timeout=timeout,
         before_workflows=before_workflows,
         replace_existing=replace_existing,
+        cancel_active_tasks=cancel_active_tasks,
     )
     return WorkspaceReleasePublisher(
         builder,
@@ -2966,10 +3053,22 @@ def _release_response(response: Any, operation: str) -> dict[str, Any]:
     try:
         return _response_data(response, operation)
     except WorkspaceHostError as error:
+        payload: object = None
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            pass
+        backend_error = ""
+        if isinstance(payload, Mapping):
+            backend_error = str(payload.get("error") or payload.get("message") or "")
         raise WorkspaceHostError(
             "release_transport_failed",
             str(error),
-            details=error.details,
+            details={
+                "statusCode": int(getattr(response, "status_code", 0) or 0),
+                "backendError": backend_error,
+                "cause": error.details,
+            },
         ) from error
 
 

@@ -866,6 +866,42 @@ def test_force_authority_switch_skips_target_preflight_but_keeps_committed_mode(
     host.close()
 
 
+def test_authority_switch_can_cancel_active_tasks_before_switching(
+    workspace: Path,
+) -> None:
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, ensure_local_token(paths), readiness_timeout=0.1)
+    calls: list[str] = []
+    host._components["backend"].update({
+        "phase": "ready",
+        "address": "http://127.0.0.1:18003",
+    })
+    host._cancel_active_authority_tasks = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: calls.append("cancel")
+    )
+    host._assert_authority_idle = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: calls.append("idle")
+    )
+    host._preflight_backend_authority = lambda *_args: calls.append("preflight")  # type: ignore[method-assign]
+    host._stop_component = lambda name: calls.append(f"stop:{name}") or {}  # type: ignore[method-assign]
+    host._start_backend = lambda _parameters: calls.append("start:backend") or {}  # type: ignore[method-assign]
+
+    snapshot = host._dispatch(
+        "authority.switch",
+        {
+            "mode": "backend",
+            "backendUrl": "http://127.0.0.1:8080",
+            "bootstrap": False,
+            "cancelActiveTasks": True,
+        },
+    )
+
+    assert calls[:3] == ["cancel", "idle", "preflight"]
+    assert snapshot["configuration"]["domainMode"] == "backend"
+    host.close()
+
+
 def test_plc_launch_preserves_explicit_handshake_workflow(workspace: Path) -> None:
     paths = WorkspacePaths.resolve(workspace)
     paths.prepare()

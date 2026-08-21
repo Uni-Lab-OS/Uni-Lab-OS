@@ -60,6 +60,9 @@ class TaskSchedulerBridge:
         self._submitted_tasks: set[str] = set()
         # ``_admission_pending_tasks`` 只保存尚未交给旧调度器的受阻任务身份。
         self._admission_pending_tasks: set[str] = set()
+        # Active persisted tasks that cannot be recovered because their physical
+        # jobs belonged to a previous scheduler process generation.
+        self._orphaned_tasks: set[str] = set()
         self._closed = False
         scheduler.add_admission_retry_listener(self._retry_pending_admissions)
         scheduler.add_job_pre_dispatch_listener(self._on_job_pre_dispatch)
@@ -196,9 +199,13 @@ class TaskSchedulerBridge:
         if self._closed:
             raise TaskSchedulerBridgeError("工作流任务调度桥已经关闭")
         normalized_uuid = self._required_text(task_uuid, field="task_uuid")
-        if not self._scheduler.cancel_workflow(normalized_uuid):
+        if self._scheduler.cancel_workflow(normalized_uuid):
+            aggregate = self._projection.project_canceled(normalized_uuid)
+        elif normalized_uuid in self._orphaned_tasks:
+            aggregate = self._projection.project_interrupted(normalized_uuid)
+            self._orphaned_tasks.discard(normalized_uuid)
+        else:
             raise TaskSchedulerBridgeError("工作流任务尚未提交到本地调度器")
-        aggregate = self._projection.project_canceled(normalized_uuid)
         self._store.stop_debug(normalized_uuid)
         self._submitted_tasks.discard(normalized_uuid)
         self._admission_pending_tasks.discard(normalized_uuid)
@@ -293,6 +300,7 @@ class TaskSchedulerBridge:
             job for job in jobs if job.get("status") in {"dispatched", "running"}
         ]
         if uncertain_jobs:
+            self._orphaned_tasks.add(task_uuid)
             logger.error(
                 "工作流任务 %s 存在 %d 个结果不明作业，禁止自动恢复",
                 task_uuid,
@@ -442,6 +450,7 @@ class TaskSchedulerBridge:
         self._task_by_job.clear()
         self._submitted_tasks.clear()
         self._admission_pending_tasks.clear()
+        self._orphaned_tasks.clear()
 
     def _retry_pending_admissions(self) -> None:
         """重试全部尚未注册到旧调度器的物料来源准入。
