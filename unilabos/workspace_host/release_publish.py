@@ -1215,7 +1215,7 @@ def _deployment_template_definition(
                     "release_source_invalid",
                     f"WorkflowNodeTemplate {action_name} schema 不是有效 JSON",
                 ) from error
-        actions[action_name] = {
+        action_definition = {
             "feedback": deepcopy(_mapping_or_empty(action.get("feedback"))),
             "goal": deepcopy(_mapping_or_empty(action.get("goal"))),
             "goal_default": deepcopy(
@@ -1228,6 +1228,22 @@ def _deployment_template_definition(
             "display_name": action.get("display_name") or action_name,
             "handles": {"input": input_handles, "output": output_handles},
         }
+        executor_kind = str(
+            action.get("executor_kind")
+            or _mapping_or_empty(
+                _mapping_or_empty(action.get("meta_data")).get("unilab")
+            ).get("executor_kind")
+            or ""
+        ).strip()
+        if executor_kind:
+            action_definition["executor_kind"] = executor_kind
+        if executor_kind == "material_transfer":
+            # Local authoring may still expose HostNode.transfer_resource as a
+            # regular device action.  Backend owns this mutation atomically,
+            # so its deployment catalog must advertise the trusted ILab seam
+            # instead of routing the node back through Edge device dispatch.
+            action_definition["node_type"] = "ILab"
+        actions[action_name] = action_definition
     definition["class"]["action_value_mappings"] = actions
     return definition
 

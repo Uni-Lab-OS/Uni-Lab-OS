@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from unilabos.app import main as app_main
 from unilabos.app import runtime_storage
@@ -128,15 +130,15 @@ def test_main_rejects_a_non_tuple_config_allowlist() -> None:
         app_main.configure_workflow_editable_package_roots({})
 
 
-def test_real_web_server_passes_configured_roots_into_runtime(
+def test_real_web_server_fails_closed_without_template_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """真实 FastAPI 产品组合必须只激活 BasicConfig 显式授权来源。
+    """真实 FastAPI 产品缺少模板目录时不得发布不可编译的工作流权威。
 
-    参数：``tmp_path`` 隔离产品数据库与包；``monkeypatch`` 固定配置和关闭本地
-    调度器适配器。返回：无；验证生产入口而非直接调用底层组合函数。
-    异常：产品入口未传递授权根或服务装配失败时测试失败。
+    参数：``tmp_path`` 隔离产品数据库与包；``monkeypatch`` 固定配置并移除本地
+    模板目录权威。返回：无；断言服务不发布且 readiness 明确失败。异常：产品
+    静默发布无编译器的工作流服务时测试失败。
     """
 
     working_dir = tmp_path / "runtime"
@@ -174,13 +176,17 @@ def test_real_web_server_passes_configured_roots_into_runtime(
         no_edge_scheduler,
     )
 
-    _reload_server().setup_server()
-    service = composition.get_workflow_service()
+    server = _reload_server()
+    application = server.setup_server()
 
-    assert service is not None
-    assert [row["workflow_uuid"] for row in service.list_registered_sources()] == [
-        WORKFLOW_UUID
-    ]
+    assert composition.get_workflow_service() is None
+    assert not server.workflow_routes_mounted
+    readiness = TestClient(application).get("/api/v1/readiness")
+    assert readiness.status_code == 503
+    assert readiness.json()["status"] == "failed"
+    assert readiness.json()["error"] == {
+        "code": "workflow_runtime_start_failed"
+    }
 
 
 def test_real_web_server_rejects_invalid_root_shape_without_mounting_authority(
@@ -258,6 +264,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
         scheduler: object,
         editable_package_roots: tuple[str, ...],
         start_source_monitor: bool,
+        workflow_activation_progress: object,
     ) -> tuple[object, object]:
         """记录本地组合根收到的工作目录、依赖和源码授权。
 
@@ -273,6 +280,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
             scheduler=scheduler,
             editable_package_roots=editable_package_roots,
             start_source_monitor=start_source_monitor,
+            workflow_activation_progress=workflow_activation_progress,
         )
         return workflow_service, template_projection
 
@@ -334,6 +342,7 @@ def test_local_product_composition_forwards_the_exact_configured_roots(
     assert captured["scheduler"] is edge_scheduler
     assert captured["editable_package_roots"] == configured_roots
     assert captured["start_source_monitor"] is True
+    assert callable(captured["workflow_activation_progress"])
 
 
 def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
@@ -427,3 +436,70 @@ def test_local_composition_failure_never_falls_back_to_uncompiled_runtime(
     assert not fallback_called
     assert not api_installed
     assert composition.get_workflow_service() is None
+
+
+def test_real_server_keeps_liveness_after_deferred_workflow_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工作流冷启动失败不得关闭 health 和其他已装配 HTTP 路由。
+
+    参数：``monkeypatch`` 用内存 Uvicorn 替身隔离端口。返回：无；断言真实
+    ``start_server`` 进入正常监控循环，health 存活且 readiness 明确失败。
+    异常：初始化错误重新终止整个服务器时测试失败。
+    """
+
+    server = _reload_server()
+
+    class FakeConfig:
+        def __init__(self, **_kwargs: object) -> None:
+            return
+
+    class FakeServer:
+        def __init__(self, _config: object) -> None:
+            self.started = False
+            self.should_exit = False
+
+        def run(self) -> None:
+            self.started = True
+            deadline = time.monotonic() + 2.0
+            while not self.should_exit and time.monotonic() < deadline:
+                time.sleep(0.001)
+
+    def setup_deferred_server(*, defer_workflow_initialization: bool = False) -> Any:
+        assert defer_workflow_initialization
+        server.setup_api_routes(server.app)
+        server.workflow_runtime_required = True
+        server.workflow_runtime_deferred = True
+        return server.app
+
+    def fail_workflow_runtime() -> None:
+        server._set_workflow_runtime_phase(
+            "failed",
+            runtime_error="fixture catalog failure",
+        )
+        raise RuntimeError("fixture catalog failure")
+
+    uvicorn = importlib.import_module("uvicorn")
+    monkeypatch.setattr(server, "setup_server", setup_deferred_server)
+    monkeypatch.setattr(
+        server,
+        "initialize_deferred_workflow_runtime",
+        fail_workflow_runtime,
+    )
+    monkeypatch.setattr(uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(app_main, "_restart_requested", True)
+    monkeypatch.setattr(app_main, "_restart_reason", "test cleanup")
+
+    assert server.start_server(open_browser=False)
+
+    client = TestClient(server.app)
+    health = client.get("/api/v1/health")
+    readiness = client.get("/api/v1/readiness")
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+    assert readiness.status_code == 503
+    assert readiness.json()["status"] == "failed"
+    assert readiness.json()["error"] == {
+        "code": "workflow_runtime_start_failed"
+    }

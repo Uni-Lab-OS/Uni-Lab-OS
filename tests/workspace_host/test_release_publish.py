@@ -2071,7 +2071,10 @@ def test_local_action_catalog_is_restored_into_backend_sync_definition() -> None
                     "name": "pick",
                     "display_name": "抓取",
                     "type": "UniLabJsonCommand",
-                    "node_type": "ILab",
+                    "node_type": "device_action",
+                    "meta_data": {
+                        "unilab": {"executor_kind": "material_transfer"}
+                    },
                     "goal": {"resource": "resource"},
                     "goal_default": {},
                     "feedback": {},
@@ -2099,12 +2102,14 @@ def test_local_action_catalog_is_restored_into_backend_sync_definition() -> None
 
     action = definition["class"]["action_value_mappings"]["pick"]
     assert action["schema"] == {"type": "object", "properties": {}}
+    assert action["executor_kind"] == "material_transfer"
+    assert action["node_type"] == "ILab"
     assert [handle["handler_key"] for handle in action["handles"]["input"]] == [
         "resource"
     ]
 
 
-def test_workspace_host_release_publish_registers_edge_before_workflow_import(
+def test_workspace_host_release_publish_stages_authority_without_manufacturing_edge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -2137,11 +2142,10 @@ def test_workspace_host_release_publish_registers_edge_before_workflow_import(
         ) -> dict[str, object]:
             assert callable(self.before_workflows)
             self.before_workflows()
-            # Backend performs this check inside POST /workflows/import.  Keep
-            # the assertion at the same seam so the regression test fails if
-            # publication stages Authority but imports before Edge has
-            # registered the device action catalog.
-            assert started_edges == [True]
+            # Backend deployments may own their Edge outside this Workspace.
+            # Publication must stage Authority before import without creating
+            # a duplicate managed Edge when none was already running.
+            assert started_edges == []
             return {"releaseId": "sha256:release-1", "verified": True}
 
     def create_publisher(**kwargs: object) -> Publisher:
@@ -2164,7 +2168,7 @@ def test_workspace_host_release_publish_registers_edge_before_workflow_import(
 
     assert captured["source_address"] == "http://127.0.0.1:18003"
     assert captured["source_workspace"] == workspace
-    assert started_edges == [True]
+    assert started_edges == []
     assert result["activated"] is True
     assert result["authority"] == {"domainMode": "backend"}
     host.close()
@@ -2229,7 +2233,6 @@ def test_workspace_host_release_publish_restores_idle_edge_after_import_failure(
 
     assert lifecycle == [
         "switch:backend",
-        "start:edge",
         "import:workflow",
         "stop:edge",
         "switch:local",
@@ -2296,6 +2299,88 @@ def test_reset_publish_does_not_clear_backend_when_activation_preflight_fails(
 
     assert calls == ["build"]
     assert switched == ["backend"]
+
+
+def test_reset_publish_restarts_managed_edge_after_target_materials_are_recreated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paths = WorkspacePaths.resolve(workspace)
+    paths.prepare()
+    host = WorkspaceHost(paths, "host-token", readiness_timeout=1)
+    host._components["backend"].update(  # type: ignore[attr-defined]
+        {"phase": "ready", "address": "http://127.0.0.1:18003"}
+    )
+    host._components["edge"].update(  # type: ignore[attr-defined]
+        {"phase": "ready", "pid": 1234}
+    )
+    host._preflight_backend_authority = lambda _url: None  # type: ignore[method-assign]
+    lifecycle: list[str] = []
+    host._switch_authority = lambda values, **_kwargs: (  # type: ignore[method-assign]
+        lifecycle.append(f"switch:{values['mode']}")
+        or {"domainMode": values["mode"]}
+    )
+    host._stop_component = lambda name: (  # type: ignore[method-assign]
+        lifecycle.append(f"stop:{name}") or {}
+    )
+    host._start_edge = lambda: lifecycle.append("start:edge") or {}  # type: ignore[method-assign]
+
+    class Publisher:
+        def __init__(self, before_workflows: object) -> None:
+            self.before_workflows = before_workflows
+
+        def build(self) -> WorkspaceRelease:
+            lifecycle.append("build")
+            return _release()
+
+        def publish(
+            self, _release: WorkspaceRelease | None = None
+        ) -> dict[str, object]:
+            lifecycle.append("materials:recreated")
+            assert callable(self.before_workflows)
+            self.before_workflows()
+            lifecycle.append("import:workflow")
+            return {"releaseId": "sha256:release-1", "verified": True}
+
+    class Target:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def clear(self) -> None:
+            lifecycle.append("clear")
+
+    monkeypatch.setattr(
+        "unilabos.workspace_host.release_publish.create_existing_backend_publisher",
+        lambda **kwargs: Publisher(kwargs.get("before_workflows")),
+    )
+    monkeypatch.setattr(
+        "unilabos.workspace_host.release_publish.ExistingBackendDeploymentTarget",
+        Target,
+    )
+
+    result = host._dispatch(
+        "release.publish",
+        {
+            "backendUrl": "https://backend.example",
+            "activate": True,
+            "verify": True,
+            "resetTarget": True,
+            "confirmation": "CLEAR_BACKEND",
+        },
+    )
+
+    assert result["activated"] is True
+    assert lifecycle == [
+        "build",
+        "switch:backend",
+        "clear",
+        "materials:recreated",
+        "stop:edge",
+        "start:edge",
+        "import:workflow",
+    ]
+    host.close()
 
 
 def test_unilab_workspace_publish_dispatches_the_same_host_operation(

@@ -49,7 +49,9 @@ from .model import (
 from .reset_safety import LocalResetInspectionError, inspect_local_reset_blockers
 
 _STOP_TIMEOUT_SECONDS = 10.0
-_READINESS_TIMEOUT_SECONDS = 90.0
+# 工作区更新可能触发一次完整工作流依赖激活。Backend 会很早开放 health，但
+# Workspace Host 只把 readiness 当成完整可用；统一总预算避免每个探针各等一轮。
+_READINESS_TIMEOUT_SECONDS = 600.0
 _MAX_BODY_BYTES = 1024 * 1024
 _SUPERVISED_COMPONENTS = frozenset({"backend", "edge", "plc"})
 _ACTIVE_WORKFLOW_TASK_STATUSES = (
@@ -892,7 +894,21 @@ class WorkspaceHost:
     def _wait_backend_ready(self, plan: LaunchPlan) -> dict[str, object]:
         if not plan.address:
             raise WorkspaceHostError("backend_start_failed", "Backend 地址缺失")
-        probes = [("/api/v1/health", _health_ready)]
+        deadline = time.monotonic() + self.readiness_timeout
+        readiness_payload = self._wait_backend_payload(
+            plan,
+            "/api/v1/readiness",
+            _readiness_ready,
+            deadline=deadline,
+            allow_not_found=True,
+        )
+        # 旧 Backend 没有独立 readiness 端点时，退回原有的完整探针组合；只在
+        # 明确 404 时兼容，不能把新 Backend 的 starting/failed 误当成 ready。
+        probes = (
+            [("/api/v1/health", _health_ready)]
+            if readiness_payload is None
+            else []
+        )
         if plan.metadata.get("domainMode") != "backend":
             probes.extend(
                 [
@@ -906,12 +922,14 @@ class WorkspaceHost:
                 ]
             )
         for path, accepts in probes:
-            self._wait_backend_payload(plan, path, accepts)
+            self._wait_backend_payload(plan, path, accepts, deadline=deadline)
         payload = self._wait_backend_payload(
             plan,
             "/api/v1/workspace/package-mounts",
             _package_mounts_ready,
+            deadline=deadline,
         )
+        assert payload is not None
         data = payload.get("data")
         assert isinstance(data, dict)
         return data
@@ -921,8 +939,10 @@ class WorkspaceHost:
         plan: LaunchPlan,
         path: str,
         accepts: Callable[[dict[str, object]], bool],
-    ) -> dict[str, object]:
-        deadline = time.monotonic() + self.readiness_timeout
+        *,
+        deadline: float,
+        allow_not_found: bool = False,
+    ) -> dict[str, object] | None:
         while time.monotonic() < deadline:
             with self._lock:
                 process = self._processes.get(plan.component)
@@ -931,23 +951,86 @@ class WorkspaceHost:
                         "backend_start_failed",
                         f"Backend 在 {path} 就绪前退出",
                     )
+            payload: object = None
+            status: int | None = None
             try:
                 with urlopen(f"{plan.address}{path}", timeout=1.0) as response:
                     payload = json.loads(response.read())
-                if (
-                    response.status == 200
-                    and isinstance(payload, dict)
-                    and accepts(payload)
-                ):
-                    return payload
+                    status = response.status
+            except HTTPError as response_error:
+                status = response_error.code
+                try:
+                    payload = json.loads(response_error.read())
+                except (OSError, ValueError):
+                    payload = None
             except (OSError, ValueError, URLError):
-                pass
+                payload = None
+            if allow_not_found and status == HTTPStatus.NOT_FOUND:
+                return None
+            if isinstance(payload, dict):
+                if path == "/api/v1/readiness":
+                    self._record_backend_readiness_progress(plan, payload)
+                    if payload.get("status") == "failed":
+                        self._stop_component(plan.component)
+                        raise WorkspaceHostError(
+                            "backend_readiness_failed",
+                            "Backend 工作流运行时初始化失败；请查看 backend.log",
+                        )
+                if status == 200 and accepts(payload):
+                    return payload
             time.sleep(0.2)
         self._stop_component(plan.component)
         raise WorkspaceHostError(
             "backend_readiness_failed",
             f"等待 Backend 就绪超时：{path}",
         )
+
+    def _record_backend_readiness_progress(
+        self,
+        plan: LaunchPlan,
+        payload: dict[str, object],
+    ) -> None:
+        """把 Backend 启动期 readiness 进度投影进 Host 权威快照。"""
+
+        progress = payload.get("workflowProgress")
+        if not isinstance(progress, dict):
+            return
+        loaded = progress.get("loaded")
+        total = progress.get("total")
+        if (
+            not isinstance(loaded, int)
+            or isinstance(loaded, bool)
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or loaded < 0
+            or total < 0
+            or loaded > total
+        ):
+            return
+        normalized = {"loaded": loaded, "total": total}
+        runtime_phase = payload.get("phase")
+        with self._lock:
+            component = self._components.get(plan.component)
+            if (
+                component is None
+                or component.get("generation") != plan.generation
+            ):
+                return
+            metadata = component.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                return
+            if (
+                metadata.get("workflowProgress") == normalized
+                and metadata.get("workflowRuntimePhase") == runtime_phase
+            ):
+                return
+            metadata["workflowProgress"] = normalized
+            if isinstance(runtime_phase, str):
+                metadata["workflowRuntimePhase"] = runtime_phase
+            self._publish_locked(
+                "backend.progress",
+                {**normalized, "phase": runtime_phase},
+            )
 
     def _stop_component(self, name: str) -> dict[str, object]:
         with self._lock:
@@ -1286,10 +1369,23 @@ class WorkspaceHost:
             from .release_publish import create_existing_backend_publisher
 
             staged_authority: dict[str, object] | None = None
+            managed_edge_staged_before_reset = False
 
             def stage_device_authority() -> None:
-                nonlocal staged_authority
+                nonlocal staged_authority, managed_edge_staged_before_reset
                 if staged_authority is not None:
+                    # ``resetTarget`` deletes and recreates every Backend
+                    # Material after the activation preflight.  A managed Edge
+                    # that stays connected keeps capabilities bound to the
+                    # deleted device UUIDs, so Backend rejects the recreated
+                    # workflow nodes as undeclared actions.  Reconnect after
+                    # material import and before workflow import to resolve the
+                    # new stable-barcode identities and register capabilities
+                    # against the current devices.
+                    if managed_edge_staged_before_reset:
+                        self._stop_component("edge")
+                        self._start_edge()
+                        managed_edge_staged_before_reset = False
                     return
                 staged_authority = self._switch_authority(
                     {
@@ -1330,6 +1426,7 @@ class WorkspaceHost:
                     prepared_release = publisher.build()
                     if activate:
                         stage_device_authority()
+                        managed_edge_staged_before_reset = edge_ready
                     from .release_publish import ExistingBackendDeploymentTarget
 
                     ExistingBackendDeploymentTarget(
@@ -1999,17 +2096,36 @@ class WorkspaceHost:
         address = component.get("address")
         if not isinstance(address, str) or not address:
             return name == "renderer"
-        path = (
-            "/api/v1/health"
-            if name == "backend"
-            else "/" if name == "renderer" else "/api/state"
-        )
-        try:
-            with urlopen(f"{address}{path}", timeout=0.5) as response:
-                response.read()
-            return response.status == 200
-        except (OSError, URLError):
-            return False
+        if name != "backend":
+            path = "/" if name == "renderer" else "/api/state"
+            try:
+                with urlopen(f"{address}{path}", timeout=0.5) as response:
+                    response.read()
+                return response.status == 200
+            except (OSError, URLError):
+                return False
+        for path, accepts in (
+            ("/api/v1/readiness", _readiness_ready),
+            ("/api/v1/health", _health_ready),
+        ):
+            try:
+                with urlopen(f"{address}{path}", timeout=0.5) as response:
+                    payload = json.loads(response.read())
+                return (
+                    response.status == 200
+                    and isinstance(payload, dict)
+                    and accepts(payload)
+                )
+            except HTTPError as response_error:
+                if (
+                    path == "/api/v1/readiness"
+                    and response_error.code == HTTPStatus.NOT_FOUND
+                ):
+                    continue
+                return False
+            except (OSError, ValueError, URLError):
+                return False
+        return False
 
 
 def _handler_type(host: WorkspaceHost) -> type[BaseHTTPRequestHandler]:
@@ -2120,6 +2236,10 @@ def _required_text(payload: dict[str, object], field: str) -> str:
     return value
 
 
+def _readiness_ready(payload: dict[str, object]) -> bool:
+    return payload.get("status") == "ready"
+
+
 def _health_ready(payload: dict[str, object]) -> bool:
     return payload.get("status") == "ok"
 
@@ -2176,24 +2296,60 @@ def _renderer_process_environment(
 
 
 def _pid_exists(pid: int) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
+        return False
+    if os.name == "nt":
+        # CPython implements os.kill() on Windows with TerminateProcess for
+        # ordinary signal values. Consequently os.kill(pid, 0) TERMINATES a
+        # live process with exit code 0 instead of probing for its existence.
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        error_access_denied = 5
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if not handle:
+            return ctypes.get_last_error() == error_access_denied
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except OSError:
         return False
-    if os.name != "nt":
-        try:
-            completed = subprocess.run(
-                ["ps", "-o", "stat=", "-p", str(pid)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=1,
-            )
-            if completed.returncode == 0 and completed.stdout.lstrip().startswith(b"Z"):
-                return False
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=1,
+        )
+        if completed.returncode == 0 and completed.stdout.lstrip().startswith(b"Z"):
+            return False
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     return True
 
 

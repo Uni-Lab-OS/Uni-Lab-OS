@@ -159,7 +159,7 @@ def test_monitor_excludes_agent_native_skill_projections_but_rejects_other_links
     private_skill.parent.mkdir(parents=True)
     private_skill.write_text("runtime skill\n", encoding="utf-8")
     package_root = workspace_root / "editable_package"
-    for native_root in (".claude", ".codex"):
+    for native_root in (".claude", ".codex", ".cursor"):
         skill_link = package_root / native_root / "skills" / "runtime-skill"
         skill_link.parent.mkdir(parents=True)
         skill_link.symlink_to(private_skill)
