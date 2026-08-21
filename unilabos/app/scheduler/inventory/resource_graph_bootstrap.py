@@ -275,6 +275,9 @@ def _compile_projection(
         if parent_runtime is not None and parent_runtime not in material_runtime_ids:
             raise ResourceGraphBootstrapError(f"Material {node_id} 父关系悬空")
         material_uuid = material_uuid_by_runtime[runtime_uuid]
+        material_type = _required_text(
+            node.get("type"), f"Material {node_id} type"
+        )
         pose = _pose(node)
         # ``material_config`` 是前端读模型；模型资产仅发布 OS 公开 URL。
         material_config = _material_config_with_rendering(
@@ -289,7 +292,7 @@ def _compile_projection(
                 "template_uuid": "",
                 "parent_uuid": material_uuid_by_runtime.get(parent_runtime or ""),
                 "class": graph_class,
-                "type": _required_text(node.get("type"), f"Material {node_id} type"),
+                "type": material_type,
                 "barcode": normalize_resource_instance_barcode(
                     node.get("barcode"), node_id
                 ),
@@ -300,6 +303,14 @@ def _compile_projection(
                     "source_graph": source_name,
                     "source_node_id": node_id,
                     "source_runtime_uuid": runtime_uuid,
+                    # 设备图业务 ID 同时是 Edge Runtime 的本地执行器身份。
+                    # 设备单动作运行必须在创建任务前从库存权威冻结该事实，
+                    # 不能在调度阶段再从名称或条码猜测。
+                    **(
+                        {"edge_local_id": node_id}
+                        if material_type == "device"
+                        else {}
+                    ),
                 },
                 "config": material_config,
                 "data": _json_object(node.get("data"), "material.data"),
