@@ -1003,6 +1003,90 @@ def test_job_start_fetches_http_payload_and_outcome_precedes_notification(
     asyncio.run(scenario())
 
 
+def test_duplicate_job_start_envelope_dispatches_goal_once(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        data_plane = FakeDataPlane()
+        host_node = FakeHostNode()
+        store = EdgeControlStore(str(tmp_path / "runtime.db"))
+        client = EdgeControlClient(
+            _settings(tmp_path / "runtime.db"),
+            store=store,
+            data_plane=data_plane,  # type: ignore[arg-type]
+            host_node_provider=lambda: host_node,
+        )
+        client._connected.set()
+        envelope = {
+            "protocol_version": 1,
+            "message_uuid": str(uuid.uuid4()),
+            "sequence": 12,
+            "type": "job.start",
+            "sent_at": "2026-08-21T03:38:50.075000Z",
+            "payload": {
+                "job_uuid": str(uuid.uuid4()),
+                "task_uuid": str(uuid.uuid4()),
+                "node_uuid": str(uuid.uuid4()),
+                "executor_kind": "device_action",
+                "job_access_token": "short-token",
+            },
+        }
+
+        await client._handle_envelope(envelope)
+        await client._handle_envelope(envelope)
+        if client._tasks:
+            await asyncio.gather(*list(client._tasks))
+
+        assert len(data_plane.fetched_jobs) == 1
+        assert len(host_node.started) == 1
+        assert [event.event_type for event in store.pending_events(float("inf"))] == [
+            "command.ack"
+        ]
+        store.close()
+
+    asyncio.run(scenario())
+
+
+def test_distinct_job_start_envelopes_still_dispatch_in_parallel(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        data_plane = FakeDataPlane()
+        host_node = FakeHostNode()
+        store = EdgeControlStore(str(tmp_path / "runtime.db"))
+        client = EdgeControlClient(
+            _settings(tmp_path / "runtime.db"),
+            store=store,
+            data_plane=data_plane,  # type: ignore[arg-type]
+            host_node_provider=lambda: host_node,
+        )
+        client._connected.set()
+        job_uuids = [str(uuid.uuid4()), str(uuid.uuid4())]
+        for sequence, job_uuid in enumerate(job_uuids, start=20):
+            await client._handle_envelope(
+                {
+                    "protocol_version": 1,
+                    "message_uuid": str(uuid.uuid4()),
+                    "sequence": sequence,
+                    "type": "job.start",
+                    "sent_at": "2026-08-21T03:30:23.000000Z",
+                    "payload": {
+                        "job_uuid": job_uuid,
+                        "task_uuid": str(uuid.uuid4()),
+                        "node_uuid": str(uuid.uuid4()),
+                        "executor_kind": "device_action",
+                        "job_access_token": "short-token",
+                    },
+                }
+            )
+        if client._tasks:
+            await asyncio.gather(*list(client._tasks))
+
+        assert {job.job_uuid for job in data_plane.fetched_jobs} == set(job_uuids)
+        assert {entry["item"].job_id for entry in host_node.started} == set(job_uuids)
+        store.close()
+
+    asyncio.run(scenario())
+
+
 def test_terminal_job_token_rejection_retires_pending_outcome(
     tmp_path: Path,
 ) -> None:

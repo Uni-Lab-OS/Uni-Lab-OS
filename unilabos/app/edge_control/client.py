@@ -678,7 +678,7 @@ class EdgeControlClient(BaseCommunicationClient):
         ):
             inserted = self.store.record_command(envelope)
             if (
-                message_type == "job.resolve_unknown"
+                message_type in {"job.start", "job.resolve_unknown"}
                 and not inserted
                 and self.store.command_status(command_uuid) == "completed"
             ):
@@ -743,6 +743,11 @@ class EdgeControlClient(BaseCommunicationClient):
             fallback_carrier=command_trace,
         )
         self.store.mark_command_completed(command_uuid)
+        if not inserted:
+            # 控制面采用至少一次投递；ACK 在途时同一 job.start 可能被重发。
+            # 重发命令仍需完成 ACK 恢复，但只有首次持久化者能创建执行协程，避免
+            # 重复 ROS Goal UUID 被第二次下发并将合法运行误报为 rejected/failed。
+            return
         if job.status in {"received", "fetch_retry"}:
             self._spawn(self._execute_job(job.job_uuid))
 

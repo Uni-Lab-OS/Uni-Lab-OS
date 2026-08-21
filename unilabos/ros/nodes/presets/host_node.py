@@ -428,6 +428,8 @@ class HostNode(BaseROS2DeviceNode):
         }  # device_id -> action_value_mappings(本地+远程设备统一存储)
         self._slave_registry_configs: Dict[str, Dict] = {}  # registry_name -> registry_config(含action_value_mappings)
         self._goals: Dict[str, Any] = {}  # 用来存储多个目标的状态
+        self._pending_goal_ids: Set[str] = set()  # 已发送、等待 ROS 接受/拒绝的目标
+        self._goals_lock = threading.RLock()
         self._online_devices: Set[str] = {f"{self.namespace}/{device_id}"}  # 用于跟踪在线设备
         # 托管 dry-run Edge 只投影设备目录，不创建 ROS/硬件端点；这些设备的
         # 在线事实不能被周期 ROS 图发现误判为离线。
@@ -1290,28 +1292,42 @@ class HostNode(BaseROS2DeviceNode):
         action_client: ActionClient = self._action_clients[action_id]
         goal_msg = convert_to_ros_msg(action_client._action_type.Goal(), action_kwargs)
 
-        target_wrapper = self.devices_instances.get(device_id)
-        target_node = getattr(target_wrapper, "_ros_node", None) if target_wrapper is not None else None
-        if target_node is not None and hasattr(target_node, "register_job_context"):
-            target_node.register_job_context(
-                item.job_id,
-                item.task_id,
-                item.action_name,
-                trace_context=item.trace_context,
+        with self._goals_lock:
+            if item.job_id in self._pending_goal_ids or item.job_id in self._goals:
+                self.lab_logger().warning(
+                    f"[Host Node] Duplicate goal dispatch ignored: "
+                    f"{action_id} ({item.job_id})"
+                )
+                return
+            self._pending_goal_ids.add(item.job_id)
+
+        try:
+            target_wrapper = self.devices_instances.get(device_id)
+            target_node = getattr(target_wrapper, "_ros_node", None) if target_wrapper is not None else None
+            if target_node is not None and hasattr(target_node, "register_job_context"):
+                target_node.register_job_context(
+                    item.job_id,
+                    item.task_id,
+                    item.action_name,
+                    trace_context=item.trace_context,
+                )
+
+            # self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {str(goal_msg)[:1000]}")
+            self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {action_kwargs}")
+            self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {goal_msg}")
+            action_client.wait_for_server()
+            goal_uuid_obj = UUID(uuid=list(u.bytes))
+
+            future = action_client.send_goal_async(
+                goal_msg,
+                feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
+                goal_uuid=goal_uuid_obj,
             )
-
-        # self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {str(goal_msg)[:1000]}")
-        self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {action_kwargs}")
-        self.lab_logger().trace(f"[Host Node] Sending goal for {action_id}: {goal_msg}")
-        action_client.wait_for_server()
-        goal_uuid_obj = UUID(uuid=list(u.bytes))
-
-        future = action_client.send_goal_async(
-            goal_msg,
-            feedback_callback=lambda feedback_msg: self.feedback_callback(item, action_id, feedback_msg),
-            goal_uuid=goal_uuid_obj,
-        )
-        future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
+            future.add_done_callback(lambda f: self.goal_response_callback(item, action_id, f))
+        except BaseException:
+            with self._goals_lock:
+                self._pending_goal_ids.discard(item.job_id)
+            raise
 
     def resolve_unknown_device_command(
         self,
@@ -1482,6 +1498,15 @@ class HostNode(BaseROS2DeviceNode):
         """目标响应回调"""
         goal_handle = future.result()
         if not goal_handle.accepted:
+            with self._goals_lock:
+                self._pending_goal_ids.discard(item.job_id)
+                duplicate_active = item.job_id in self._goals
+            if duplicate_active:
+                self.lab_logger().warning(
+                    f"[Host Node] Duplicate goal rejection ignored: "
+                    f"{item.action_name} ({item.job_id})"
+                )
+                return
             self.lab_logger().warning(f"[Host Node] Goal {item.action_name} ({item.job_id}) rejected")
             return_info = serialize_result_info("ROS goal rejected", False, {})
             for bridge in self.bridges:
@@ -1490,8 +1515,10 @@ class HostNode(BaseROS2DeviceNode):
             return
 
         self.lab_logger().info(f"[Host Node] Goal {action_id} ({item.job_id}) accepted")
+        with self._goals_lock:
+            self._pending_goal_ids.discard(item.job_id)
+            self._goals[item.job_id] = goal_handle
         self._publish_job_started(item)
-        self._goals[item.job_id] = goal_handle
         goal_future = goal_handle.get_result_async()
         goal_future.add_done_callback(lambda f: self.get_result_callback(item, action_id, f))
         goal_future.result()
@@ -1568,8 +1595,9 @@ class HostNode(BaseROS2DeviceNode):
                 self.lab_logger().trace(f"[Host Node] Result data: {result_data}")
 
             # 清理 _goals 中的记录
-            if job_id in self._goals:
-                del self._goals[job_id]
+            with self._goals_lock:
+                removed_goal = self._goals.pop(job_id, None)
+            if removed_goal is not None:
                 self.lab_logger().trace(f"[Host Node] Removed goal {job_id[:8]} from _goals")
 
             # 存储结果供 HTTP API 查询
@@ -1601,8 +1629,8 @@ class HostNode(BaseROS2DeviceNode):
             self.lab_logger().error(traceback.format_exc())
 
             # 清理 _goals 中的记录
-            if job_id in self._goals:
-                del self._goals[job_id]
+            with self._goals_lock:
+                self._goals.pop(job_id, None)
 
             # 发布失败状态
             for bridge in self.bridges:
