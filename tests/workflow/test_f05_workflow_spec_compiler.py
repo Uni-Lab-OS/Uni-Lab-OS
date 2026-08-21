@@ -78,6 +78,7 @@ def _task_snapshot(
         "site": None,
         "slot_range": None,
         "flow_role": "primary_sample",
+        "custody_policy": "task_exclusive",
     }
     if custody_policy is not None:
         source_selector["custody_policy"] = custody_policy

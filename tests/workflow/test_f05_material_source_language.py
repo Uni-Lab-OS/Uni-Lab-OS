@@ -7,7 +7,9 @@ from collections.abc import Mapping
 import pytest
 
 from unilabos.workflow.authoring import (
+    MATERIAL_CUSTODY_POLICY_LABELS_ZH,
     MATERIAL_FLOW_ROLE_LABELS_ZH,
+    MaterialCustodyPolicy,
     MaterialFlowRole,
     material_source,
     resource_ref,
@@ -37,6 +39,19 @@ def test_material_flow_role_is_a_closed_immutable_chinese_catalog() -> None:
         MATERIAL_FLOW_ROLE_LABELS_ZH["primary_sample"] = "可变标签"  # type: ignore[index]
 
 
+def test_material_custody_policy_is_a_closed_immutable_chinese_catalog() -> None:
+    """物料占用策略必须只包含 Task 独占和动作期间共享两种 wire 值。"""
+
+    expected_labels = {
+        "task_exclusive": "Task 全程独占",
+        "shared_source": "动作期间共享",
+    }
+    assert dict(MATERIAL_CUSTODY_POLICY_LABELS_ZH) == expected_labels
+    assert {policy.value for policy in MaterialCustodyPolicy} == set(expected_labels)
+    with pytest.raises(TypeError):
+        MATERIAL_CUSTODY_POLICY_LABELS_ZH["shared_source"] = "可变标签"  # type: ignore[index]
+
+
 def test_material_source_markers_are_compile_only() -> None:
     """物料来源（MaterialSource）标记不得被误当成运行时物料权威。
 
@@ -59,4 +74,5 @@ def test_material_source_markers_are_compile_only() -> None:
             site=None,
             slot_range=None,
             flow_role=MaterialFlowRole.PRIMARY_SAMPLE,
+            custody_policy=MaterialCustodyPolicy.TASK_EXCLUSIVE,
         )

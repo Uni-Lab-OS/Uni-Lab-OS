@@ -71,6 +71,23 @@ def _device_dispatch_state(host_node: Any, device_id: str) -> tuple[str, List[st
     return block_reason, command_ids
 
 
+def _device_command_belongs_to_job(device_command_id: str, job_uuid: str) -> bool:
+    """校验设备命令属于目标 Job；允许受控组合动作追加一层子命令身份。"""
+
+    root_command_id = f"workflow-node-job:{job_uuid}"
+    if device_command_id == root_command_id:
+        return True
+    prefix = root_command_id + ":"
+    if not device_command_id.startswith(prefix):
+        return False
+    child_identity = device_command_id[len(prefix) :]
+    return 0 < len(child_identity) <= 128 and all(
+        character.isascii()
+        and (character.isalnum() or character in {"-", "_", "."})
+        for character in child_identity
+    )
+
+
 def _registration_action_mappings(
     host_node: Any,
     device_id: str,
@@ -705,7 +722,7 @@ class EdgeControlClient(BaseCommunicationClient):
         reason = str(payload["reason"] or "").strip()
         if (
             not local_device_id
-            or device_command_id != f"workflow-node-job:{job_uuid}"
+            or not _device_command_belongs_to_job(device_command_id, job_uuid)
             or payload["resolution"] != "canceled"
             or not reason
         ):
@@ -722,6 +739,7 @@ class EdgeControlClient(BaseCommunicationClient):
         )
         if (
             not isinstance(result, dict)
+            or result.get("command_id") != device_command_id
             or result.get("resolution_committed") is not True
             or result.get("previous_state") != "UNKNOWN"
             or result.get("state") != "CANCELED"

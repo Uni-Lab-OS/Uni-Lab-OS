@@ -70,6 +70,7 @@ def _goal_material_source() -> str:
     return f'''from lab.devices import Reactor
 from lab.resources import plate_96
 from unilabos.workflow.authoring import (
+    MaterialCustodyPolicy,
     MaterialFlowRole,
     device,
     material_source,
@@ -93,6 +94,7 @@ def material_round_trip():
         site=None,
         slot_range=None,
         flow_role=MaterialFlowRole.PRIMARY_SAMPLE,
+        custody_policy=MaterialCustodyPolicy.TASK_EXCLUSIVE,
     )
     # unilab:node_uuid={PREPARE_NODE_UUID}
     processed_plate = reactor.process_plate(plate=plate)

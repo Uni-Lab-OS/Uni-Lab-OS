@@ -107,7 +107,12 @@ from unilabos.utils.tracing import (
     start_detached_span,
     submit_with_context,
 )
-from unilabos.utils.type_check import get_type_class, TypeEncoder, get_result_info_str
+from unilabos.utils.type_check import (
+    UNILABOS_REFERENCE_UUID_ATTR,
+    TypeEncoder,
+    get_result_info_str,
+    get_type_class,
+)
 from unilabos.utils.exception import DeviceActionError
 
 if TYPE_CHECKING:
@@ -145,11 +150,29 @@ def _stable_resource_uuid(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("uuid") or value.get("unilabos_uuid") or value.get("id") or "")
     return str(
-        getattr(value, "unilabos_uuid", None)
+        getattr(value, UNILABOS_REFERENCE_UUID_ATTR, None)
+        or getattr(value, "unilabos_uuid", None)
         or getattr(value, "uuid", None)
         or getattr(value, "id", None)
         or ""
     )
+
+
+def _bind_resource_reference_uuid(value: Any, reference_uuid: str) -> Any:
+    """把 Backend 权威 UUID 绑定到本地资源实例且不覆盖运行时 UUID。"""
+
+    normalized = str(reference_uuid).strip()
+    if not normalized or isinstance(value, dict):
+        return value
+    existing = str(
+        getattr(value, UNILABOS_REFERENCE_UUID_ATTR, None) or ""
+    ).strip()
+    if existing and existing != normalized:
+        raise ValueError(
+            f"本地资源实例映射到多个权威 UUID: {existing}, {normalized}"
+        )
+    setattr(value, UNILABOS_REFERENCE_UUID_ATTR, normalized)
+    return value
 
 
 def _production_runtime_uuid(value: Any) -> str:
@@ -3028,7 +3051,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
 
         return execute_callback
 
-    def _execute_driver_command(self, string: str):
+    def _execute_driver_command(self, string: str) -> Any:
         try:
             target = json.loads(string)
         except Exception as ex:
@@ -3156,7 +3179,45 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                                 raise JsonCommandInitError(f"ResourceSlot列表参数转换失败: {arg_name}")
 
             # todo: 默认反报送
-            return function(**function_args)
+            result = function(**function_args)
+            if not inspect.isawaitable(result):
+                return result
+
+            # 同步 JSON Action 由 ROS executor 的工作线程调用，但 HostNode
+            # 等系统设备会暴露 async 动作。必须把 awaitable 提交给
+            # ROS2DeviceNode 共享事件循环并等待真实结果，否则调用方
+            # 会收到 coroutine 对象，而动作本身完全不会执行。
+            loop = ROS2DeviceNode.get_asyncio_loop()
+            if loop is None or loop.is_closed() or not loop.is_running():
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise RuntimeError(
+                    f"异步设备动作 {function_name} 执行失败："
+                    "ROS2 asyncio 事件循环未运行"
+                )
+
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise RuntimeError(
+                    f"异步设备动作 {function_name} 执行失败："
+                    "不能在 ROS2 asyncio 事件循环线程内同步等待"
+                )
+
+            async def await_driver_result() -> Any:
+                return await result
+
+            future = asyncio.run_coroutine_threadsafe(await_driver_result(), loop)
+            try:
+                return future.result()
+            except BaseException:
+                if not future.done():
+                    future.cancel()
+                raise
         except KeyError as ex:
             raise JsonCommandInitError(
                 f"执行动作时JSON缺少function_name或function_args: {ex}\n原JSON: {string}\n{traceback.format_exc()}"
@@ -3299,7 +3360,7 @@ class BaseROS2DeviceNode(Node, Generic[T]):
                     break
             if found is None:
                 raise Exception(f"未能在已解析的资源树中找到 uuid={uuid} 对应的资源")
-            mapped_plr_resources.append(found)
+            mapped_plr_resources.append(_bind_resource_reference_uuid(found, uuid))
 
         return mapped_plr_resources
 
@@ -3317,13 +3378,25 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             names = [t.root_node.res_content.name for t in tree_set.trees]
             raise ValueError(f"单物料输入要求恰好一个根物料，实际得到 {len(tree_set.trees)} 个根：{names}")
         plr = tree_set.to_plr_resources()[0]
+        root_content = tree_set.trees[0].root_node.res_content
+        root_reference_uuid = str(
+            getattr(root_content, "uuid", None)
+            or getattr(root_content, "unilabos_uuid", None)
+            or ""
+        ).strip()
         res = self.resource_tracker.figure_resource(plr, try_mode=True)
         if len(res) == 1:
-            return res[0]
+            return _bind_resource_reference_uuid(
+                res[0],
+                root_reference_uuid,
+            )
         if len(res) > 1:
             raise ValueError(f"单物料输入索引到多个本地实例：{res}")
         self.lab_logger().warning(f"单物料 list 输入未索引到本地实例，使用装配实例：{getattr(plr, 'name', plr)}")
-        return plr
+        return _bind_resource_reference_uuid(
+            plr,
+            root_reference_uuid,
+        )
 
     async def _execute_driver_command_async(self, string: str):
         try:
@@ -3512,13 +3585,18 @@ class BaseROS2DeviceNode(Node, Generic[T]):
             raise ValueError(f"资源转换得到多个实例: {res}")
 
         if parent_context is None or parent_context.parent_uuid is None:
-            return resolved_resource
-        return resolve_resource_slot_target(
+            return (
+                _bind_resource_reference_uuid(resolved_resource, target_uuid)
+                if target_uuid is not None
+                else resolved_resource
+            )
+        resolved_target = resolve_resource_slot_target(
             target_uuid,
             source_root=plr_resource,
             resolved_root=resolved_resource,
             resource_tracker=self.resource_tracker,
         )
+        return _bind_resource_reference_uuid(resolved_target, target_uuid)
 
     # 异步上下文管理方法
     async def __aenter__(self):

@@ -1,0 +1,377 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: xiongyanfei
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unilabos-szlab-runtime-graph
+  namespace: xiongyanfei
+data:
+  prepare_runtime_graph.py: |
+    import json
+    import socket
+    import time
+    from pathlib import Path
+
+    for _ in range(150):
+        try:
+            with socket.create_connection(("plc-sim", 4855), timeout=2):
+                break
+        except OSError:
+            time.sleep(2)
+    else:
+        raise SystemExit("等待 plc-sim:4855 超时")
+
+    source = Path(
+        "/opt/runtime-src/szlab/deployment/graphs/szlab-local-debug.json"
+    )
+    destination = Path("/runtime-graphs/szlab-local-debug.json")
+    graph = json.loads(source.read_text(encoding="utf-8"))
+
+    def unique_node(node_id: str) -> dict:
+        nodes = [node for node in graph["nodes"] if node.get("id") == node_id]
+        if len(nodes) != 1:
+            raise SystemExit(f"运行图必须包含唯一的 {node_id} 节点")
+        return nodes[0]
+
+    unique_node("szlab_poly_plc").setdefault("config", {})["url"] = (
+        "opc.tcp://plc-sim:4855"
+    )
+    unique_node("szlab_mixer_robot").setdefault("config", {})[
+        "standard_journal_path"
+    ] = "/runtime/edge/szlab_robot_commands.sqlite3"
+    destination.write_text(
+        json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unilabos-local-debug
+  namespace: xiongyanfei
+  labels:
+    app.kubernetes.io/name: unilabos-local-debug
+    app.kubernetes.io/component: workspace-backend
+    app.kubernetes.io/part-of: uni-lab-szlab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: unilabos-local-debug
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: unilabos-local-debug
+        app.kubernetes.io/component: workspace-backend
+        app.kubernetes.io/part-of: uni-lab-szlab
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 57439
+        runAsGroup: 57439
+        fsGroup: 57439
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-szlab-runtime-graph
+          image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
+          imagePullPolicy: Never
+          command: [/opt/conda/bin/python]
+          args: [/config/prepare_runtime_graph.py]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime-graph-config
+              mountPath: /config
+              readOnly: true
+            - name: runtime-graphs
+              mountPath: /runtime-graphs
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: workspace-backend
+          image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
+          imagePullPolicy: Never
+          args:
+            - unilab
+            - --workspace
+            - /opt/runtime-src/szlab
+            - --graph
+            - /opt/runtime-src/szlab/deployment/graphs/szlab-local-debug.json
+            - --config
+            - /opt/runtime-src/szlab/deployment/local_config.py
+            - --working_dir
+            - /runtime/backend
+            - --preserve_runtime_databases
+            - --process_role
+            - workspace_backend
+            - --control_plane
+            - local
+            - --backend
+            - ros
+            - --app_bridges
+            - fastapi
+            - --port
+            - "18003"
+            - --disable_browser
+            - --action_mode
+            - real
+            - --external_devices_only
+            - --ros_discovery_server
+            - "off"
+          env:
+            - name: UNILABOS_EDGECONTROLCONFIG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: unilabos-local-control
+                  key: api-key
+            - name: UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR
+              value: http://unilabos-local-debug:18003
+            - name: UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR
+              value: http://unilabos-local-debug:18003
+            - name: UNILABOS_EDGECONTROLCONFIG_EDGE_KEY
+              value: xiongyanfei-szlab-local
+            - name: ROS_DOMAIN_ID
+              value: "78"
+            - name: ROS_LOCALHOST_ONLY
+              value: "0"
+            - name: HOME
+              value: /runtime/backend/home
+            - name: ROS_LOG_DIR
+              value: /runtime/backend/ros-logs
+          ports:
+            - name: http
+              containerPort: 18003
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime
+              mountPath: /runtime
+            - name: runtime-graphs
+              mountPath: /opt/runtime-src/szlab/deployment/graphs
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: runtime
+          emptyDir: {}
+        - name: runtime-graph-config
+          configMap:
+            name: unilabos-szlab-runtime-graph
+            defaultMode: 0444
+        - name: runtime-graphs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unilabos-local-edge
+  namespace: xiongyanfei
+  labels:
+    app.kubernetes.io/name: unilabos-local-edge
+    app.kubernetes.io/component: edge-runtime
+    app.kubernetes.io/part-of: uni-lab-szlab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: unilabos-local-edge
+      app.kubernetes.io/component: edge-runtime
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: unilabos-local-edge
+        app.kubernetes.io/component: edge-runtime
+        app.kubernetes.io/part-of: uni-lab-szlab
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 57439
+        runAsGroup: 57439
+        fsGroup: 57439
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-szlab-runtime-graph
+          image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
+          imagePullPolicy: Never
+          command: [/opt/conda/bin/python]
+          args: [/config/prepare_runtime_graph.py]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime-graph-config
+              mountPath: /config
+              readOnly: true
+            - name: runtime-graphs
+              mountPath: /runtime-graphs
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: edge-runtime
+          image: unilabos-szlab-local-debug:1f421617-8543f1a-r2
+          imagePullPolicy: Never
+          args:
+            - unilab
+            - --workspace
+            - /opt/runtime-src/szlab
+            - --graph
+            - /opt/runtime-src/szlab/deployment/graphs/szlab-local-debug.json
+            - --config
+            - /opt/runtime-src/szlab/deployment/local_config.py
+            - --working_dir
+            - /runtime/edge
+            - --process_role
+            - edge_runtime
+            - --control_plane
+            - local
+            - --backend
+            - ros
+            - --app_bridges
+            - edge_control
+            - --port
+            - "0"
+            - --disable_browser
+            - --action_mode
+            - real
+            - --external_devices_only
+            - --ros_discovery_server
+            - "off"
+          env:
+            - name: UNILABOS_EDGECONTROLCONFIG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: unilabos-local-control
+                  key: api-key
+            - name: UNILABOS_EDGECONTROLCONFIG_BACKEND_ADDR
+              value: http://unilabos-local-debug:18003
+            - name: UNILABOS_EDGECONTROLCONFIG_SCHEDULER_ADDR
+              value: http://unilabos-local-debug:18003
+            - name: UNILABOS_EDGECONTROLCONFIG_EDGE_KEY
+              value: xiongyanfei-szlab-local
+            - name: UNILABOS_EDGECONTROLCONFIG_STATE_DB
+              value: /runtime/edge/edge_control.db
+            - name: UNILABOS_WORKBENCH_PROCESS_ROLE
+              value: edge_runtime
+            - name: UNILABOS_EDGE_READY_FILE
+              value: /runtime/edge/ready.json
+            - name: ROS_DOMAIN_ID
+              value: "78"
+            - name: ROS_LOCALHOST_ONLY
+              value: "0"
+            - name: HOME
+              value: /runtime/edge/home
+            - name: ROS_LOG_DIR
+              value: /runtime/edge/ros-logs
+          startupProbe:
+            exec:
+              command: [/bin/sh, -ec, test -f /runtime/edge/ready.json]
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            exec:
+              command: [/bin/sh, -ec, test -f /runtime/edge/ready.json]
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: [/bin/sh, -ec, kill -0 1]
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime
+              mountPath: /runtime
+            - name: runtime-graphs
+              mountPath: /opt/runtime-src/szlab/deployment/graphs
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: runtime
+          emptyDir: {}
+        - name: runtime-graph-config
+          configMap:
+            name: unilabos-szlab-runtime-graph
+            defaultMode: 0444
+        - name: runtime-graphs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: unilabos-local-debug
+  namespace: xiongyanfei
+  labels:
+    app.kubernetes.io/name: unilabos-local-debug
+    app.kubernetes.io/component: workspace-backend
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: unilabos-local-debug
+    app.kubernetes.io/component: workspace-backend
+  ports:
+    - name: http
+      port: 18003
+      targetPort: http
+      nodePort: 30183
