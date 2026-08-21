@@ -2053,6 +2053,15 @@ def _workflow_import_payload(
     source_template_names: Mapping[str, str],
     resource_template_identities: Mapping[str, str],
 ) -> dict[str, Any]:
+    """把本地工作流图转换成 Backend 导入载荷。
+
+    参数说明：``graph`` 是已移除本地视觉分组的工作流图；``release`` 提供发布
+    身份；各 ``*_identities`` 映射把本地工作流、物料和资源模板身份替换为目标
+    Backend 身份；``source_template_names`` 用于按稳定资源名解析动作模板。
+    返回值是可直接提交 ``POST /api/v1/workflows/import`` 的纯 JSON 对象。
+    当组合依赖、物料身份、Handle 或必填输入无法确定性映射时抛出
+    ``WorkspaceHostError``，不得发布部分或含糊的执行图。
+    """
     workflow_template_identities = workflow_template_identities or {}
     workflow = _mapping(graph.get("workflow"), "workflow")
     node_templates = {
@@ -2096,9 +2105,30 @@ def _workflow_import_payload(
     }
     nodes: list[dict[str, Any]] = []
     for source_node in _mapping_list(graph.get("nodes")):
+        source_template_uuid = str(
+            source_node.get("workflow_node_template_uuid") or ""
+        )
+        source_template = node_templates.get(source_template_uuid)
+        executor_kind = str(
+            _mapping_or_empty(source_template).get("executor_kind")
+            or _mapping_or_empty(
+                _mapping_or_empty(
+                    _mapping_or_empty(source_template).get("meta_data")
+                ).get("unilab")
+            ).get("executor_kind")
+            or ""
+        ).strip()
         node = _replace_identities(
             deepcopy(dict(source_node)), preimport_replacements
         )
+        # 本地读模型仍把 HostNode.transfer_resource 表示为 ``device_action``，
+        # 但 Backend 的原子物料转运合同要求对应节点使用受信任的 ILab seam。
+        if (
+            str(source_node.get("type") or "").strip().casefold()
+            == "device_action"
+            and executor_kind == "material_transfer"
+        ):
+            node["type"] = "ILab"
         node.pop("create_time", None)
         node.pop("update_time", None)
         node.pop("workflow_uuid", None)
@@ -2145,9 +2175,6 @@ def _workflow_import_payload(
                     preimport_replacements,
                 )
         if str(source_node.get("type") or "").strip().casefold() != "workflow":
-            source_template_uuid = str(
-                source_node.get("workflow_node_template_uuid") or ""
-            )
             for handle in handles_by_template.get(source_template_uuid, []):
                 if (
                     str(handle.get("io_type") or "").strip().casefold()

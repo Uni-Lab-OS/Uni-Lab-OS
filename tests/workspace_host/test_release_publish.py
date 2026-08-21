@@ -1660,6 +1660,107 @@ def test_workflow_import_omits_visual_group_nodes() -> None:
     assert payload["nodes"] == []
 
 
+def test_workflow_import_promotes_device_action_to_backend_ilab() -> None:
+    """验证发布时把遗留设备动作类型升级为带固定执行器绑定的 Backend ILab。"""
+
+    release = WorkspaceRelease(
+        release_id="sha256:release-device-action-ilab",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {"uuid": "source-workflow", "name": "source"},
+        "node_templates": [
+            {
+                "uuid": "transfer-template",
+                "name": "transfer_resource",
+                "executor_kind": "material_transfer",
+            }
+        ],
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "action-node",
+                "workflow_node_template_uuid": "transfer-template",
+                "name": "pick",
+                "type": "device_action",
+                "param": {},
+                "meta_data": {
+                    "unilab": {
+                        "executor_binding": {
+                            "mode": "fixed",
+                            "device_id": "source-device",
+                        }
+                    }
+                },
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={},
+        material_identities={"source-device": "target-device"},
+        source_template_names={},
+        resource_template_identities={},
+    )
+
+    assert payload["nodes"][0]["type"] == "ILab"
+    assert payload["nodes"][0]["meta_data"]["unilab"]["executor_binding"] == {
+        "mode": "fixed",
+        "device_id": "target-device",
+    }
+
+
+def test_workflow_import_keeps_regular_device_action_kind() -> None:
+    """验证普通设备动作仍由 Edge 调度，不会误升级为 Backend ILab。"""
+
+    release = WorkspaceRelease(
+        release_id="sha256:release-regular-device-action",
+        source_workspace="/workspace",
+        templates=(),
+        material_graph={"nodes": []},
+        workflows=(),
+    )
+    graph = {
+        "workflow": {"uuid": "source-workflow", "name": "source"},
+        "node_templates": [
+            {
+                "uuid": "device-template",
+                "name": "inspect",
+                "executor_kind": "device_action",
+            }
+        ],
+        "handle_templates": [],
+        "nodes": [
+            {
+                "uuid": "action-node",
+                "workflow_node_template_uuid": "device-template",
+                "name": "inspect",
+                "type": "device_action",
+                "param": {},
+                "meta_data": {},
+            }
+        ],
+        "edges": [],
+    }
+
+    payload = _workflow_import_payload(
+        graph,
+        release=release,
+        workflow_identities={},
+        material_identities={},
+        source_template_names={},
+        resource_template_identities={},
+    )
+
+    assert payload["nodes"][0]["type"] == "device_action"
+
+
 def test_workflow_verification_treats_local_ilab_as_backend_device_action() -> None:
     source = {
         "workflow": {"name": "source"},
