@@ -273,6 +273,11 @@ def test_material_source_framework_projects_site_selector_contract(
         template_schema["properties"]["site"]["x-unilabos-site-selector"]
         == expected_selector
     )
+    assert template_schema["properties"]["custody_policy"] == {
+        "type": "string",
+        "enum": ["task_exclusive", "shared_source"],
+    }
+    assert "custody_policy" in template_schema["required"]
 
 
 def test_registry_projects_one_stable_group_framework_template(tmp_path: Path) -> None:

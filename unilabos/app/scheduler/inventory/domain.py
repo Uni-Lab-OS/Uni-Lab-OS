@@ -216,6 +216,23 @@ class MaterialRequirement:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MaterialSourceAdmissionRequest:
+    """一个物料来源（MaterialSource）的任务准入请求。
+
+    参数：``node_id`` 是来源节点身份，``resource_template_uuid`` 是候选物料
+    必须匹配的资源模板，``custody_policy`` 只能是规范线值
+    ``task_exclusive`` 或 ``shared_source``，``requirement`` 描述固定实例或库位
+    选择器。返回：该不可变值对象只承载准入意图。异常：结构与策略校验由库存
+    权威（Inventory Authority）的单事务准入入口统一失败关闭。
+    """
+
+    node_id: str
+    resource_template_uuid: str
+    custody_policy: str
+    requirement: MaterialRequirement
+
+
 @dataclass
 class OutboxEvent:
     """同步事件 envelope（sequence 由 store 落库时分配）."""

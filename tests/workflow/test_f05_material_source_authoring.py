@@ -64,17 +64,18 @@ def _material_source_template() -> tuple[dict[str, Any], dict[str, Any]]:
     return template, handle
 
 
-def _engine() -> WorkflowAuthoringEngine:
+def _engine(*, action_name: str = "prepare") -> WorkflowAuthoringEngine:
     """创建含物料来源与消费动作的纯创作编译器。
 
-    参数：无。返回：冻结资源模板源码符号双向身份的工作流创作编译器
+    参数：``action_name`` 是唯一消费动作的稳定业务名。返回：
+    冻结资源模板源码符号双向身份的工作流创作编译器
     （Authoring Compiler）。
     """
 
     source_template, source_handle = _material_source_template()
     prepare_template, prepare_handles = _template(
         PREPARE_TEMPLATE_UUID,
-        name="prepare",
+        name=action_name,
         handles=[
             _handle(
                 PREPARE_SAMPLE_TARGET,
@@ -99,18 +100,23 @@ def _source(
     mode: str = "existing",
     material_uuid: str | None = None,
     flow_role: str = "PRIMARY_SAMPLE",
+    custody_policy: str = "TASK_EXCLUSIVE",
+    action_name: str = "prepare",
 ) -> str:
     """生成一个物料来源向动作线性传递的作者源码。
 
-    参数说明：``mode``、``material_uuid`` 与 ``flow_role`` 分别控制选择器
-    模式、固定物料身份和物料流角色（MaterialFlowRole）。返回：只含静态
-    创作语法的 Python 文本。
+    参数说明：``mode``、``material_uuid``、``flow_role`` 与
+    ``custody_policy`` 分别控制选择器模式、固定物料身份、物料流
+    角色（MaterialFlowRole）和候选物料保管策略（MaterialCustodyPolicy）；
+    ``action_name`` 选择唯一消费动作。
+    返回：只含静态创作语法的 Python 文本。
     """
 
     material_literal = "None" if material_uuid is None else repr(material_uuid)
     return f'''from lab.devices import Reactor
 from lab.resources import plate_96
 from unilabos.workflow.authoring import (
+    MaterialCustodyPolicy,
     MaterialFlowRole,
     device,
     material_source,
@@ -134,9 +140,10 @@ def material_assay():
         site=None,
         slot_range=None,
         flow_role=MaterialFlowRole.{flow_role},
+        custody_policy=MaterialCustodyPolicy.{custody_policy},
     )
     # unilab:node_uuid={PREPARE_NODE_UUID}
-    prepared = reactor.prepare(sample=assay_plate)
+    prepared = reactor.{action_name}(sample=assay_plate)
     return workflow_output()
 '''
 
@@ -180,6 +187,7 @@ def test_material_source_compiles_to_backend_shaped_selector_and_edge() -> None:
         "site": None,
         "slot_range": None,
         "flow_role": "primary_sample",
+        "custody_policy": "task_exclusive",
     }
     assert len(compiled.graph["edges"]) == 1
     assert {
@@ -199,11 +207,32 @@ def test_material_source_compiles_to_backend_shaped_selector_and_edge() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "material_uuid", "role_member", "role_value"),
+    ("mode", "material_uuid", "role_member", "role_value", "policy_member", "policy_value"),
     [
-        ("existing", FIXED_MATERIAL_UUID, "ALIQUOT_SAMPLE", "aliquot_sample"),
-        ("existing", None, "REAGENT", "reagent"),
-        ("create_new", None, "CONSUMABLE", "consumable"),
+        (
+            "existing",
+            FIXED_MATERIAL_UUID,
+            "ALIQUOT_SAMPLE",
+            "aliquot_sample",
+            "TASK_EXCLUSIVE",
+            "task_exclusive",
+        ),
+        (
+            "existing",
+            None,
+            "REAGENT",
+            "reagent",
+            "SHARED_SOURCE",
+            "shared_source",
+        ),
+        (
+            "create_new",
+            None,
+            "CONSUMABLE",
+            "consumable",
+            "TASK_EXCLUSIVE",
+            "task_exclusive",
+        ),
     ],
 )
 def test_material_source_selector_matrix_reaches_python_graph_fixed_point(
@@ -211,11 +240,14 @@ def test_material_source_selector_matrix_reaches_python_graph_fixed_point(
     material_uuid: str | None,
     role_member: str,
     role_value: str,
+    policy_member: str,
+    policy_value: str,
 ) -> None:
     """合法选择器矩阵应确定生成源码并重新编译为同一候选图。
 
-    参数说明：四个参数分别描述模式、固定物料、枚举成员和 wire 值。
-    返回：无；断言选择器、规范源码和 Python↔图语义固定点。
+    参数说明：六个参数分别描述模式、固定物料、物料流角色枚举/
+    wire 值与物料保管策略枚举/wire 值。返回：无；断言选择器、
+    规范源码和 Python↔图语义固定点。
     """
 
     engine = _engine()
@@ -223,6 +255,7 @@ def test_material_source_selector_matrix_reaches_python_graph_fixed_point(
         mode=mode,
         material_uuid=material_uuid,
         flow_role=role_member,
+        custody_policy=policy_member,
     )
     compiled = engine.compile(
         workflow_uuid=WORKFLOW_UUID,
@@ -237,9 +270,13 @@ def test_material_source_selector_matrix_reaches_python_graph_fixed_point(
         node for node in compiled.graph["nodes"] if node["type"] == "material_source"
     )
     assert source_node["param"]["flow_role"] == role_value
+    assert source_node["param"]["custody_policy"] == policy_value
     assert source_node["param"]["material_uuid"] == material_uuid
     assert compiled.normalized_python_source is not None
     assert f"flow_role=MaterialFlowRole.{role_member}" in (
+        compiled.normalized_python_source
+    )
+    assert f"custody_policy=MaterialCustodyPolicy.{policy_member}" in (
         compiled.normalized_python_source
     )
     assert "resource_template=plate_96" in compiled.normalized_python_source
@@ -328,4 +365,30 @@ def test_unknown_resource_template_symbol_fails_closed_without_importing() -> No
     assert result.graph is None
     assert [item["code"] for item in result.diagnostics] == [
         "template_catalog_mismatch"
+    ]
+
+
+def test_shared_source_reaching_movement_action_fails_closed() -> None:
+    """共享来源不得把原始物料身份传递给移动动作。
+
+    参数：无。返回：无；通过创作编译公共接缝断言 ``pick`` 必须返回
+    稳定 ``shared_source_movement_forbidden`` 诊断，且不产生候选图。
+    """
+
+    engine = _engine(action_name="pick")
+    result = engine.compile(
+        workflow_uuid=WORKFLOW_UUID,
+        workflow_revision=7,
+        python_source=_source(
+            custody_policy="SHARED_SOURCE",
+            action_name="pick",
+        ),
+        source_uri="package://lab/workflows/material_assay.py",
+        applied_graph=_applied_graph(),
+    )
+
+    assert not result.valid
+    assert result.graph is None
+    assert [item["code"] for item in result.diagnostics] == [
+        "shared_source_movement_forbidden"
     ]

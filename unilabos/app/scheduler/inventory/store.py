@@ -13,7 +13,7 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class InvalidCursorAdvance(ValueError):
@@ -894,6 +894,34 @@ _SCHEMA_V7_RESOURCE_TEMPLATE_AVAILABLE_SITES = (
     "AND json_type(available_sites) = 'array')"
 )
 
+# v8：物料来源（MaterialSource）在任务准入时冻结具体物料绑定。任务全程独占
+# 仍由 inventory_reservation 持有；共享来源只写本表，动作执行期互斥由调度器的
+# 物料执行锁/声明负责。selector_json 用于幂等重放时拒绝同一任务尝试偷换选择器。
+_SCHEMA_V8_MATERIAL_SOURCE_BINDING = """
+CREATE TABLE IF NOT EXISTS inventory_material_source_binding (
+    binding_id             TEXT PRIMARY KEY,
+    workflow_id            TEXT NOT NULL,
+    node_id                TEXT NOT NULL,
+    attempt                INTEGER NOT NULL DEFAULT 1,
+    material_uuid          TEXT NOT NULL,
+    resource_template_uuid TEXT NOT NULL,
+    custody_policy         TEXT NOT NULL
+        CHECK (custody_policy IN ('task_exclusive', 'shared_source')),
+    selector_json          TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(selector_json)),
+    status                 TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'released')),
+    created_at             INTEGER NOT NULL DEFAULT 0,
+    released_at            INTEGER,
+    version                INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (workflow_id, node_id, attempt)
+);
+CREATE INDEX IF NOT EXISTS idx_material_source_binding_material
+    ON inventory_material_source_binding(material_uuid, custody_policy, status);
+CREATE INDEX IF NOT EXISTS idx_material_source_binding_workflow
+    ON inventory_material_source_binding(workflow_id, attempt, status);
+"""
+
 # v2：实验室操作系统布局层（元信息 / 分区 / 2D 摆放）。
 # 只增表不改旧表，v1 库可原地升级。
 _SCHEMA_V2 = """
@@ -1032,6 +1060,8 @@ class InventoryStore:
                     self._conn.execute(
                         _SCHEMA_V7_RESOURCE_TEMPLATE_AVAILABLE_SITES
                     )
+            if current < 8:
+                self._conn.executescript(_SCHEMA_V8_MATERIAL_SOURCE_BINDING)
             if current >= 5:
                 # A development build may have added the v6 column before the
                 # deterministic backfill was introduced; keep this idempotent.

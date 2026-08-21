@@ -14,6 +14,8 @@ from unilabos.workflow.authoring_kernel import (
     AuthoringCatalogSnapshot,
 )
 from unilabos.workflow.material_selector import (
+    MATERIAL_CUSTODY_POLICY_MEMBERS,
+    MATERIAL_CUSTODY_POLICY_VALUES,
     MATERIAL_FLOW_ROLE_MEMBERS,
     MATERIAL_FLOW_ROLE_VALUES,
     MaterialSelectorError,
@@ -34,6 +36,7 @@ from unilabos.workflow.source_identity import (
 _AUTHORING_MODULE = "unilabos.workflow.authoring"
 _MATERIAL_SOURCE = f"{_AUTHORING_MODULE}:material_source"
 _MATERIAL_FLOW_ROLE = f"{_AUTHORING_MODULE}:MaterialFlowRole"
+_MATERIAL_CUSTODY_POLICY = f"{_AUTHORING_MODULE}:MaterialCustodyPolicy"
 _RESOURCE_REF = f"{_AUTHORING_MODULE}:resource_ref"
 _SELECTOR_FIELDS = frozenset(
     {
@@ -44,8 +47,10 @@ _SELECTOR_FIELDS = frozenset(
         "site",
         "slot_range",
         "flow_role",
+        "custody_policy",
     }
 )
+_LEGACY_SELECTOR_FIELDS = _SELECTOR_FIELDS - {"custody_policy"}
 
 
 class MaterialAuthoringError(ValueError):
@@ -79,6 +84,7 @@ class MaterialSourceDeclaration:
     site: str | None
     slot_range: tuple[str, ...] | None
     flow_role: str
+    custody_policy: str
     source_node: ast.Assign
     arguments: tuple[tuple[str, Any], ...] = ()
 
@@ -120,13 +126,14 @@ def parse_material_source_declaration(
         _fail("物料来源必须赋值给一个新名称", statement)
     if call.args:
         _fail("物料来源只接受命名参数", call)
-    # ``keywords`` 是严格七字段选择器；字段缺失、扩展或重复均不能静默兼容。
+    # ``keywords`` 接受当前八字段合同，以及升级前唯一已发布的七字段形状；旧
+    # 形状在本接缝显式迁移为任务全程独占，生成的规范源码永远写回新字段。
     keywords: dict[str, ast.expr] = {}
     for item in call.keywords:
         if item.arg is None or item.arg in keywords:
             _fail("物料来源参数重复或包含 ** 展开", call)
         keywords[item.arg] = item.value
-    if set(keywords) != _SELECTOR_FIELDS:
+    if set(keywords) not in {_SELECTOR_FIELDS, _LEGACY_SELECTOR_FIELDS}:
         _fail("物料来源必须完整声明规范选择器字段", call)
 
     resource_expression = keywords["resource_template"]
@@ -153,6 +160,14 @@ def parse_material_source_declaration(
     if mode == "create_new" and material_uuid is not None:
         _fail("新建物料来源不能预先绑定物料 UUID", keywords["material_uuid"])
     flow_role = _flow_role(keywords["flow_role"], imports=imports)
+    custody_policy = (
+        _custody_policy(
+            keywords["custody_policy"],
+            imports=imports,
+        )
+        if "custody_policy" in keywords
+        else MATERIAL_CUSTODY_POLICY_VALUES["TASK_EXCLUSIVE"]
+    )
     node_uuid = anchors.get(statement.lineno - 1)
     if node_uuid is None:
         _fail("每个物料来源前必须有相邻节点 UUID 锚点", statement)
@@ -169,6 +184,7 @@ def parse_material_source_declaration(
         site=site,
         slot_range=slot_range,
         flow_role=flow_role,
+        custody_policy=custody_policy,
         source_node=statement,
     )
 
@@ -230,6 +246,7 @@ def build_material_source_node(
             list(declaration.slot_range) if declaration.slot_range is not None else None
         ),
         "flow_role": declaration.flow_role,
+        "custody_policy": declaration.custody_policy,
     }
     try:
         selector = validate_material_source_selector(selector)
@@ -315,6 +332,7 @@ def render_material_source_call(
             "资源模板源码身份不能安全生成 Python import",
         ) from error
     role_member = MATERIAL_FLOW_ROLE_MEMBERS[selector["flow_role"]]
+    policy_member = MATERIAL_CUSTODY_POLICY_MEMBERS[selector["custody_policy"]]
     # ``arguments`` 固定字段顺序，确保同一图跨进程生成完全相同的源码。
     # ``resource_refs`` 保留作者使用的部署业务 ID；旧候选没有该元数据时只生成
     # 已冻结 UUID，保证读取兼容且不反向猜测业务名称。
@@ -340,6 +358,7 @@ def render_material_source_call(
         f"site={selector['site']!r}",
         f"slot_range={selector['slot_range']!r}",
         f"flow_role=MaterialFlowRole.{role_member}",
+        f"custody_policy=MaterialCustodyPolicy.{policy_member}",
     ]
     return RenderedMaterialSource(
         resource_import=(module, symbol),
@@ -425,6 +444,31 @@ def _flow_role(
     ):
         _fail("物料流角色必须使用 MaterialFlowRole 规范成员", expression)
     return MATERIAL_FLOW_ROLE_VALUES[expression.attr]
+
+
+def _custody_policy(
+    expression: ast.expr,
+    *,
+    imports: Mapping[str, str],
+) -> str:
+    """把物料保管策略枚举成员解析为 wire 值。
+
+    参数说明：``expression`` 必须是显式导入的
+    ``MaterialCustodyPolicy`` 成员，``imports`` 证明局部名身份。
+    返回：闭集 wire 值；自由字符串或未知成员关闭失败。
+    """
+
+    if (
+        not isinstance(expression, ast.Attribute)
+        or not isinstance(expression.value, ast.Name)
+        or imports.get(expression.value.id) != _MATERIAL_CUSTODY_POLICY
+        or expression.attr not in MATERIAL_CUSTODY_POLICY_VALUES
+    ):
+        _fail(
+            "物料保管策略必须使用 MaterialCustodyPolicy 规范成员",
+            expression,
+        )
+    return MATERIAL_CUSTODY_POLICY_VALUES[expression.attr]
 
 
 def _optional_uuid(expression: ast.expr, *, label: str) -> str | None:

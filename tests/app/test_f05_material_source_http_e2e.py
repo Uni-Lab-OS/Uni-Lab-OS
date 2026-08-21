@@ -120,6 +120,7 @@ def _apply_workflow_graph(
     automatic: bool = False,
     site_uuid: str | None = None,
     slot_uuids: list[str] | None = None,
+    custody_policy: str = "task_exclusive",
 ) -> str:
     """通过共享正式夹具保存本轮物料来源工作流图。
 
@@ -139,6 +140,7 @@ def _apply_workflow_graph(
         automatic=automatic,
         site_uuid=site_uuid,
         slot_uuids=slot_uuids,
+        custody_policy=custody_policy,
     )
 
 
@@ -355,3 +357,96 @@ def test_create_new_fails_closed_without_task_or_material_graph_change(
     assert tasks_after == tasks_before
     assert material_graph_after == material_graph_before
     assert runtime.dispatcher.dispatched == []
+
+
+def test_shared_source_allows_two_live_tasks_and_serializes_actions(
+    runtime: _Runtime,
+) -> None:
+    """共享来源应允许同一工作流并行建任务，并在动作阶段互斥。
+
+    参数：``runtime`` 是真实 HTTP、工作流存储、库存与调度器组合运行时。返回：
+    无；断言两个工作流任务（WorkflowTask）同时完成同一试剂绑定，试剂不进入
+    任务级 ``reserved``，首个动作完成后第二个动作才越过派发边界。异常：公共
+    接口、绑定事务或动作锁失败均由断言暴露。
+    """
+
+    material_template_uuid = _create_resource_template(
+        runtime.client,
+        resource_id="lab.shared-reagent",
+        display_name="共享试剂",
+        registry_type="material",
+    )
+    device_template_uuid = _create_resource_template(
+        runtime.client,
+        resource_id="lab.shared-reagent-reactor",
+        display_name="共享试剂反应器",
+        registry_type="device",
+    )
+    material_uuid = _create_material(
+        runtime.client,
+        resource_template_uuid=material_template_uuid,
+        barcode="F05-SHARED-REAGENT-001",
+        name="共享试剂一号",
+    )
+    device_material_uuid = _create_material(
+        runtime.client,
+        resource_template_uuid=device_template_uuid,
+        barcode="F05-SHARED-REACTOR-001",
+        name="共享试剂反应器一号",
+    )
+    workflow_uuid = _apply_workflow_graph(
+        runtime,
+        material_resource_template_uuid=material_template_uuid,
+        device_resource_template_uuid=device_template_uuid,
+        material_uuid=material_uuid,
+        device_material_uuid=device_material_uuid,
+        mode="existing",
+        custody_policy="shared_source",
+    )
+
+    first = runtime.client.post(
+        "/api/v1/workflow-tasks",
+        json={"workflow_uuid": workflow_uuid, "run_mode": "normal", "meta_data": {}},
+    )
+    second = runtime.client.post(
+        "/api/v1/workflow-tasks",
+        json={"workflow_uuid": workflow_uuid, "run_mode": "normal", "meta_data": {}},
+    )
+
+    assert first.status_code == 201, first.json()
+    assert second.status_code == 201, second.json()
+    first_task_uuid = str(first.json()["data"]["uuid"])
+    second_task_uuid = str(second.json()["data"]["uuid"])
+    first_jobs = runtime.client.get(
+        f"/api/v1/workflow-tasks/{first_task_uuid}/jobs"
+    ).json()["data"]
+    second_jobs = runtime.client.get(
+        f"/api/v1/workflow-tasks/{second_task_uuid}/jobs"
+    ).json()["data"]
+
+    assert first_task_uuid != second_task_uuid
+    assert [job["status"] for job in first_jobs] == ["succeeded", "dispatched"]
+    assert [job["status"] for job in second_jobs] == ["succeeded", "pending"]
+    assert {
+        first_jobs[0]["return_info"]["material"]["custody_policy"],
+        second_jobs[0]["return_info"]["material"]["custody_policy"],
+    } == {"shared_source"}
+    assert runtime.inventory.store.get_instance(material_uuid)["status"] == "warehouse"
+    active_bindings = runtime.inventory.store.query_all(
+        "SELECT workflow_id,material_uuid,custody_policy "
+        "FROM inventory_material_source_binding WHERE status='active' ORDER BY workflow_id"
+    )
+    assert {row["workflow_id"] for row in active_bindings} == {
+        first_task_uuid,
+        second_task_uuid,
+    }
+    assert {row["material_uuid"] for row in active_bindings} == {material_uuid}
+    assert {row["custody_policy"] for row in active_bindings} == {"shared_source"}
+
+    runtime.scheduler.on_job_finished(first_jobs[1]["uuid"], True, {"success": True})
+
+    second_after = runtime.client.get(
+        f"/api/v1/workflow-tasks/{second_task_uuid}/jobs"
+    ).json()["data"]
+    assert second_after[1]["status"] == "dispatched"
+    assert len(runtime.dispatcher.dispatched) == 2

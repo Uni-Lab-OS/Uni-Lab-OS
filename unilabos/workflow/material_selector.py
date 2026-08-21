@@ -7,7 +7,7 @@ from copy import deepcopy
 from types import MappingProxyType
 from typing import Any
 
-from unilabos.workflow.material_source import MaterialFlowRole
+from unilabos.workflow.material_source import MaterialCustodyPolicy, MaterialFlowRole
 from unilabos.workflow.models import validate_uuid
 
 MATERIAL_FLOW_ROLE_VALUES = MappingProxyType(
@@ -15,6 +15,12 @@ MATERIAL_FLOW_ROLE_VALUES = MappingProxyType(
 )
 MATERIAL_FLOW_ROLE_MEMBERS = MappingProxyType(
     {member.value: member.name for member in MaterialFlowRole}
+)
+MATERIAL_CUSTODY_POLICY_VALUES = MappingProxyType(
+    {member.name: member.value for member in MaterialCustodyPolicy}
+)
+MATERIAL_CUSTODY_POLICY_MEMBERS = MappingProxyType(
+    {member.value: member.name for member in MaterialCustodyPolicy}
 )
 
 _SELECTOR_FIELDS = frozenset(
@@ -26,6 +32,7 @@ _SELECTOR_FIELDS = frozenset(
         "site",
         "slot_range",
         "flow_role",
+        "custody_policy",
     }
 )
 
@@ -50,8 +57,9 @@ def validate_material_source_selector(raw_selector: Any) -> dict[str, Any]:
     """校验并分离复制一个完整物料来源选择器。
 
     参数说明：``raw_selector`` 是来自作者源码或直接图的可疑值。返回：UUID、
-    物料流角色（MaterialFlowRole）和库位（Site）选择均规范的副本；结构、模式、
-    角色、库位（Site）/库位（Slot）范围组合非法时抛出
+    物料流角色（MaterialFlowRole）、物料保管策略
+    （MaterialCustodyPolicy）和库位（Site）选择均规范的副本；结构、
+    模式、角色、策略或库位（Site）/库位（Slot）范围组合非法时抛出
     ``MaterialSelectorError``。
     """
 
@@ -89,6 +97,13 @@ def validate_material_source_selector(raw_selector: Any) -> dict[str, Any]:
         or selector["flow_role"] not in MATERIAL_FLOW_ROLE_MEMBERS
     ):
         raise MaterialSelectorError("物料流角色（MaterialFlowRole）不在规范闭集")
+    if (
+        not isinstance(selector["custody_policy"], str)
+        or selector["custody_policy"] not in MATERIAL_CUSTODY_POLICY_MEMBERS
+    ):
+        raise MaterialSelectorError(
+            "物料保管策略（MaterialCustodyPolicy）不在规范闭集"
+        )
     return selector
 
 
@@ -151,6 +166,8 @@ def _optional_slot_range(value: Any) -> list[str] | None:
 
 
 __all__ = [
+    "MATERIAL_CUSTODY_POLICY_MEMBERS",
+    "MATERIAL_CUSTODY_POLICY_VALUES",
     "MATERIAL_FLOW_ROLE_MEMBERS",
     "MATERIAL_FLOW_ROLE_VALUES",
     "MaterialSelectorError",
