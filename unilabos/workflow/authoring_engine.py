@@ -42,7 +42,7 @@ from unilabos.workflow.models import CandidateCompilation, validate_uuid
 from unilabos.workflow.resource_reference import ResourceReferenceResolver
 from unilabos.workflow.source_coordinates import require_utf8_text
 
-_COMPILER_VERSION = "unilabos-authoring/f02a-v2"
+_COMPILER_VERSION = "unilabos-authoring/f02a-v3"
 
 
 class WorkflowAuthoringEngine:

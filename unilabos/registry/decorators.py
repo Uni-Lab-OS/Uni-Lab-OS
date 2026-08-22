@@ -45,6 +45,7 @@ Usage:
             ...
 """
 
+from collections.abc import Mapping
 from enum import Enum
 from functools import wraps
 import re
@@ -56,6 +57,49 @@ from unilabos.resources.site_definition import normalize_available_sites
 
 F = TypeVar("F", bound=Callable[..., Any])
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
+PAYLOAD_CUSTODY_SCHEMA_EXTENSION = "x-unilabos-payload-custody"
+PAYLOAD_CUSTODY_ACCESS_REGION_KEY = "robot-gripper-held-payload"
+
+
+def normalize_payload_custody(value: Mapping[str, Any]) -> Dict[str, Any]:
+    """校验并复制动作级载荷保管声明。
+
+    参数：``value`` 是动作作者提供的静态声明。返回：字段完整且不共享容器的
+    第 1 版声明。异常：字段缺失、多余、类型错误或使用非平台保留区域键时抛出
+    ``TypeError``/``ValueError``，调用方必须关闭式失败。
+    """
+
+    if not isinstance(value, Mapping):
+        raise TypeError("payload_custody 必须是对象")
+    required_fields = {"version", "effect", "input", "output", "region_key"}
+    actual_fields = set(value)
+    if actual_fields != required_fields:
+        raise ValueError("payload_custody 必须且只能包含 version/effect/input/output/region_key")
+    version = value["version"]
+    if type(version) is not int or version != 1:
+        raise ValueError("payload_custody.version 只支持整数 1")
+    effect = value["effect"]
+    if effect not in {"acquire", "deposit"}:
+        raise ValueError("payload_custody.effect 只支持 acquire 或 deposit")
+    input_key = value["input"]
+    output_key = value["output"]
+    if not isinstance(input_key, str) or not input_key.isidentifier():
+        raise ValueError("payload_custody.input 必须是非空 Python 标识符")
+    if not isinstance(output_key, str) or not output_key.isidentifier():
+        raise ValueError("payload_custody.output 必须是非空 Python 标识符")
+    region_key = value["region_key"]
+    if region_key != PAYLOAD_CUSTODY_ACCESS_REGION_KEY:
+        raise ValueError(
+            "payload_custody.region_key 必须使用平台保留值 "
+            f"{PAYLOAD_CUSTODY_ACCESS_REGION_KEY}"
+        )
+    return {
+        "version": version,
+        "effect": effect,
+        "input": input_key,
+        "output": output_key,
+        "region_key": region_key,
+    }
 
 # ---------------------------------------------------------------------------
 # 枚举
@@ -404,6 +448,7 @@ def action(
     action_name: Optional[str] = None,
     displayname: str = "",
     error_policy: Optional[Dict[str, Any]] = None,
+    payload_custody: Optional[Dict[str, Any]] = None,
     estimate_duration_fixed: Optional[float] = 60.0,
     estimate_duration_express: str = "",
 ):
@@ -444,6 +489,9 @@ def action(
                        不填写时由节点类型决定执行器。
         error_policy: 按异常类名匹配审批选项的策略。结构见
                       unilabos.registry.action_policy.ErrorPolicy。
+        payload_custody: 动作级载荷保管声明。``acquire`` 表示夹爪取得物料，
+                         ``deposit`` 表示夹爪完成放料；字段必须显式引用输入、输出
+                         ResourceSlot 连接点和平台保留的访问区域键。
         estimate_duration_fixed: 预计时长兜底值（秒），默认 60 秒；None 表示不提供兜底
         estimate_duration_express: 根据动作入参计算预计时长的中缀表达式
 
@@ -514,6 +562,8 @@ def action(
             if normalized_executor_kind not in allowed_executor_kinds:
                 raise ValueError(f"不支持的 executor_kind: {executor_kind}")
             meta["executor_kind"] = normalized_executor_kind
+        if payload_custody is not None:
+            meta["payload_custody"] = normalize_payload_custody(payload_custody)
         normalized_error_policy = None
         if error_policy:
             from unilabos.registry.action_policy import normalize_error_policy

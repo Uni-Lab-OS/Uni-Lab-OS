@@ -44,6 +44,10 @@ from unilabos.workflow.material_graph_validation import (
     MaterialGraphValidationError,
     validate_material_graph_projection,
 )
+from unilabos.workflow.payload_custody import (
+    PayloadCustodyCompilationError,
+    project_payload_custody_access_regions,
+)
 from unilabos.workflow.resource_reference import (
     ResourceReferenceResolutionError,
     ResourceReferenceResolver,
@@ -426,6 +430,10 @@ def build_candidate_graph(
         "node_templates": projection.node_templates,
         "handle_templates": projection.handle_templates,
     }
+    try:
+        graph = project_payload_custody_access_regions(graph)
+    except PayloadCustodyCompilationError as error:
+        raise AuthoringGraphError(error.code, error.message) from error
     try:
         validate_material_graph_projection(graph)
     except MaterialGraphValidationError as error:

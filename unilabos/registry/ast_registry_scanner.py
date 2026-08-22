@@ -21,7 +21,6 @@ import ast
 import hashlib
 import json
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
@@ -37,7 +36,7 @@ from unilabos.resources.site_definition import normalize_available_sites
 
 MAX_SCAN_DEPTH = 10      # 最大目录递归深度
 MAX_SCAN_FILES = 1000    # 最大扫描文件数量
-_CACHE_VERSION = 10      # 缓存格式版本号，模板库位合同变化时递增
+_CACHE_VERSION = 11      # 缓存格式版本号，动作载荷保管合同变化时递增
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # 合法的装饰器来源模块
@@ -962,6 +961,10 @@ def _extract_class_body(
             contract_diagnostic: Optional[dict] = None
             if typed_action and module is not None and module_name:
                 from unilabos.registry import action_contract_schema
+                from unilabos.registry.decorators import (
+                    PAYLOAD_CUSTODY_SCHEMA_EXTENSION,
+                    normalize_payload_custody,
+                )
 
                 try:
                     parsed_contract = action_contract_schema.parse_action_contract(
@@ -973,6 +976,11 @@ def _extract_class_body(
                         action_name=method_name,
                         description=str(action_args.get("description") or ""),
                     )
+                    raw_payload_custody = action_args.get("payload_custody")
+                    if raw_payload_custody is not None:
+                        canonical_schema[PAYLOAD_CUSTODY_SCHEMA_EXTENSION] = (
+                            normalize_payload_custody(raw_payload_custody)
+                        )
                     canonical_defaults = (
                         action_contract_schema.validate_legacy_action_assertions(
                             canonical_schema,
@@ -990,6 +998,14 @@ def _extract_class_body(
                         "code": error.code,
                         "path": error.path,
                         "message": error.message,
+                    }
+                except (TypeError, ValueError) as error:
+                    # 装饰器扩展不合法时同样撤销规范动作权威，不能丢弃声明后降级。
+                    canonical_schema = None
+                    contract_diagnostic = {
+                        "code": "invalid_payload_custody",
+                        "path": "/payload_custody",
+                        "message": str(error),
                     }
             # 补全 @action 装饰器的默认值（与 decorators.py 中 action() 签名一致）
             action_args.setdefault("action_type", None)
@@ -1010,6 +1026,7 @@ def _extract_class_body(
             action_args.setdefault("estimate_duration_fixed", 60.0)
             action_args.setdefault("estimate_duration_express", "")
             action_args.setdefault("error_policy", None)
+            action_args.setdefault("payload_custody", None)
             if action_args["error_policy"]:
                 from unilabos.registry.action_policy import normalize_error_policy
 
